@@ -14,6 +14,7 @@ workspace.
 - `pczt::ExtractError`
 - `pczt::EffectsOnly`
 - `pczt::orchard::Spend::spend_auth_sig` getter (via `getset`).
+- `pczt::roles::signer::Signer::shielded_sighash` getter.
 - `pczt::roles::signer`:
   - `Signer::sighash`
   - `Signer::append_transparent_signature`
