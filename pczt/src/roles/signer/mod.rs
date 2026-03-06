@@ -80,7 +80,7 @@ impl Signer {
     /// Calculates the signature digest that must be signed to authorize shielded spends.
     ///
     /// This can be used to produce a signature externally suitable for passing to e.g.
-    /// [`Self::apply_orchard_signature`].}
+    /// [`Self::apply_orchard_signature`].
     pub fn shielded_sighash(&self) -> [u8; 32] {
         self.shielded_sighash
     }
@@ -89,7 +89,7 @@ impl Signer {
     /// spend at the given index.
     ///
     /// This can be used to produce a signature externally suitable for passing to e.g.
-    /// [`Self::append_transparent_signature`].}
+    /// [`Self::append_transparent_signature`].
     ///
     /// Returns an error if `index` is invalid for this PCZT.
     pub fn transparent_sighash(&self, index: usize) -> Result<[u8; 32], Error> {
