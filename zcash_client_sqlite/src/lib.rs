@@ -2237,6 +2237,65 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
     }
 }
 
+// --- Governance-specific methods ---
+//
+// These methods support Zcash shielded voting and are not part of the
+// general-purpose wallet traits. They provide note queries and witness
+// generation at a historical height.
+
+#[cfg(feature = "orchard")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Return all Orchard notes received at or before `height`
+    /// and unspent as of that height, for the given account.
+    ///
+    /// Unlike [`InputSource::select_unspent_notes`] (which applies confirmation,
+    /// dust, and expiry filters for transaction construction), this returns every
+    /// note that existed and was unspent at the given height.
+    pub fn get_unspent_orchard_notes_at_historical_height(
+        &self,
+        account: AccountUuid,
+        height: BlockHeight,
+    ) -> Result<Vec<ReceivedNote<ReceivedNoteId, orchard::note::Note>>, SqliteClientError> {
+        wallet::orchard::get_unspent_orchard_notes_at_historical_height(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            height,
+        )
+    }
+
+    /// Generate Orchard Merkle witnesses at a historical height.
+    ///
+    /// Copies the wallet's Orchard shard data into an ephemeral in-memory
+    /// database, inserts the provided frontier as a checkpoint, and generates
+    /// a witness for each of the given note positions.
+    ///
+    /// The wallet DB is strictly read-only — shard data is copied, not modified.
+    pub fn generate_orchard_witnesses_at_historical_height(
+        &self,
+        note_positions: &[Position],
+        frontier_at_height: incrementalmerkletree::frontier::NonEmptyFrontier<
+            orchard::tree::MerkleHashOrchard,
+        >,
+        height: BlockHeight,
+    ) -> Result<
+        Vec<
+            incrementalmerkletree::MerklePath<
+                orchard::tree::MerkleHashOrchard,
+                { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+            >,
+        >,
+        SqliteClientError,
+    > {
+        wallet::commitment_tree::generate_orchard_witnesses_at_historical_height(
+            self.conn.borrow(),
+            note_positions,
+            frontier_at_height,
+            height,
+        )
+    }
+}
+
 /// A handle for the SQLite block source.
 pub struct BlockDb(rusqlite::Connection);
 

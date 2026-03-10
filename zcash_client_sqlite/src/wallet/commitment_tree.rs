@@ -1140,6 +1140,203 @@ pub(crate) fn check_witnesses(
     Ok(scan_ranges)
 }
 
+/// Create the shard-tree schema tables in an existing connection.
+///
+/// The four tables (`{prefix}_tree_shards`, `{prefix}_tree_cap`,
+/// `{prefix}_tree_checkpoints`, `{prefix}_tree_checkpoint_marks_removed`)
+/// match the schema used by [`SqliteShardStore`].
+#[cfg(feature = "orchard")]
+fn create_tree_tables(
+    conn: &rusqlite::Connection,
+    table_prefix: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(&format!(
+        "CREATE TABLE {table_prefix}_tree_shards (
+            shard_index INTEGER PRIMARY KEY,
+            subtree_end_height INTEGER,
+            root_hash BLOB,
+            shard_data BLOB,
+            contains_marked INTEGER,
+            CONSTRAINT root_unique UNIQUE (root_hash)
+        );
+        CREATE TABLE {table_prefix}_tree_cap (
+            cap_id INTEGER PRIMARY KEY,
+            cap_data BLOB NOT NULL
+        );
+        CREATE TABLE {table_prefix}_tree_checkpoints (
+            checkpoint_id INTEGER PRIMARY KEY,
+            position INTEGER
+        );
+        CREATE TABLE {table_prefix}_tree_checkpoint_marks_removed (
+            checkpoint_id INTEGER NOT NULL,
+            mark_removed_position INTEGER NOT NULL,
+            FOREIGN KEY (checkpoint_id) REFERENCES {table_prefix}_tree_checkpoints(checkpoint_id)
+            ON DELETE CASCADE,
+            CONSTRAINT spend_position_unique UNIQUE (checkpoint_id, mark_removed_position)
+        );"
+    ))
+}
+
+/// Copy shard and cap data for a commitment tree from one connection to another.
+///
+/// Both connections must already have the `{prefix}_tree_shards` and
+/// `{prefix}_tree_cap` tables (see [`create_tree_tables`]).
+#[cfg(feature = "orchard")]
+fn copy_tree_data(
+    src: &rusqlite::Connection,
+    dst: &rusqlite::Connection,
+    table_prefix: &str,
+) -> Result<(), rusqlite::Error> {
+    use rusqlite::types::Value;
+
+    let mut stmt = src.prepare(&format!(
+        "SELECT shard_index, subtree_end_height, root_hash, shard_data, contains_marked
+         FROM {table_prefix}_tree_shards"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        dst.execute(
+            &format!(
+                "INSERT INTO {table_prefix}_tree_shards
+                 (shard_index, subtree_end_height, root_hash, shard_data, contains_marked)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            ),
+            rusqlite::params![
+                row.get::<_, Value>(0)?,
+                row.get::<_, Value>(1)?,
+                row.get::<_, Value>(2)?,
+                row.get::<_, Value>(3)?,
+                row.get::<_, Value>(4)?,
+            ],
+        )?;
+    }
+
+    let mut stmt = src.prepare(&format!(
+        "SELECT cap_id, cap_data FROM {table_prefix}_tree_cap"
+    ))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        dst.execute(
+            &format!("INSERT INTO {table_prefix}_tree_cap (cap_id, cap_data) VALUES (?1, ?2)"),
+            rusqlite::params![row.get::<_, Value>(0)?, row.get::<_, Value>(1)?],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Generate Orchard Merkle witnesses at a historical height.
+///
+/// Copies the wallet's Orchard shard data into an ephemeral in-memory database,
+/// inserts the provided frontier at that height as a checkpoint, and
+/// generates a witness for each of the given note positions.
+///
+/// It is assumed that the caller provides the valid frontier at the given height.
+///
+/// How it works:
+/// To construct witnesses at a historical height, we need:
+/// 1. Authentication path within each note's shard — the scanner marks the
+///    wallet's notes as MARKED, preventing them and their siblings within a
+///    shard from being pruned.
+/// 2. Cap — the upper tree above the shard level.
+/// 3. Frontier — the right edge at the historical height. It lets ShardTree
+///    know exactly where the tree ended at that height.
+///
+/// The wallet automatically prunes the tree after PRUNING_DEPTH checkpoints.
+/// These three components are sufficient to reconstruct the tree structure
+/// needed for witness generation even after pruning has occurred.
+///
+/// The wallet DB is strictly read-only. Shard data is copied, not modified.
+/// An ephemeral in-memory database is created to avoid tampering with the primary wallet DB.
+///
+/// Example application: token holder voting. The wallet tree may have advanced past
+/// the historical height, but we need witnesses anchored at that frontier.
+#[cfg(feature = "orchard")]
+pub fn generate_orchard_witnesses_at_historical_height(
+    conn: &rusqlite::Connection,
+    note_positions: &[Position],
+    frontier_at_height: incrementalmerkletree::frontier::NonEmptyFrontier<
+        orchard::tree::MerkleHashOrchard,
+    >,
+    height: BlockHeight,
+) -> Result<
+    Vec<
+        incrementalmerkletree::MerklePath<
+            orchard::tree::MerkleHashOrchard,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >,
+    >,
+    SqliteClientError,
+> {
+    use incrementalmerkletree::Marking;
+    use shardtree::ShardTree;
+    use shardtree::store::Checkpoint;
+    use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
+
+    let table_prefix = "orchard";
+    let frontier_position = frontier_at_height.position();
+
+    let mem_conn = rusqlite::Connection::open_in_memory().map_err(SqliteClientError::DbError)?;
+    create_tree_tables(&mem_conn, table_prefix).map_err(SqliteClientError::DbError)?;
+    copy_tree_data(conn, &mem_conn, table_prefix).map_err(SqliteClientError::DbError)?;
+
+    let store = SqliteShardStore::<
+        _,
+        orchard::tree::MerkleHashOrchard,
+        ORCHARD_SHARD_HEIGHT,
+    >::from_connection(mem_conn, table_prefix)
+    .map_err(SqliteClientError::DbError)?;
+
+    let mut tree =
+        ShardTree::<_, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }, ORCHARD_SHARD_HEIGHT>::new(
+            store, 100,
+        );
+
+    // Insert frontier + checkpoint
+    tree.insert_frontier_nodes(
+        frontier_at_height,
+        Retention::Checkpoint {
+            id: height,
+            marking: Marking::None,
+        },
+    )
+    .map_err(|e| {
+        SqliteClientError::CorruptedData(format!("failed to insert frontier nodes: {}", e))
+    })?;
+
+    tree.store_mut()
+        .add_checkpoint(height, Checkpoint::at_position(frontier_position))
+        .map_err(|e| {
+            SqliteClientError::CorruptedData(format!("failed to add checkpoint: {}", e))
+        })?;
+
+    // Generate witness per note position
+    let mut witnesses = Vec::with_capacity(note_positions.len());
+    for &pos in note_positions {
+        let merkle_path = tree
+            .witness_at_checkpoint_id(pos, &height)
+            .map_err(|e| {
+                SqliteClientError::CorruptedData(format!(
+                    "failed to generate witness for position {}: {} \
+                     (wallet may need to sync through the target height)",
+                    u64::from(pos),
+                    e
+                ))
+            })?
+            .ok_or_else(|| {
+                SqliteClientError::CorruptedData(format!(
+                    "no witness available for position {} \
+                     (wallet missing shard data — sync through the target height)",
+                    u64::from(pos)
+                ))
+            })?;
+
+        witnesses.push(merkle_path);
+    }
+
+    Ok(witnesses)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::NamedTempFile;
@@ -1224,6 +1421,11 @@ mod tests {
         #[test]
         fn rewind_remove_mark() {
             super::check_rewind_remove_mark(new_tree::<OrchardPoolTester>);
+        }
+
+        #[test]
+        fn witnesses_at_historical_height() {
+            super::witnesses_at_historical_height()
         }
 
         #[test]
@@ -1341,5 +1543,98 @@ mod tests {
                 "________________________________"
             ]
         );
+    }
+
+    /// Test that `generate_orchard_witnesses_at_historical_height` produces valid
+    /// witnesses when given a frontier extracted from an earlier tree state.
+    #[cfg(feature = "orchard")]
+    fn witnesses_at_historical_height() {
+        use ::orchard::tree::MerkleHashOrchard;
+        use incrementalmerkletree::frontier::Frontier;
+        use rand::SeedableRng;
+        use rand_chacha::ChaChaRng;
+        use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
+
+        let data_file = NamedTempFile::new().unwrap();
+        let mut db_data = WalletDb::for_path(
+            data_file.path(),
+            Network::TestNetwork,
+            test_clock(),
+            test_rng(),
+        )
+        .unwrap();
+        data_file.keep().unwrap();
+
+        WalletMigrator::new().init_or_migrate(&mut db_data).unwrap();
+
+        let mut rng = ChaChaRng::seed_from_u64(0);
+
+        // Build a tree with some leaves, marking one as our note.
+        // We track the frontier separately to capture the tree state at a
+        // snapshot height, while the wallet DB holds the persistent shard data.
+        let mut frontier_tree: Frontier<MerkleHashOrchard, 32> = Frontier::empty();
+        let snapshot_height = BlockHeight::from(100);
+        let note_position;
+        let note_leaf;
+
+        {
+            let tx = db_data.conn.transaction().unwrap();
+            let store =
+                SqliteShardStore::<_, MerkleHashOrchard, ORCHARD_SHARD_HEIGHT>::from_connection(
+                    &tx, "orchard",
+                )
+                .unwrap();
+            let mut tree = ShardTree::<
+                _,
+                { ::orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+                ORCHARD_SHARD_HEIGHT,
+            >::new(store, 100);
+
+            // Insert 5 leaves. Mark leaf 2 as our note.
+            let mut saved_leaf = None;
+            for i in 0u64..5 {
+                let leaf = MerkleHashOrchard::random(&mut rng);
+                let retention = if i == 2 {
+                    saved_leaf = Some(leaf);
+                    Retention::Marked
+                } else {
+                    Retention::Ephemeral
+                };
+                tree.append(leaf, retention).unwrap();
+                frontier_tree.append(leaf);
+            }
+            note_position = Position::from(2);
+            note_leaf = saved_leaf.unwrap();
+
+            // Advance the tree past the snapshot height, simulating the
+            // wallet continuing to sync after the voting snapshot.
+            tree.checkpoint(snapshot_height).unwrap();
+            for _ in 0..5 {
+                let leaf = MerkleHashOrchard::random(&mut rng);
+                tree.append(leaf, Retention::Ephemeral).unwrap();
+            }
+            tree.checkpoint(BlockHeight::from(200)).unwrap();
+
+            tx.commit().unwrap();
+        }
+
+        // The frontier_tree captured the state after 5 leaves.
+        let expected_root = frontier_tree.root();
+        let frontier = frontier_tree.take().expect("frontier is non-empty");
+
+        // Generate witness using the function under test
+        let witnesses = super::generate_orchard_witnesses_at_historical_height(
+            &db_data.conn,
+            &[note_position],
+            frontier,
+            snapshot_height,
+        )
+        .expect("witness generation should succeed");
+
+        assert_eq!(witnesses.len(), 1);
+
+        // The witness, combined with the note's leaf hash, must recompute
+        // to the tree root at the snapshot height.
+        assert_eq!(witnesses[0].root(note_leaf), expected_root);
     }
 }

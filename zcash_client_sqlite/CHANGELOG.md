@@ -27,6 +27,10 @@ workspace.
 - `zcash_client_sqlite::AccountRef` is now public.
 - Implement standalone P2SH address import support
   - `impl zcash_client_backend::data_api::WalletWrite::import_standalone_transparent_script()`
+- `WalletDb::get_unspent_orchard_notes_at_historical_height` returns Orchard
+  notes received and unspent as of a given height.
+- `WalletDb::generate_orchard_witnesses_at_historical_height` generates Merkle
+  witnesses at a historical height using an ephemeral in-memory tree.
 
 ### Changed
 - Migrated to `orchard 0.12`, `sapling-crypto 0.6`.
