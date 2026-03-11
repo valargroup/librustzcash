@@ -1,115 +1,169 @@
-# Shielded Vote
+# Zcash Rust crates
 
-Monorepo for the Zcash shielded voting system. Contains the vote chain (Cosmos SDK), ZK circuits (Halo2 + RedPallas), nullifier ingestion service, admin UI, iOS wallet integration, and end-to-end tests.
+This repository contains a (work-in-progress) set of Rust crates for working
+with Zcash.
 
-## Infrastructure Setup
+```mermaid
+graph TB
+    subgraph librustzcash
+        direction TB
+        subgraph main
+        zcash_address
+        zcash_primitives
+        zcash_transparent
+        zcash_proofs
+        zcash_protocol
+        pczt
+        zcash_client_backend
+        zcash_client_sqlite
+        zcash_keys
+        zip321
+        end
 
-| Guide                                                    | Purpose                                                                                                          |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| [BOOTSTRAP.md](docs/BOOTSTRAP.md)                             | End-to-end playbook for standing up a new network from scratch (infra, genesis, nullifiers, onboarding, release) |
-| [SETUP_GENESIS.md](docs/SETUP_GENESIS.md)                     | Bootstrap the genesis validator — build the binary, initialise the chain, open P2P, and register in Edge Config  |
-| [SETUP_JOIN.md](docs/SETUP_JOIN.md)                           | Join as a validator — self-registration, funding, and automatic on-chain registration via `join.sh`              |
-| [SETUP_NULLIFIER_SERVICE.md](docs/SETUP_NULLIFIER_SERVICE.md) | Set up the nullifier service — install deps, bootstrap the snapshot, and start the exclusion proof query server  |
+        subgraph standalone_components
+        equihash
+        f4jumble
+        zcash_encoding
+        end
+    end
 
-## Architecture
+    subgraph shielded_protocols
+    sapling[sapling-crypto]
+    orchard[orchard]
+    end
 
-| Component                     | Language           | Description                                                                                             |
-| ----------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------- |
-| `sdk/`                        | Go + Rust (CGo)    | Cosmos SDK chain (`svoted`) with vote module, ante handlers, and ZK verification                        |
-| `vote-nullifier-pir` (external) | Rust             | Ingests Orchard nullifiers and serves PIR exclusion proofs ([repo](https://github.com/valargroup/vote-nullifier-pir)) |
-| `shielded_vote_generator_ui/` | TypeScript / React | UI for constructing and submitting shielded votes                                                       |
-| `zcash-voting-ffi/`           | Rust + Swift       | iOS FFI bindings for the voting circuits                                                                |
-| `e2e-tests/`                  | Rust               | End-to-end API tests against a running chain                                                            |
+    subgraph protocol_components
+    zcash_note_encryption
+    zip32
+    zcash_spec
+    end
 
-## Prerequisites
+    zcash_client_sqlite --> zcash_client_backend
+    zcash_client_backend --> zcash_primitives
+    zcash_client_backend --> zip321
+    zcash_client_backend --> zcash_keys
+    zcash_client_backend --> pczt
+    pczt --> zcash_primitives
+    zcash_proofs --> zcash_primitives
+    zcash_primitives --> zcash_protocol
+    zcash_primitives --> equihash
+    zcash_primitives --> zcash_encoding
+    zcash_primitives --> zcash_address
+    zcash_primitives --> zcash_transparent
+    zcash_primitives --> sapling
+    zcash_primitives --> orchard
+    zcash_keys --> zcash_address
+    zcash_keys --> zcash_encoding
+    zcash_keys --> zip32
+    zcash_keys --> zcash_transparent
+    zcash_keys --> orchard
+    zcash_keys --> sapling
+    zcash_transparent --> zcash_protocol
+    zcash_transparent --> zcash_address
+    zcash_transparent --> zip32
+    zip321 --> zcash_address
+    zip321 --> zcash_protocol
+    zcash_address --> zcash_protocol
+    zcash_address --> f4jumble
+    zcash_address --> zcash_encoding
+    sapling --> zcash_note_encryption
+    sapling --> zip32
+    sapling --> zcash_spec
+    orchard --> zcash_note_encryption
+    orchard --> zip32
+    orchard --> zcash_spec
 
-Install [mise](https://mise.jdx.dev) and a C compiler:
+    main --> standalone_components
 
-```sh
-curl https://mise.run | sh       # install mise
-xcode-select --install           # macOS — or: apt install build-essential (Linux)
+    librustzcash --> shielded_protocols
+    shielded_protocols --> protocol_components
+
+    click zcash_address "https://docs.rs/zcash_address/" _blank
+    click zcash_primitives "https://docs.rs/zcash_primitives/" _blank
+    click zcash_transparent "https://docs.rs/zcash_transparent/" _blank
+    click zcash_proofs "https://docs.rs/zcash_proofs/" _blank
+    click zcash_protocol "https://docs.rs/zcash_protocol/" _blank
+    click zcash_keys "https://docs.rs/zcash_keys/" _blank
+    click zip321 "https://docs.rs/zip321/" _blank
+    click pczt "https://docs.rs/pczt/" _blank
+    click zcash_client_backend "https://docs.rs/zcash_client_backend/" _blank
+    click zcash_client_sqlite "https://docs.rs/zcash_client_sqlite/" _blank
+    click equihash "https://docs.rs/equihash/" _blank
+    click f4jumble "https://docs.rs/f4jumble/" _blank
+    click zcash_encoding "https://docs.rs/zcash_encoding/" _blank
+    click sapling "https://docs.rs/sapling-crypto/" _blank
+    click orchard "https://docs.rs/orchard/" _blank
+    click zcash_note_encryption "https://docs.rs/zcash_note_encryption/" _blank
+    click zip32 "https://docs.rs/zip32/" _blank
+    click zcash_spec "https://docs.rs/zcash_spec/" _blank
 ```
 
-Optionally, activate mise in your shell so tools are available automatically when you `cd` into the project:
+### Crates
 
-```sh
-echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
-mise settings set autoinstall true
-```
+[librustzcash: a Rust Crates Walkthrough w/ nuttycom](https://free2z.cash/uploadz/public/ZcashTutorial/librustzcash-a-rust-crates.mp4)
 
-Without shell activation, use `mise install` to install tools and `mise run <task>` to run commands.
+#### Zcash Protocol
 
-Go, Rust, and Node are pinned in `mise.toml`. Submodules that need specific Rust versions (e.g. librustzcash: 1.85.1) use `rust-toolchain.toml` — mise/rustup switches automatically.
+* `zcash_protocol`: Constants & common types
+  - consensus parameters
+  - bounded value types (Zatoshis, ZatBalance)
+  - memo types
+* `zcash_transparent`: Bitcoin-derived transparent transaction components
+  - transparent addresses
+  - transparent input, output, and bundle types
+  - support for transparent parts of pczt construction
+* `zcash_primitives`: Core utilities for working with Zcash transactions
+  - the primary transaction data type
+  - transaction builder(s)
+  - proving, signing, & serialization
+  - low-level fee types
+* `zcash_proofs`: The Sprout circuit & proving system
 
-## Setup
+#### Keys, Addresses & Wallet Support
 
-```sh
-cd shielded-vote
-mise trust      # one-time: allow mise to run this project's config
-mise start      # init chain, bootstrap nullifiers, start everything
-```
+* `zcash_address`: Parsing & serialization of Zcash addresses
+  - unified address, fvk & ivk containers
+  - no dependencies on protocol-specific types
+  - serialization API definitions
+* `zip321`: Parsing & serizalization for ZIP 321 payment requests
+* `zcash_keys`: Spending Keys, Viewing Keys, & Addresses
+  - protocol-specific & Unified address types
+  - ZIP 32 key & address derivation implementations
+  - Unified spending keys & viewing keys
+  - Sapling spending & viewing key types
+* `pczt`: Data types & interfaces for PCZT construction
+  - partially constructed transaction types
+  - transaction construction role interfaces & partial implementations
+* `zcash_client_backend`: A wallet framework for Zcash
+  - wallet data storage APIs
+  - chain scanning
+  - light client protocol support
+  - fee calculation
+  - transaction proposals & high-level transaction construction APIs
+* `zcash_client_sqlite`: SQLite-based implementation of `zcash_client_backend` storage APIs
 
-This builds the chain binary (with Halo2 + RedPallas ZK verification), initialises a single-validator chain, fetches Orchard nullifiers, and starts the chain node and nullifier query server in the background.
+#### Utilities & Common Dependencies
 
-If services are already running, `mise start` will report them and exit cleanly.
+* `f4jumble`: Encoding for Unified addresses
+* `zcash_encoding`: Bitcoin-derived transaction encoding utilities for Zcash
+* `equihash`: Proof-of-work protocol implementation
 
-```sh
-mise status     # check service health and voting round state
-mise stop       # stop all services
-mise ui         # start admin UI dev server (port 5173)
-mise test       # end-to-end tests against running chain
-```
 
-Run `mise tasks` for the full list. Key namespaces: `build:*`, `chain:*`, `multi:*`, `nullifier:*`, `test:*`.
+## Security Warnings
 
-<!-- mise-tasks -->
+These libraries are under development and have not been fully reviewed.
 
-| Task | Description |
-|---|---|
-| **Daily** | |
-| `start` | Init chain + bootstrap nullifiers + start everything |
-| `stop` | Stop all services |
-| `status` | Show service health + voting round state |
-| `ui` | Start admin UI dev server (port 5173) |
-| `test` | E2E tests against running chain |
-| **build:\*** | |
-| `build` | Build svoted with FFI (Halo2 + RedPallas) |
-| `build:quick` | Build svoted without FFI (Go only) |
-| `build:install` | Install svoted with FFI to $GOBIN |
-| `build:circuits` | Build Rust circuit static library |
-| `build:ui` | Build admin UI for production |
-| **chain:\*** | |
-| `chain:init` | Wipe and reinitialize a single-validator chain |
-| `chain:start` | Start chain daemon (foreground) |
-| `chain:clean` | Remove chain data directory |
-| `chain:ceremony` | Register Pallas key + create round + wait ACTIVE |
-| **multi:\*** | |
-| `multi:init` | Build + init 3-validator chain (no start) |
-| `multi:start` | Init + nullifiers + PIR + start 3-validator chain |
-| `multi:stop` | Stop all multi-validator processes |
-| `multi:status` | Show running status of all 3 validators |
-| `multi:clean` | Stop + remove all multi-validator data |
-| **nullifier:\*** | |
-| `nullifier:bootstrap` | Download nullifier snapshot from DO Spaces |
-| `nullifier:ingest` | Sync nullifiers to SYNC_HEIGHT or chain tip |
-| `nullifier:export` | Build PIR tree and export tier files |
-| `nullifier:serve` | Start PIR server (port 3000) |
-| `nullifier:status` | Show nullifier ingestion progress |
-| `nullifier:clean` | Remove nullifier data + build artifacts |
-| **test:\*** | |
-| `test:unit` | Go unit tests (keeper, validation, codec) |
-| `test:integration` | Go ABCI pipeline integration tests |
-| `test:helper` | Helper server unit tests (SQLite, API, processor) |
-| `test:go` | All Go tests (unit + integration + helper) |
-| `test:circuits` | Rust circuit unit tests |
-| `test:ffi` | All FFI-backed tests (Halo2 + RedPallas) |
-| `test:nullifier` | Nullifier crate unit tests |
-| `test:proof` | Verify exclusion proofs against ingested data |
-| **Other** | |
-| `validator:join` | Build from source and join network as validator |
-| `fmt` | Format Go code |
-| `lint` | Run Go vet |
-| `fixtures` | Regenerate all fixture files |
-| `proto` | Regenerate protobuf code |
+## License
 
-<!-- /mise-tasks -->
+All code in this workspace is licensed under either of
+
+ * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.

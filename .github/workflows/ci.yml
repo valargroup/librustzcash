@@ -1,347 +1,635 @@
 name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+permissions: {}
 
-permissions:
-  contents: read
+on:
+  pull_request:
+  push:
+    branches: main
+  merge_group:
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Cache Go build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-lint-go-${{ hashFiles('sdk/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-lint-go-
-      - name: Run go vet
-        run: mise run lint
+  required-test:
+    name: Test ${{ matrix.state }} on ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      statuses: write
+    strategy:
+      matrix:
+        target:
+          - Linux
+        state:
+          - transparent
+          - Sapling-only
+          - Orchard
+          - all-pools
+          - all-features
+          - NU7
 
-  test-unit:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Cache Rust build
-        uses: actions/cache@v4
-        with:
-          path: sdk/circuits/target
-          key: ${{ runner.os }}-circuits-${{ hashFiles('sdk/circuits/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-circuits-
-      - name: Build circuits
-        run: mise run build:circuits
-      - name: Run unit tests
-        run: mise run test:unit
+        include:
+          - target: Linux
+            os: ubuntu-latest-8cores
 
-  test-helper:
-    name: Helper Server Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Run helper tests
-        run: mise run test:helper
+          - state: transparent
+            transparent-pool: true
+          - state: Orchard
+            orchard-pool: true
+          - state: all-pools
+            all-pools: true
+          - state: all-features
+            all-features: true
+          - state: NU7
+            all-features: true
+            rustflags: '--cfg zcash_unstable="nu7"'
 
-  test-integration:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Cache Rust build
-        uses: actions/cache@v4
-        with:
-          path: sdk/circuits/target
-          key: ${{ runner.os }}-circuits-${{ hashFiles('sdk/circuits/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-circuits-
-      - name: Build circuits
-        run: mise run build:circuits
-      - name: Run integration tests
-        run: mise run test:integration
-
-  test-halo2:
-    name: Halo2 ZKP Verification Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Cache Rust build
-        uses: actions/cache@v4
-        with:
-          path: sdk/circuits/target
-          key: ${{ runner.os }}-circuits-${{ hashFiles('sdk/circuits/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-circuits-
-      - name: Build circuits
-        run: mise run build:circuits
-      - name: Run Rust circuit tests
-        run: mise run test:circuits
-      - name: Run Go Halo2 verification tests
-        run: mise run test:halo2
-
-  test-vc-van-deterministic:
-    name: VC/VAN Deterministic Stress
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
     env:
-      GOCACHE: ${{ github.workspace }}/sdk/.cache/go-build
-      GOMODCACHE: ${{ github.workspace }}/sdk/.cache/go-mod
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTDOCFLAGS: ${{ matrix.rustflags }}
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Cache Rust build (circuits)
-        uses: actions/cache@v4
+      - uses: actions/checkout@v5
         with:
-          path: sdk/circuits/target
-          key: ${{ runner.os }}-circuits-${{ hashFiles('sdk/circuits/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-circuits-
-      - name: Cache Go build
-        uses: actions/cache@v4
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+        with:
+          transparent-pool: ${{ matrix.transparent-pool || false }}
+          orchard-pool: ${{ matrix.orchard-pool || false }}
+          all-pools: ${{ matrix.all-pools || false }}
+          all-features: ${{ matrix.all-features || false }}
+          extra-features: ${{ matrix.extra_flags || '' }}
+      - uses: actions/cache@v4
         with:
           path: |
-            ${{ env.GOCACHE }}
-            ${{ env.GOMODCACHE }}
-          key: ${{ runner.os }}-vc-van-deterministic-go-${{ hashFiles('sdk/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-vc-van-deterministic-go-
-      - name: Build circuits
-        run: mise run build:circuits
-      - name: Run deterministic VC/VAN tree stress tests
-        run: mise run test:tree-stress
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run tests
+        run: >
+          cargo test
+          --workspace
+          ${{ steps.prepare.outputs.feature-flags }}
+      - name: Verify working directory is clean
+        run: git diff --exit-code
 
-  test-api:
-    name: API Integration Tests
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+  test:
+    name: Test ${{ matrix.state }} on ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      matrix:
+        target:
+          - macOS
+          - Windows
+        state:
+          - transparent
+          - Sapling-only
+          - Orchard
+          - all-pools
+          - all-features
+          - NU7
+
+        include:
+          - target: macOS
+            os: macOS-latest
+          - target: Windows
+            os: windows-latest-8cores
+
+          - state: transparent
+            transparent-pool: true
+          - state: Orchard
+            orchard-pool: true
+          - state: all-pools
+            all-pools: true
+          - state: all-features
+            all-features: true
+          - state: NU7
+            all-features: true
+            rustflags: '--cfg zcash_unstable="nu7"'
+
+        exclude:
+          - target: macOS
+            state: all-features
+          - target: macOS
+            state: NU7
+
     env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Configure private repo access
-        run: git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Add GOBIN to PATH
-        run: echo "$HOME/go/bin" >> $GITHUB_PATH
-      - name: Cache Rust build (circuits + e2e-tests + tree client)
-        uses: actions/cache@v4
-        with:
-          path: |
-            sdk/circuits/target
-            e2e-tests/target
-            vote-commitment-tree-client/target
-          key: ${{ runner.os }}-api-rust-${{ hashFiles('sdk/circuits/Cargo.lock', 'e2e-tests/Cargo.lock', 'vote-commitment-tree-client/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-api-rust-
-      - name: Cache Go build
-        uses: actions/cache@v4
-        with:
-          path: |
-            sdk/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-api-go-${{ hashFiles('sdk/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-api-go-
-      - name: Pre-build vote-commitment-tree-client
-        run: cargo build --release --manifest-path vote-commitment-tree-client/Cargo.toml
-      - name: Start chain
-        run: mise run start:chain
-        env:
-          GOCACHE: ${{ github.workspace }}/sdk/.cache/go-build
-          SVOTE_PIR_URL: "disabled"
-      - name: Run E2E test (round_activation)
-        run: cargo test --release --manifest-path e2e-tests/Cargo.toml --test round_activation -- --nocapture --ignored --test-threads=1
-        env:
-          SVOTE_API_URL: http://localhost:1318
-      - name: Run E2E test (voting_flow_librustvoting)
-        run: cargo test --release --manifest-path e2e-tests/Cargo.toml --test voting_flow_librustvoting -- --nocapture --ignored --test-threads=1
-        env:
-          SVOTE_API_URL: http://localhost:1318
-          HELPER_SERVER_URL: http://localhost:1318
-          SVOTE_E2E_VOTE_WINDOW_SECS: "420"
-      - name: Upload chain log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: chain-log
-          path: svoted.log
-          retention-days: 7
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
-  test-multi-validator:
-    name: Multi-Validator E2E
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+        with:
+          transparent-pool: ${{ matrix.transparent-pool || false }}
+          orchard-pool: ${{ matrix.orchard-pool || false }}
+          all-pools: ${{ matrix.all-pools || false }}
+          all-features: ${{ matrix.all-features || false }}
+          extra-features: ${{ matrix.extra_flags || '' }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run tests
+        run: >
+          cargo test
+          --workspace
+          ${{ steps.prepare.outputs.feature-flags }}
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  test-slow:
+    name: Slow Test ${{ matrix.state }} on ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      matrix:
+        target:
+          - Linux
+        state: # all-pools intentionally omitted
+          - transparent
+          - Sapling-only
+          - Orchard
+          - all-features
+          - NU7
+
+        include:
+          - target: Linux
+            os: ubuntu-latest-8cores
+
+          - state: transparent
+            transparent-pool: true
+          - state: Orchard
+            orchard-pool: true
+          - state: all-features
+            all-features: true
+          - state: NU7
+            all-features: true
+            rustflags: '--cfg zcash_unstable="nu7"'
+
     env:
-      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Configure private repo access
-        run: git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Add GOBIN to PATH
-        run: echo "$HOME/go/bin" >> $GITHUB_PATH
-      - name: Cache Rust build (circuits + e2e-tests + tree client)
-        uses: actions/cache@v4
-        with:
-          path: |
-            sdk/circuits/target
-            e2e-tests/target
-            vote-commitment-tree-client/target
-          key: ${{ runner.os }}-multi-rust-${{ hashFiles('sdk/circuits/Cargo.lock', 'e2e-tests/Cargo.lock', 'vote-commitment-tree-client/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-multi-rust-
-      - name: Cache Go build
-        uses: actions/cache@v4
-        with:
-          path: |
-            sdk/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-multi-go-${{ hashFiles('sdk/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-multi-go-
-      - name: Pre-build vote-commitment-tree-client
-        run: cargo build --release --manifest-path vote-commitment-tree-client/Cargo.toml
-      - name: Start 3-validator chain
-        run: mise run multi:start-chain
-        env:
-          GOCACHE: ${{ github.workspace }}/sdk/.cache/go-build
-          SVOTE_PIR_URL: "disabled"
-      - name: Wait for helper server readiness
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:1418/api/v1/status > /dev/null 2>&1; then
-              echo "Helper server is ready on val1"
-              exit 0
-            fi
-            echo "Waiting for helper server... ($i/30)"
-            sleep 2
-          done
-          echo "Helper server failed to start"
-          tail -50 sdk/multi-val1.log
-          exit 1
-      - name: Set multi-validator env
-        run: |
-          echo "SVOTE_HOME=$HOME/.svoted-val1" >> $GITHUB_ENV
-          echo "SVOTE_NODE_URL=tcp://localhost:26157" >> $GITHUB_ENV
-          echo "SVOTE_PALLAS_PK_PATH=$HOME/.svoted-val1/pallas.pk" >> $GITHUB_ENV
-      - name: Run E2E test (round_activation)
-        run: cargo test --release --manifest-path e2e-tests/Cargo.toml --test round_activation -- --nocapture --ignored --test-threads=1
-        env:
-          SVOTE_API_URL: http://localhost:1418
-      - name: Run E2E test (voting_flow_librustvoting)
-        run: cargo test --release --manifest-path e2e-tests/Cargo.toml --test voting_flow_librustvoting -- --nocapture --ignored --test-threads=1
-        env:
-          SVOTE_API_URL: http://localhost:1418
-          HELPER_SERVER_URL: http://localhost:1418
-          SVOTE_E2E_VOTE_WINDOW_SECS: "420"
-      - name: Restart val2 and verify recovery
-        run: mise run test:restart
-        env:
-          SVOTE_PIR_URL: "disabled"
-      - name: Run E2E test (round_activation after restart)
-        run: cargo test --release --manifest-path e2e-tests/Cargo.toml --test round_activation -- --nocapture --ignored --test-threads=1
-        env:
-          SVOTE_API_URL: http://localhost:1418
-      - name: Upload validator logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: multi-validator-logs
-          path: |
-            sdk/multi-val1.log
-            sdk/multi-val2.log
-            sdk/multi-val3.log
-          retention-days: 7
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
-  test-join:
-    name: Validator Join Flow
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+        with:
+          transparent-pool: ${{ matrix.transparent-pool || false }}
+          orchard-pool: ${{ matrix.orchard-pool || false }}
+          all-pools: false
+          all-features: ${{ matrix.all-features || false }}
+          extra-features: ${{ matrix.extra_flags || '' }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run slow tests
+        run: >
+          cargo test
+          --workspace
+          ${{ steps.prepare.outputs.feature-flags }}
+          --features expensive-tests
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  # States that we want to ensure can be built, but that we don't actively run tests for.
+  check-msrv:
+    name: Check ${{ matrix.state }} build on ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        target:
+          - Linux
+          - macOS
+          - Windows
+        state:
+          - ZFuture
+          - ZFuture-allfeatures
+
+        include:
+          - target: Linux
+            os: ubuntu-latest
+          - target: macOS
+            os: macOS-latest
+          - target: Windows
+            os: windows-latest
+
+          - state: ZFuture
+            rustflags: '--cfg zcash_unstable="zfuture"'
+          - state: ZFuture-allfeatures
+            all-features: true
+            rustflags: '--cfg zcash_unstable="zfuture"'
+
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTDOCFLAGS: ${{ matrix.rustflags }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+        with:
+          all-features: ${{ matrix.all-features || false }}
+          extra-features: ${{ matrix.extra_flags || '' }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run check
+        run: >
+          cargo check
+          --release
+          --workspace
+          --tests
+          ${{ steps.prepare.outputs.feature-flags }}
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  build-latest:
+    name: Latest build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-latest
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+      - run: rustup override set "${TOOLCHAIN}"
+        shell: sh
+        env:
+          TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - name: Remove lockfile to build with latest dependencies
+        run: rm Cargo.lock
+      - name: Build crates
+        run: >
+          cargo build
+          --workspace
+          --all-targets
+          ${{ steps.prepare.outputs.feature-flags }}
+          --verbose
+      - name: Verify working directory is clean (excluding lockfile)
+        run: git diff --exit-code ':!Cargo.lock'
+
+  build-nodefault:
+    name: Build target ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - wasm32-wasip1
+        include:
+          - target: wasm32-wasip1
+            build_deps: >
+              gcc-multilib
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          path: crates
+      - name: Install linux build dependencies
+        run: sudo apt update && sudo apt install ${{ matrix.build_deps }}
+        if: matrix.build_deps != ''
+      # We use a synthetic crate to ensure no dev-dependencies are enabled, which can
+      # be incompatible with some of these targets.
+      - name: Copy Rust toolchain into the root for use in synthetic crate setup
+        run: cp crates/rust-toolchain.toml .
+      - name: Create synthetic crate for testing
+        run: cargo init --lib ci-build
+      - name: Move Rust toolchain file into synthetic crate
+        run: mv rust-toolchain.toml ci-build/
+      - name: Copy patch directives into synthetic crate
+        run: |
+          echo "[patch.crates-io]" >> ./ci-build/Cargo.toml
+          cat ./crates/Cargo.toml | sed "0,/.\+\(patch.crates.\+\)/d" >> ./ci-build/Cargo.toml
+      - name: Add zcash_proofs as a dependency of the synthetic crate
+        working-directory: ./ci-build
+        run: cargo add --no-default-features --path ../crates/zcash_proofs
+      - name: Add zcash_client_backend as a dependency of the synthetic crate
+        working-directory: ./ci-build
+        run: cargo add --path ../crates/zcash_client_backend
+      - name: Copy pinned dependencies into synthetic crate
+        run: cp crates/Cargo.lock ci-build/
+      - name: Add target
+        working-directory: ./ci-build
+        run: rustup target add ${{ matrix.target }}
+      - name: Build for target
+        working-directory: ./ci-build
+        run: cargo build --verbose --target ${{ matrix.target }}
+
+  build-nostd:
+    name: Build target ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - thumbv7em-none-eabihf
+        include:
+          - target: thumbv7em-none-eabihf
+            build_deps: >
+              gcc-arm-none-eabi
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          path: crates
+      - name: Install linux build dependencies
+        run: sudo apt update && sudo apt install ${{ matrix.build_deps }}
+        if: matrix.build_deps != ''
+      # We use a synthetic crate to ensure no dev-dependencies are enabled, which can
+      # be incompatible with some of these targets.
+      - name: Copy Rust toolchain into the root for use in synthetic crate setup
+        run: cp crates/rust-toolchain.toml .
+      - name: Create synthetic crate for testing
+        run: cargo init --lib ci-build
+      - name: Move Rust toolchain file into synthetic crate
+        run: mv rust-toolchain.toml ci-build/
+      - name: Copy patch directives into synthetic crate
+        run: |
+          echo "[patch.crates-io]" >> ./ci-build/Cargo.toml
+          cat ./crates/Cargo.toml | sed "0,/.\+\(patch.crates.\+\)/d" >> ./ci-build/Cargo.toml
+      - name: Add no_std pragma to lib.rs
+        run: |
+          echo "#![no_std]" > ./ci-build/src/lib.rs
+      - name: Add zcash_keys as a dependency of the synthetic crate
+        working-directory: ./ci-build
+        run: cargo add --no-default-features --path ../crates/zcash_keys
+      - name: Add pczt as a dependency of the synthetic crate
+        working-directory: ./ci-build
+        run: cargo add --no-default-features --path ../crates/pczt
+      - name: Add zcash_primitives as a dependency of the synthetic crate
+        working-directory: ./ci-build
+        run: cargo add --no-default-features --path ../crates/zcash_primitives
+      - name: Add lazy_static with the spin_no_std feature
+        working-directory: ./ci-build
+        run: cargo add lazy_static --features "spin_no_std"
+      - name: Copy pinned dependencies into synthetic crate
+        run: cp crates/Cargo.lock ci-build/
+      - name: Add target
+        working-directory: ./ci-build
+        run: rustup target add ${{ matrix.target }}
+      - name: Build for target
+        working-directory: ./ci-build
+        run: cargo build --verbose --target ${{ matrix.target }}
+
+  bitrot:
+    name: Bitrot check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
-      - name: Add GOBIN to PATH
-        run: echo "$HOME/go/bin" >> $GITHUB_PATH
-      - name: Cache Rust build (circuits)
-        uses: actions/cache@v4
+      - uses: actions/checkout@v5
         with:
-          path: sdk/circuits/target
-          key: ${{ runner.os }}-join-rust-${{ hashFiles('sdk/circuits/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-join-rust-
-      - name: Cache Go build
-        uses: actions/cache@v4
+          persist-credentials: false
+      # Build benchmarks to prevent bitrot
+      - name: Build benchmarks
+        run: cargo build --all --benches
+
+  clippy:
+    name: Clippy (MSRV)
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - uses: actions/checkout@v5
         with:
-          path: |
-            sdk/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-join-go-${{ hashFiles('sdk/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-join-go-
-      - name: Build and install svoted + create-val-tx
-        run: mise run build:install
+          persist-credentials: false
+      # We can't currently use only the common feature set (to exclude checking of
+      # unstable in-progress code) because this action doesn't support spaces within CLI
+      # arguments. Once it does, switch back to `prepare` instead of `--all-features`.
+      - name: Run clippy
+        uses: auguwu/clippy-action@94a9ff2f6920180b89e5c03d121d0af04a9d3e03 # 1.4.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: ${{ inputs.target }}
+          check-args: >
+            --all-features
+            --all-targets
+          args: >
+            -D warnings
+
+  clippy-beta:
+    name: Clippy (beta)
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # We can't currently use only the common feature set (to exclude checking of
+      # unstable in-progress code) because this action doesn't support spaces within CLI
+      # arguments. Once it does, switch back to `prepare` instead of `--all-features`.
+      - uses: dtolnay/rust-toolchain@beta
+        id: toolchain
+        with:
+          components: clippy
+      - run: rustup override set "${TOOLCHAIN}"
+        shell: sh
         env:
-          GOCACHE: ${{ github.workspace }}/sdk/.cache/go-build
-      - name: Initialize chain
-        run: mise run chain:init
-      - name: Start chain in background
-        run: |
-          svoted start --home ~/.svoted > sdk/chain.log 2>&1 &
-          echo "Chain PID: $!"
-      - name: Wait for chain readiness
-        run: |
-          for i in $(seq 1 60); do
-            if curl -sf http://localhost:1318/cosmos/base/tendermint/v1beta1/blocks/latest > /dev/null 2>&1; then
-              echo "Chain is producing blocks"
-              exit 0
-            fi
-            echo "Waiting for chain to start... ($i/60)"
-            sleep 2
-          done
-          echo "Chain failed to start within 120s"
-          cat sdk/chain.log
-          exit 1
-      - name: Run validator join smoke test
-        run: mise run test:join
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+          TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - name: Run Clippy (beta)
+        uses: auguwu/clippy-action@94a9ff2f6920180b89e5c03d121d0af04a9d3e03 # 1.4.0
         with:
-          name: join-test-logs
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: ${{ inputs.target }}
+          check-args: >
+            --all-features
+            --all-targets
+          args: >
+            -W clippy::all
+
+  codecov:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    container:
+      image: xd009642/tarpaulin:develop-nightly
+      options: --security-opt seccomp=unconfined
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+      - uses: actions/cache@v4
+        with:
           path: |
-            sdk/chain.log
-            joiner.log
-          retention-days: 7
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: codecov-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Generate coverage report
+        run: >
+          cargo tarpaulin
+          --engine llvm
+          ${{ steps.prepare.outputs.feature-flags }}
+          --release
+          --timeout 600
+          --out xml
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # This is run with nightly and `RUSTDOCFLAGS` to emulate the documentation renders on
+  # docs.rs and in `.github/workflows/book.yml` as closely as possible.
+  doc-links:
+    name: Intra-doc links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+      - uses: dtolnay/rust-toolchain@nightly
+        id: toolchain
+      - run: rustup override set "${TOOLCHAIN}"
+        env:
+          TOOLCHAIN: ${{steps.toolchain.outputs.name}}
+      - run: cargo fetch
+      # Requires #![deny(rustdoc::broken_intra_doc_links)] in crates.
+      - name: Check intra-doc links
+        run: >
+          cargo doc
+          --no-deps
+          --workspace
+          ${{ steps.prepare.outputs.feature-flags }}
+          --document-private-items
+        env:
+          RUSTDOCFLAGS: -Z unstable-options --enable-index-page --cfg docsrs
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  protobuf:
+    name: protobuf consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+      - name: Install protoc
+        uses: supplypike/setup-bin@1fafb085795af4a3f183502f3a9dffa8f7b83217 # v5.0.0
+        with:
+          uri: 'https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip'
+          name: 'protoc'
+          version: '25.1'
+          subPath: 'bin'
+      - name: Trigger protobuf regeneration
+        run: >
+          cargo check
+          --workspace
+          ${{ steps.prepare.outputs.feature-flags }}
+      - name: run cargo-fmt to handle the case that regeneration sometimes produces unformatted output
+        run: cargo fmt
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  uuid:
+    name: UUID validity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Extract UUIDs
+        id: extract
+        run: |
+          {
+            echo 'UUIDS<<EOF'
+            git grep -h "const MIGRATION_ID: Uuid = Uuid::from_u128" zcash_client_sqlite/ |
+              sed -e "s,.*Uuid::from_u128(0x,," -e "s,_,-,g" -e "s,);,,"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      - name: Check UUID validity
+        env:
+          UUIDS: ${{ steps.extract.outputs.UUIDS }}
+        run: uuidparse -n -o type $UUIDS | xargs -L 1 test "invalid" !=
+      - name: Check UUID type
+        env:
+          UUIDS: ${{ steps.extract.outputs.UUIDS }}
+        run: uuidparse -n -o type $UUIDS | xargs -L 1 test "random" =
+      - name: Check UUID uniqueness
+        env:
+          UUIDS: ${{ steps.extract.outputs.UUIDS }}
+        run: >
+          test $(
+            uuidparse -n -o uuid $U4 | wc -l
+          ) -eq $(
+            uuidparse -n -o uuid $U4 | sort | uniq | wc -l
+          )
+
+  required-checks:
+    name: Required status checks have passed
+    needs:
+      - required-test
+      - check-msrv
+      - build-latest
+      - build-nodefault
+      - bitrot
+      - clippy
+      - doc-links
+      - fmt
+      - protobuf
+      - uuid
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine whether all required-pass steps succeeded
+        run: |
+          echo "${NEEDS}" | jq -e '[ .[] | .result == "success" ] | all'
+        env:
+          NEEDS: ${{ toJSON(needs) }}
