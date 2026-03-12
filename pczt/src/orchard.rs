@@ -474,7 +474,7 @@ impl Bundle {
         )
     }
 
-    pub fn serialize_from(bundle: orchard::pczt::Bundle) -> Self {
+    pub(crate) fn serialize_from(bundle: orchard::pczt::Bundle) -> Self {
         let actions = bundle
             .actions()
             .iter()
