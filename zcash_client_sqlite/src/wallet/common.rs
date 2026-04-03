@@ -110,7 +110,7 @@ pub(crate) fn tx_unexpired_condition(tx: &str) -> String {
 /// - The parent must provide `:target_height` as a named argument.
 /// - The parent is responsible for enclosing this condition in parentheses as appropriate.
 pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
-    format!(
+    let base = format!(
         r#"
         SELECT rns.{table_prefix}_received_note_id
         FROM {table_prefix}_received_note_spends rns
@@ -118,7 +118,16 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
         WHERE {}
         "#,
         tx_unexpired_condition("stx")
-    )
+    );
+    // PIR rows are unconditional (no tx_unexpired_condition) because they reflect
+    // confirmed on-chain nullifier state, not pending transactions. Stale PIR rows
+    // are cleared by truncate_to_height on reorg/rescan. Keep in sync with
+    // UNSPENT_ORCHARD_NOTES_SQL in zcash-swift-wallet-sdk/rust/src/spendability.rs.
+    #[cfg(feature = "sync-nullifier-pir")]
+    if table_prefix == "orchard" {
+        return format!("{base} UNION SELECT note_id FROM pir_spent_notes");
+    }
+    base
 }
 
 fn unscanned_tip_exists(
@@ -540,7 +549,12 @@ where
         note_reconstruction_cols,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
-    if unscanned_tip_exists(conn, anchor_height, table_prefix)? {
+    #[cfg(feature = "sync-nullifier-pir")]
+    let skip_unscanned_check = matches!(protocol, ShieldedProtocol::Orchard);
+    #[cfg(not(feature = "sync-nullifier-pir"))]
+    let skip_unscanned_check = false;
+
+    if !skip_unscanned_check && unscanned_tip_exists(conn, anchor_height, table_prefix)? {
         return Ok(vec![]);
     }
 
