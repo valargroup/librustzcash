@@ -305,6 +305,27 @@ pub(crate) fn data_db_truncation<T: ShieldedPoolTester>() {
     )
 }
 
+pub(crate) fn truncate_to_chain_state<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::truncate_to_chain_state::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+pub(crate) fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::truncate_to_chain_state_below_birthday::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+pub(crate) fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::truncate_to_chain_state_above_scanned::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
 pub(crate) fn reorg_to_checkpoint<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::reorg_to_checkpoint::<T, _, _>(
         TestDbFactory::default(),
@@ -396,4 +417,12 @@ pub(crate) fn receive_two_notes_with_same_value<T: ShieldedPoolTester>() {
         TestDbFactory::default(),
         BlockCache::new(),
     )
+}
+
+#[cfg(feature = "pczt-tests")]
+pub(crate) fn immature_coinbase_outputs_are_excluded_from_note_selection<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::immature_coinbase_outputs_are_excluded_from_note_selection::<T>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    );
 }

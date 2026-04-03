@@ -83,8 +83,8 @@ use zcash_keys::{
 };
 use zcash_primitives::{block::BlockHash, transaction::Transaction};
 use zcash_protocol::{
-    ShieldedProtocol, TxId,
-    consensus::BlockHeight,
+    PoolType, ShieldedProtocol, TxId,
+    consensus::{BlockHeight, TxIndex},
     memo::{Memo, MemoBytes},
     value::{BalanceError, Zatoshis},
 };
@@ -125,11 +125,26 @@ use zcash_protocol::consensus::NetworkUpgrade;
 
 pub mod chain;
 pub mod error;
+pub mod ll;
 pub mod scanning;
 pub mod wallet;
 
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing;
+
+/// The origin of a transparent address within a wallet.
+#[cfg(feature = "transparent-inputs")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransparentKeyOrigin {
+    /// The address was imported standalone (no HD derivation scope).
+    Imported,
+    /// The address was derived from the account's HD key tree.
+    Derived { scope: TransparentKeyScope },
+}
+
+/// A mapping from transparent addresses to their key origin and balance.
+#[cfg(feature = "transparent-inputs")]
+pub type TransparentBalances = HashMap<TransparentAddress, (TransparentKeyOrigin, Balance)>;
 
 /// The height of subtree roots in the Sapling note commitment tree.
 ///
@@ -249,7 +264,7 @@ impl Balance {
         Ok(())
     }
 
-    /// Returns the value in the account of notes that have value less than the marginal
+    /// Returns the value in the account of notes that have value less than or equal to the marginal
     /// fee, and consequently cannot be spent except as a grace input.
     pub fn uneconomic_value(&self) -> Zatoshis {
         self.uneconomic_value
@@ -537,6 +552,9 @@ pub trait Account {
     /// Returns the human-readable name for the account, if any has been configured.
     fn name(&self) -> Option<&str>;
 
+    /// Returns the birthday height for the account.
+    fn birthday_height(&self) -> BlockHeight;
+
     /// Returns whether this account is derived or imported, and the derivation parameters
     /// if applicable.
     fn source(&self) -> &AccountSource;
@@ -566,11 +584,19 @@ pub trait Account {
 }
 
 #[cfg(any(test, feature = "test-dependencies"))]
-impl<A: Copy> Account for (A, UnifiedFullViewingKey) {
+impl<A: Copy> Account for (A, UnifiedFullViewingKey, BlockHeight) {
     type AccountId = A;
 
     fn id(&self) -> A {
         self.0
+    }
+
+    fn name(&self) -> Option<&str> {
+        None
+    }
+
+    fn birthday_height(&self) -> BlockHeight {
+        self.2
     }
 
     fn source(&self) -> &AccountSource {
@@ -587,14 +613,10 @@ impl<A: Copy> Account for (A, UnifiedFullViewingKey) {
     fn uivk(&self) -> UnifiedIncomingViewingKey {
         self.1.to_unified_incoming_viewing_key()
     }
-
-    fn name(&self) -> Option<&str> {
-        None
-    }
 }
 
 #[cfg(any(test, feature = "test-dependencies"))]
-impl<A: Copy> Account for (A, UnifiedIncomingViewingKey) {
+impl<A: Copy> Account for (A, UnifiedIncomingViewingKey, BlockHeight) {
     type AccountId = A;
 
     fn id(&self) -> A {
@@ -603,6 +625,10 @@ impl<A: Copy> Account for (A, UnifiedIncomingViewingKey) {
 
     fn name(&self) -> Option<&str> {
         None
+    }
+
+    fn birthday_height(&self) -> BlockHeight {
+        self.2
     }
 
     fn source(&self) -> &AccountSource {
@@ -1400,7 +1426,7 @@ impl<const MAX: u8> From<BoundedU8<MAX>> for usize {
 /// contexts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NoteFilter {
-    /// Selects notes having value greater than or equal to the provided value.
+    /// Selects notes having value strictly greater than the provided value.
     ExceedsMinValue(Zatoshis),
     /// Selects notes having value greater than or equal to approximately the n'th percentile of
     /// previously sent notes in the account, irrespective of pool. The wrapped value must be in
@@ -1539,7 +1565,7 @@ pub trait InputSource {
     /// * the transaction that produced the output had or will have at least the required number of
     ///   confirmations according to the provided [`ConfirmationsPolicy`]; and
     /// * the output can potentially be spent in a transaction mined in a block at the given
-    ///   `target_height`.
+    ///   `target_height` (also taking into consideration the coinbase maturity rule).
     ///
     /// Any output that is potentially spent by an unmined transaction in the mempool should be
     /// excluded unless the spending transaction will be expired at `target_height`.
@@ -1833,7 +1859,7 @@ pub trait WalletRead {
         _account: Self::AccountId,
         _target_height: TargetHeight,
         _confirmations_policy: ConfirmationsPolicy,
-    ) -> Result<HashMap<TransparentAddress, (TransparentKeyScope, Balance)>, Self::Error> {
+    ) -> Result<TransparentBalances, Self::Error> {
         unimplemented!(
             "WalletRead::get_transparent_balances must be overridden for wallets to use the `transparent-inputs` feature"
         )
@@ -1897,6 +1923,17 @@ pub trait WalletRead {
     /// transaction data requests, such as when it is necessary to fill in purely-transparent
     /// transaction history by walking the chain backwards via transparent inputs.
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error>;
+
+    /// Returns a vector of [`ReceivedTransactionOutput`] values describing the outputs of the
+    /// specified transaction that were received by the wallet. The number of confirmations until
+    /// each received output will be considered spendable is determined based upon the specified
+    /// target height and confirmations policy.
+    fn get_received_outputs(
+        &self,
+        txid: TxId,
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<Vec<ReceivedTransactionOutput>, Self::Error>;
 }
 
 /// Read-only operations required for testing light wallet functions.
@@ -2184,14 +2221,14 @@ impl BlockMetadata {
 pub struct ScannedBundles<NoteCommitment, NF> {
     final_tree_size: u32,
     commitments: Vec<(NoteCommitment, Retention<BlockHeight>)>,
-    nullifier_map: Vec<(TxId, u16, Vec<NF>)>,
+    nullifier_map: Vec<(TxIndex, TxId, Vec<NF>)>,
 }
 
 impl<NoteCommitment, NF> ScannedBundles<NoteCommitment, NF> {
     pub(crate) fn new(
         final_tree_size: u32,
         commitments: Vec<(NoteCommitment, Retention<BlockHeight>)>,
-        nullifier_map: Vec<(TxId, u16, Vec<NF>)>,
+        nullifier_map: Vec<(TxIndex, TxId, Vec<NF>)>,
     ) -> Self {
         Self {
             final_tree_size,
@@ -2211,7 +2248,7 @@ impl<NoteCommitment, NF> ScannedBundles<NoteCommitment, NF> {
     /// the block, so that either the txid or the combination of the block hash available from
     /// [`ScannedBlock::block_hash`] and returned transaction index may be used to uniquely
     /// identify the transaction, depending upon the needs of the caller.
-    pub fn nullifier_map(&self) -> &[(TxId, u16, Vec<NF>)] {
+    pub fn nullifier_map(&self) -> &[(TxIndex, TxId, Vec<NF>)] {
         &self.nullifier_map
     }
 
@@ -2326,28 +2363,39 @@ impl<A> ScannedBlock<A> {
     }
 }
 
+/// A trait representing a decryptable transaction.
+pub trait DecryptableTransaction<AccountId> {
+    type DecryptedSaplingOutput;
+    #[cfg(feature = "orchard")]
+    type DecryptedOrchardOutput;
+}
+
+impl<AccountId> DecryptableTransaction<AccountId> for Transaction {
+    type DecryptedSaplingOutput = DecryptedOutput<sapling::Note, AccountId>;
+    #[cfg(feature = "orchard")]
+    type DecryptedOrchardOutput = DecryptedOutput<orchard::Note, AccountId>;
+}
+
 /// A transaction that was detected during scanning of the blockchain,
 /// including its decrypted Sapling and/or Orchard outputs.
 ///
 /// The purpose of this struct is to permit atomic updates of the
 /// wallet database when transactions are successfully decrypted.
-pub struct DecryptedTransaction<'a, AccountId> {
+pub struct DecryptedTransaction<'a, Tx: DecryptableTransaction<AccountId>, AccountId> {
     mined_height: Option<BlockHeight>,
-    tx: &'a Transaction,
-    sapling_outputs: Vec<DecryptedOutput<sapling::Note, AccountId>>,
+    tx: &'a Tx,
+    sapling_outputs: Vec<Tx::DecryptedSaplingOutput>,
     #[cfg(feature = "orchard")]
-    orchard_outputs: Vec<DecryptedOutput<orchard::note::Note, AccountId>>,
+    orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
 }
 
-impl<'a, AccountId> DecryptedTransaction<'a, AccountId> {
+impl<'a, Tx: DecryptableTransaction<AccountId>, AccountId> DecryptedTransaction<'a, Tx, AccountId> {
     /// Constructs a new [`DecryptedTransaction`] from its constituent parts.
     pub fn new(
         mined_height: Option<BlockHeight>,
-        tx: &'a Transaction,
-        sapling_outputs: Vec<DecryptedOutput<sapling::Note, AccountId>>,
-        #[cfg(feature = "orchard")] orchard_outputs: Vec<
-            DecryptedOutput<orchard::note::Note, AccountId>,
-        >,
+        tx: &'a Tx,
+        sapling_outputs: Vec<Tx::DecryptedSaplingOutput>,
+        #[cfg(feature = "orchard")] orchard_outputs: Vec<Tx::DecryptedOrchardOutput>,
     ) -> Self {
         Self {
             mined_height,
@@ -2363,16 +2411,16 @@ impl<'a, AccountId> DecryptedTransaction<'a, AccountId> {
         self.mined_height
     }
     /// Returns the raw transaction data.
-    pub fn tx(&self) -> &Transaction {
+    pub fn tx(&self) -> &Tx {
         self.tx
     }
     /// Returns the Sapling outputs that were decrypted from the transaction.
-    pub fn sapling_outputs(&self) -> &[DecryptedOutput<sapling::Note, AccountId>] {
+    pub fn sapling_outputs(&self) -> &[Tx::DecryptedSaplingOutput] {
         &self.sapling_outputs
     }
     /// Returns the Orchard outputs that were decrypted from the transaction.
     #[cfg(feature = "orchard")]
-    pub fn orchard_outputs(&self) -> &[DecryptedOutput<orchard::note::Note, AccountId>] {
+    pub fn orchard_outputs(&self) -> &[Tx::DecryptedOrchardOutput] {
         &self.orchard_outputs
     }
 
@@ -2466,6 +2514,57 @@ impl<'a, AccountId> SentTransaction<'a, AccountId> {
     /// Returns the block height that this transaction was created to target.
     pub fn target_height(&self) -> TargetHeight {
         self.target_height
+    }
+}
+
+/// High-level information about the output of a transaction received by the wallet.
+///
+/// This type is capable of representing both shielded and transparent outputs. It does not
+/// internally store the transaction ID, so it must be interpreted in the context of a caller
+/// having requested output information for a specific transaction.
+pub struct ReceivedTransactionOutput {
+    pool_type: PoolType,
+    output_index: usize,
+    value: Zatoshis,
+    confirmations_until_spendable: u32,
+}
+
+impl ReceivedTransactionOutput {
+    /// Constructs a [`ReceivedTransactionOutput`] from its constituent parts.
+    pub fn from_parts(
+        pool_type: PoolType,
+        output_index: usize,
+        value: Zatoshis,
+        confirmations_until_spendable: u32,
+    ) -> Self {
+        Self {
+            pool_type,
+            output_index,
+            value,
+            confirmations_until_spendable,
+        }
+    }
+
+    /// Returns the pool in which the output value was received.
+    pub fn pool_type(&self) -> PoolType {
+        self.pool_type
+    }
+
+    /// Returns the index of the output among the transaction's outputs to the associated pool.
+    pub fn output_index(&self) -> usize {
+        self.output_index
+    }
+
+    /// Returns the value of the output.
+    pub fn value(&self) -> Zatoshis {
+        self.value
+    }
+
+    /// Returns the number of confirmations required for the output to be treated as spendable,
+    /// given a [`ConfirmationsPolicy`] that was specified at the time of the request for this
+    /// data.
+    pub fn confirmations_until_spendable(&self) -> u32 {
+        self.confirmations_until_spendable
     }
 }
 
@@ -2700,11 +2799,12 @@ impl AccountBirthday {
 ///
 /// An account is treated as having a single root of spending authority that spans the shielded and
 /// transparent rules for the purpose of balance, transaction listing, and so forth. However,
-/// transparent keys imported via [`WalletWrite::import_standalone_transparent_pubkey`] break this
-/// abstraction slightly, so wallets using this API need to be cautious to enforce the invariant
-/// that the wallet either maintains access to the keys required to spend **ALL** outputs received
-/// by the account, or that it **DOES NOT** offer any spending capability for the account, i.e. the
-/// account is treated as view-only for all user-facing operations.
+/// transparent keys imported via [`WalletWrite::import_standalone_transparent_pubkey`] or
+/// [`WalletWrite::import_standalone_transparent_script`] break this abstraction slightly, so
+/// wallets using this API need to be cautious to enforce the invariant that the wallet either
+/// maintains access to the keys required to spend **ALL** outputs received by the account, or that
+/// it **DOES NOT** offer any spending capability for the account, i.e. the account is treated as
+/// view-only for all user-facing operations.
 ///
 /// A future change to this trait might introduce a method to "upgrade" an imported
 /// account with derivation information. See [zcash/librustzcash#1284] for details.
@@ -2917,6 +3017,33 @@ pub trait WalletWrite: WalletRead {
         )
     }
 
+    /// Imports the given redeem script into the account without key derivation information, and
+    /// adds the associated transparent p2sh address.
+    ///
+    /// The imported address will contribute to the balance of the account (for UFVK-based
+    /// accounts), but spending funds held by this address requires the associated spending keys to
+    /// be provided explicitly when calling [`create_proposed_transactions`]. By extension, calls
+    /// to [`propose_shielding`] must only include addresses for which the spending application
+    /// holds or can obtain the spending keys.
+    ///
+    /// [`create_proposed_transactions`]: crate::data_api::wallet::create_proposed_transactions
+    /// [`propose_shielding`]: crate::data_api::wallet::propose_shielding
+    ///
+    /// # Spending limitations
+    ///
+    /// P2PKH-in-P2SH scripts are unsupported by PCZT at this time, so the only way to spend
+    /// from such an address is to use the [`create_proposed_transactions`] signing path.
+    #[cfg(feature = "transparent-key-import")]
+    fn import_standalone_transparent_script(
+        &mut self,
+        _account: Self::AccountId,
+        _script: zcash_script::script::Redeem,
+    ) -> Result<(), Self::Error> {
+        unimplemented!(
+            "WalletWrite::import_standalone_transparent_script must be overridden for wallets to use the `transparent-key-import` feature"
+        )
+    }
+
     /// Generates, persists, and marks as exposed the next available diversified address for the
     /// specified account, given the current addresses known to the wallet.
     ///
@@ -2990,7 +3117,7 @@ pub trait WalletWrite: WalletRead {
     /// Caches a decrypted transaction in the persistent wallet store.
     fn store_decrypted_tx(
         &mut self,
-        received_tx: DecryptedTransaction<Self::AccountId>,
+        received_tx: DecryptedTransaction<Transaction, Self::AccountId>,
     ) -> Result<(), Self::Error>;
 
     /// Sets the trust status of the given transaction to either trusted or untrusted.
@@ -3032,6 +3159,15 @@ pub trait WalletWrite: WalletRead {
     /// will only be possible to truncate to heights at which is is possible to create a witness
     /// given the current state of the wallet's note commitment tree.
     fn truncate_to_height(&mut self, max_height: BlockHeight) -> Result<BlockHeight, Self::Error>;
+
+    /// Truncates the wallet database to the specified chain state.
+    ///
+    /// In contrast to [`truncate_to_height`], this method allows the caller to truncate the wallet
+    /// database to a precise height by providing additional chain state information needed for
+    /// note commitment tree maintenance after the truncation.
+    ///
+    /// [`truncate_to_height`]: WalletWrite::truncate_to_height
+    fn truncate_to_chain_state(&mut self, chain_state: ChainState) -> Result<(), Self::Error>;
 
     /// Reserves the next `n` available ephemeral addresses for the given account.
     /// This cannot be undone, so as far as possible, errors associated with transaction

@@ -69,7 +69,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite + WalletCommitmentTrees,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     <DbT as WalletRead>::Error: std::error::Error + Send + Sync + 'static,
     <DbT as WalletCommitmentTrees>::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -98,7 +98,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
     // 3) Download chain tip metadata from lightwalletd
@@ -331,6 +331,7 @@ where
     let range = service::BlockRange {
         start: Some(start),
         end: Some(end),
+        pool_types: vec![],
     };
     let compact_blocks = client
         .get_block_range(range)
@@ -386,7 +387,7 @@ where
     CaT: BlockCache,
     CaT::Error: std::error::Error + Send + Sync + 'static,
     DbT: WalletWrite,
-    DbT::AccountId: ConditionallySelectable + Default + Send + 'static,
+    DbT::AccountId: ConditionallySelectable + Default + Send + Sync + 'static,
     DbT::Error: std::error::Error + Send + Sync + 'static,
 {
     info!("Scanning {}", scan_range);

@@ -12,24 +12,24 @@ use rand_distr::Distribution;
 use rusqlite::OptionalExtension;
 use rusqlite::types::Value;
 use rusqlite::{Connection, Row, named_params};
-use tracing::debug;
+use tracing::{debug, warn};
 
-use transparent::keys::{NonHardenedChildRange, TransparentKeyScope};
 use transparent::{
     address::{Script, TransparentAddress},
     bundle::{OutPoint, TxOut},
-    keys::{IncomingViewingKey, NonHardenedChildIndex},
+    keys::{IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope},
 };
-use zcash_address::unified::{Ivk, Typecode, Uivk};
-use zcash_client_backend::data_api::WalletUtxo;
-use zcash_client_backend::wallet::{Exposure, GapMetadata, TransparentAddressSource};
+use zcash_address::unified::{Ivk, Uivk};
 use zcash_client_backend::{
     data_api::{
         Account, AccountBalance, Balance, OutputStatusFilter, TransactionDataRequest,
-        TransactionStatusFilter,
+        TransactionStatusFilter, TransparentBalances, WalletUtxo,
         wallet::{ConfirmationsPolicy, TargetHeight},
     },
-    wallet::{TransparentAddressMetadata, WalletTransparentOutput},
+    wallet::{
+        Exposure, GapMetadata, TransparentAddressMetadata, TransparentAddressSource,
+        WalletTransparentOutput,
+    },
 };
 use zcash_keys::{
     address::Address,
@@ -37,17 +37,17 @@ use zcash_keys::{
     keys::{
         AddressGenerationError, UnifiedAddressRequest, UnifiedFullViewingKey,
         UnifiedIncomingViewingKey,
+        transparent::gap_limits::{GapLimits, generate_address_list},
     },
 };
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
-use zcash_primitives::transaction::fees::zip317;
+use zcash_primitives::transaction::{builder::DEFAULT_TX_EXPIRY_DELTA, fees::zip317};
 use zcash_protocol::{
     TxId,
-    consensus::{self, BlockHeight},
+    consensus::{self, BlockHeight, COINBASE_MATURITY_BLOCKS},
     value::{ZatBalance, Zatoshis},
 };
 use zcash_script::script;
-use zip32::{DiversifierIndex, Scope};
+use zip32::Scope;
 
 #[cfg(feature = "transparent-key-import")]
 use bip32::{PublicKey, PublicKeyBytes};
@@ -61,7 +61,7 @@ use super::{
     get_account_ids, get_account_internal,
 };
 use crate::{
-    AccountRef, AccountUuid, AddressRef, GapLimits, TxRef, UtxoId,
+    AccountRef, AccountUuid, AddressRef, TxRef, UtxoId,
     error::SqliteClientError,
     util::Clock,
     wallet::{common::tx_unexpired_condition, get_account, mempool_height},
@@ -143,16 +143,15 @@ pub(crate) fn get_transparent_receivers<P: consensus::Parameters>(
     let gap_limit_starts = scopes
         .iter()
         .filter_map(|key_scope| {
-            gap_limits
-                .limit_for(*key_scope)
-                .zip(key_scope.as_transparent())
-                .and_then(|(limit, t_key_scope)| {
+            key_scope.as_transparent().and_then(|t_key_scope| {
+                gap_limits.limit_for(t_key_scope).and_then(|limit| {
                     find_gap_start(conn, account_id, t_key_scope, limit)
                         .transpose()
-                        .map(|res| res.map(|child_idx| (*key_scope, (limit, child_idx))))
+                        .map(|res| res.map(|child_idx| (t_key_scope, (limit, child_idx))))
                 })
+            })
         })
-        .collect::<Result<HashMap<KeyScope, (u32, NonHardenedChildIndex)>, SqliteClientError>>()?;
+        .collect::<Result<HashMap<TransparentKeyScope, (u32, NonHardenedChildIndex)>, SqliteClientError>>()?;
 
     // Get all addresses with the provided scopes.
     let mut addr_query = conn.prepare(
@@ -162,7 +161,8 @@ pub(crate) fn get_transparent_receivers<P: consensus::Parameters>(
             transparent_child_index,
             imported_transparent_receiver_pubkey,
             exposed_at_height,
-            transparent_receiver_next_check_time
+            transparent_receiver_next_check_time,
+            imported_transparent_receiver_script
          FROM addresses
          WHERE account_id = :account_id
          AND cached_transparent_receiver_address IS NOT NULL
@@ -217,9 +217,11 @@ pub(crate) fn get_transparent_receivers<P: consensus::Parameters>(
             row.get::<_, Option<u32>>("exposed_at_height")?
                 .map_or(Exposure::Unknown, |h| Exposure::Exposed {
                     at_height: BlockHeight::from(h),
-                    gap_metadata: gap_limit_starts
-                        .get(&key_scope)
-                        .zip(address_index_opt)
+                    gap_metadata: key_scope
+                        .as_transparent()
+                        .and_then(|t_key_scope| {
+                            gap_limit_starts.get(&t_key_scope).zip(address_index_opt)
+                        })
                         .map_or(
                             GapMetadata::DerivationUnknown,
                             |((gap_limit, start), idx)| {
@@ -242,49 +244,111 @@ pub(crate) fn get_transparent_receivers<P: consensus::Parameters>(
             .map(decode_epoch_seconds)
             .transpose()?;
 
-        if let Some(taddr) = taddr {
-            let metadata = match key_scope {
-                #[cfg(feature = "transparent-key-import")]
-                KeyScope::Foreign => {
-                    let pubkey_bytes = row
-                        .get::<_, Option<Vec<u8>>>(3)?
-                        .ok_or_else(|| {
-                            SqliteClientError::CorruptedData(
-                            "Pubkey bytes must be present for all imported transparent addresses."
-                                .to_owned(),
-                        )
-                        })
-                        .and_then(|b| {
-                            <[u8; 33]>::try_from(&b[..]).map_err(|_| {
-                                SqliteClientError::CorruptedData(format!(
-                                    "Invalid public key byte length; must be 33 bytes, got {}.",
-                                    b.len()
-                                ))
-                            })
-                        })?;
-                    let pubkey = PublicKey::from_bytes(pubkey_bytes).map_err(|e| {
-                        SqliteClientError::CorruptedData(format!("Invalid public key: {}", e))
-                    })?;
-                    TransparentAddressMetadata::standalone(pubkey, exposure, next_check_time)
-                }
-                derived => {
-                    let scope_opt = <Option<TransparentKeyScope>>::from(derived);
-                    let (scope, address_index) =
-                        scope_opt.zip(address_index_opt).ok_or_else(|| {
-                            SqliteClientError::CorruptedData(
-                                "Derived addresses must have derivation metadata present."
-                                    .to_owned(),
-                            )
-                        })?;
+        #[cfg(feature = "transparent-key-import")]
+        let imported_transparent_receiver_script_bytes: Option<Vec<u8>> =
+            row.get("imported_transparent_receiver_script")?;
 
-                    TransparentAddressMetadata::derived(
-                        scope,
-                        address_index,
-                        exposure,
-                        next_check_time,
-                    )
+        if let Some(taddr) = taddr {
+            let p2pkh_metadata = || -> Result<TransparentAddressMetadata, SqliteClientError> {
+                match key_scope {
+                    #[cfg(feature = "transparent-key-import")]
+                    KeyScope::Foreign => {
+                        let pubkey_bytes = row
+                                .get::<_, Option<Vec<u8>>>(3)?
+                                .ok_or_else(|| {
+                                    SqliteClientError::CorruptedData(
+                                    "Pubkey bytes must be present for all imported transparent P2PKH addresses."
+                                        .to_owned(),
+                                )
+                                })
+                                .and_then(|b| {
+                                    <[u8; 33]>::try_from(&b[..]).map_err(|_| {
+                                        SqliteClientError::CorruptedData(format!(
+                                            "Invalid public key byte length; must be 33 bytes, got {}.",
+                                            b.len()
+                                        ))
+                                    })
+                                })?;
+                        let pubkey = PublicKey::from_bytes(pubkey_bytes).map_err(|e| {
+                            SqliteClientError::CorruptedData(format!("Invalid public key: {}", e))
+                        })?;
+                        Ok(TransparentAddressMetadata::standalone_p2pkh(
+                            pubkey,
+                            exposure,
+                            next_check_time,
+                        ))
+                    }
+                    derived => {
+                        let (scope, address_index) = derived
+                            .as_transparent()
+                            .zip(address_index_opt)
+                            .ok_or_else(|| {
+                                SqliteClientError::CorruptedData(
+                                    "Derived addresses must have derivation metadata present."
+                                        .to_owned(),
+                                )
+                            })?;
+
+                        Ok(TransparentAddressMetadata::derived(
+                            scope,
+                            address_index,
+                            exposure,
+                            next_check_time,
+                        ))
+                    }
                 }
             };
+
+            #[cfg(feature = "transparent-key-import")]
+            let p2sh_metadata =
+                |rs_bytes: &Vec<u8>| -> Result<TransparentAddressMetadata, SqliteClientError> {
+                    use zcash_script::script::{self, Code};
+
+                    let imported_transparent_receiver_script =
+                        script::Redeem::parse(&Code(rs_bytes.clone())).map_err(|e| {
+                            SqliteClientError::CorruptedData(format!(
+                                "Invalid redeem script: {:?}",
+                                e
+                            ))
+                        })?;
+
+                    if matches!(key_scope, KeyScope::Foreign) {
+                        // Standalone P2SH import
+                        Ok(TransparentAddressMetadata::standalone_script(
+                            imported_transparent_receiver_script,
+                            exposure,
+                            next_check_time,
+                        ))
+                    } else {
+                        Err(SqliteClientError::CorruptedData(
+                            "non-foreign-scoped address is not supported.".to_owned(),
+                        ))
+                    }
+                };
+
+            #[cfg(feature = "transparent-key-import")]
+            let metadata = if let Some(ref rs_bytes) = imported_transparent_receiver_script_bytes {
+                p2sh_metadata(rs_bytes)?
+            } else {
+                p2pkh_metadata()?
+            };
+
+            #[cfg(not(feature = "transparent-key-import"))]
+            let metadata = p2pkh_metadata()?;
+
+            #[cfg(not(feature = "transparent-key-import"))]
+            {
+                if matches!(key_scope, KeyScope::Foreign) {
+                    // Foreign-scoped addresses (standalone imports) require
+                    // transparent-key-import. Skip gracefully for DB compatibility.
+                    warn!(
+                        "Skipping foreign-scoped address {}: \
+                         transparent-key-import feature is not enabled",
+                        taddr.encode(params),
+                    );
+                    continue;
+                }
+            }
 
             ret.insert(taddr, metadata);
         }
@@ -579,37 +643,6 @@ pub(crate) fn reserve_next_n_addresses<P: consensus::Parameters>(
         .collect())
 }
 
-pub(crate) fn generate_external_address(
-    uivk: &UnifiedIncomingViewingKey,
-    ua_request: UnifiedAddressRequest,
-    index: NonHardenedChildIndex,
-) -> Result<(Address, TransparentAddress), AddressGenerationError> {
-    let ua = uivk.address(index.into(), ua_request);
-    let transparent_address = uivk
-        .transparent()
-        .as_ref()
-        .ok_or(AddressGenerationError::KeyNotAvailable(Typecode::P2pkh))?
-        .derive_address(index)
-        .map_err(|_| {
-            AddressGenerationError::InvalidTransparentChildIndex(DiversifierIndex::from(index))
-        })?;
-    Ok((
-        ua.map_or_else(
-            |e| {
-                if matches!(e, AddressGenerationError::ShieldedReceiverRequired) {
-                    // fall back to the transparent-only address
-                    Ok(Address::from(transparent_address))
-                } else {
-                    // other address generation errors are allowed to propagate
-                    Err(e)
-                }
-            },
-            |addr| Ok(Address::from(addr)),
-        )?,
-        transparent_address,
-    ))
-}
-
 /// Generates addresses to fill the specified non-hardened child index range.
 ///
 /// The provided [`UnifiedAddressRequest`] is used to pre-generate unified addresses that correspond
@@ -633,7 +666,6 @@ pub(crate) fn generate_address_range<P: consensus::Parameters>(
 ) -> Result<(), SqliteClientError> {
     let account = get_account_internal(conn, params, account_id)?
         .ok_or_else(|| SqliteClientError::AccountUnknown)?;
-
     generate_address_range_internal(
         conn,
         params,
@@ -644,7 +676,8 @@ pub(crate) fn generate_address_range<P: consensus::Parameters>(
         request,
         range_to_store,
         require_key,
-    )
+    )?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -659,39 +692,26 @@ pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
     range_to_store: Range<NonHardenedChildIndex>,
     require_key: bool,
 ) -> Result<(), SqliteClientError> {
-    if !account_uivk.has_transparent() {
-        if require_key {
-            return Err(SqliteClientError::AddressGeneration(
-                AddressGenerationError::KeyNotAvailable(Typecode::P2pkh),
-            ));
-        } else {
-            return Ok(());
-        }
-    }
+    let address_list = generate_address_list(
+        account_uivk,
+        account_ufvk,
+        key_scope,
+        request,
+        range_to_store,
+        require_key,
+    )?;
+    store_address_range(conn, params, account_id, key_scope, address_list)?;
+    Ok(())
+}
 
-    let gen_addrs = |key_scope: TransparentKeyScope, index: NonHardenedChildIndex| match key_scope {
-        TransparentKeyScope::EXTERNAL => generate_external_address(account_uivk, request, index),
-        TransparentKeyScope::INTERNAL => {
-            let internal_address = account_ufvk
-                .and_then(|k| k.transparent())
-                .expect("presence of transparent key was checked above.")
-                .derive_internal_ivk()?
-                .derive_address(index)?;
-            Ok((Address::from(internal_address), internal_address))
-        }
-        TransparentKeyScope::EPHEMERAL => {
-            let ephemeral_address = account_ufvk
-                .and_then(|k| k.transparent())
-                .expect("presence of transparent key was checked above.")
-                .derive_ephemeral_ivk()?
-                .derive_ephemeral_address(index)?;
-            Ok((Address::from(ephemeral_address), ephemeral_address))
-        }
-        _ => Err(AddressGenerationError::UnsupportedTransparentKeyScope(
-            key_scope,
-        )),
-    };
-
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn store_address_range<P: consensus::Parameters>(
+    conn: &rusqlite::Transaction,
+    params: &P,
+    account_id: AccountRef,
+    key_scope: TransparentKeyScope,
+    address_list: Vec<(Address, TransparentAddress, NonHardenedChildIndex)>,
+) -> Result<(), SqliteClientError> {
     // exposed_at_height is initially NULL
     let mut stmt_insert_address = conn.prepare_cached(
         "INSERT INTO addresses (
@@ -707,8 +727,7 @@ pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
          ON CONFLICT (account_id, diversifier_index_be, key_scope) DO NOTHING",
     )?;
 
-    for transparent_child_index in NonHardenedChildRange::from(range_to_store) {
-        let (address, transparent_address) = gen_addrs(key_scope, transparent_child_index)?;
+    for (address, transparent_address, transparent_child_index) in address_list {
         let zcash_address = address.to_zcash_address(params);
         let receiver_flags: ReceiverFlags = zcash_address
             .clone()
@@ -745,20 +764,15 @@ pub(crate) fn generate_address_range_internal<P: consensus::Parameters>(
 pub(crate) fn generate_gap_addresses<P: consensus::Parameters>(
     conn: &rusqlite::Transaction,
     params: &P,
+    gap_limits: &GapLimits,
     account_id: AccountRef,
     key_scope: TransparentKeyScope,
-    gap_limits: &GapLimits,
     request: UnifiedAddressRequest,
     require_key: bool,
 ) -> Result<(), SqliteClientError> {
-    let gap_limit = match key_scope {
-        TransparentKeyScope::EXTERNAL => Ok(gap_limits.external()),
-        TransparentKeyScope::INTERNAL => Ok(gap_limits.internal()),
-        TransparentKeyScope::EPHEMERAL => Ok(gap_limits.ephemeral()),
-        _ => Err(AddressGenerationError::UnsupportedTransparentKeyScope(
-            key_scope,
-        )),
-    }?;
+    let gap_limit = gap_limits.limit_for(key_scope).ok_or(
+        AddressGenerationError::UnsupportedTransparentKeyScope(key_scope),
+    )?;
 
     if let Some(gap_start) = find_gap_start(conn, account_id, key_scope, gap_limit)? {
         generate_address_range(
@@ -825,9 +839,9 @@ pub(crate) fn update_gap_limits<P: consensus::Parameters>(
             generate_gap_addresses(
                 conn,
                 params,
+                gap_limits,
                 account_id,
                 t_key_scope,
-                gap_limits,
                 UnifiedAddressRequest::unsafe_custom(Allow, Allow, Require),
                 false,
             )?;
@@ -1015,7 +1029,7 @@ pub(crate) fn tx_unexpired_condition_minconf_0(tx: &str) -> String {
 ///   `accounts.id = transparent_received_outputs.account_id`
 /// - The parent is responsible for enclosing this condition in parentheses as appropriate.
 /// - The parent is responsible for ensuring that this condition will only be checked for
-///   outputs that have already otherwise been verified to be spendible, i.e. it must be
+///   outputs that have already otherwise been verified to be spendable, i.e. it must be
 ///   used as a strictly constricting clause on the set of outputs.
 pub(crate) fn excluding_wallet_internal_ephemeral_outputs(
     transparent_received_outputs: &str,
@@ -1045,16 +1059,43 @@ pub(crate) fn excluding_wallet_internal_ephemeral_outputs(
     )
 }
 
+/// Generates a SQL condition that checks the coinbase maturity rule.
+///
+/// # Usage requirements
+/// - `tx` must be set to the SQL variable name for the transaction in the parent.
+/// - The parent is responsible for enclosing this condition in parentheses as appropriate.
+/// - The parent is responsible for ensuring that this condition will only be checked for
+///   outputs that have already otherwise been verified to be spendable, i.e. it must be
+///   used as a strictly constricting clause on the set of outputs.
+pub(crate) fn excluding_immature_coinbase_outputs(tx: &str) -> String {
+    // FIXME: If a coinbase transaction is discovered via the get_compact_utxos RPC call
+    // we won't have sufficient info to identify it as coinbase, so it may not be excluded
+    // unless decrypt_and_store_transaction has been called on the transaction that produced it.
+    //
+    // To fix this we'll need to add the `tx_index` field to the GetAddressUtxosReply proto type.
+    //
+    // See the tracking ticket https://github.com/zcash/lightwallet-protocol/issues/17.
+    format!(
+        r#"
+        NOT (
+            -- the output is a coinbase output
+            IFNULL({tx}.tx_index, 1) == 0
+            -- the coinbase output is immature (< 100 confirmations)
+            AND :target_height - {tx}.mined_height < {COINBASE_MATURITY_BLOCKS}
+        )
+        "#
+    )
+}
 /// Get information about a transparent output controlled by the wallet.
 ///
 /// # Parameters
 /// - `outpoint`: The identifier for the output to be retrieved.
-/// - `spendable_as_of`: The target height of a transaction under construction that will spend the
+/// - `target_height`: The target height of a transaction under construction that will spend the
 ///   returned output. If this is `None`, no spendability checks are performed.
 pub(crate) fn get_wallet_transparent_output(
     conn: &rusqlite::Connection,
     outpoint: &OutPoint,
-    spendable_as_of: Option<TargetHeight>,
+    target_height: Option<TargetHeight>,
 ) -> Result<Option<WalletUtxo>, SqliteClientError> {
     // This could return as unspent outputs that are actually not spendable, if they are the
     // outputs of deshielding transactions where the spend anchors have been invalidated by a
@@ -1090,8 +1131,8 @@ pub(crate) fn get_wallet_transparent_output(
             named_params![
                 ":txid": outpoint.hash(),
                 ":output_index": outpoint.n(),
-                ":target_height": spendable_as_of.map(u32::from),
-                ":allow_unspendable": spendable_as_of.is_none(),
+                ":target_height": target_height.map(u32::from),
+                ":allow_unspendable": target_height.is_none(),
             ],
             |row| {
                 let output = to_unspent_transparent_output(row)?;
@@ -1110,7 +1151,8 @@ pub(crate) fn get_wallet_transparent_output(
 /// such that, at height `target_height`:
 /// * the transaction that produced the output had or will have at least the number of
 ///   confirmations required by the specified confirmations policy; and
-/// * the output is unspent as of the current chain tip.
+/// * the output is unspent as of the current chain tip; and
+/// * the output adheres to the coinbase maturity requirement, if it is a coinbase output.
 ///
 /// An output that is potentially spent by an unmined transaction in the mempool is excluded
 /// iff the spending transaction will not be expired at `target_height`.
@@ -1129,19 +1171,22 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
     let mut stmt_utxos = conn.prepare(&format!(
         "SELECT t.txid, u.output_index, u.script,
                 u.value_zat, addresses.key_scope,
+                addresses.imported_transparent_receiver_script,
                 t.mined_height AS received_height
          FROM transparent_received_outputs u
          JOIN transactions t ON t.id_tx = u.transaction_id
          JOIN accounts ON accounts.id = u.account_id
          JOIN addresses ON addresses.id = u.address_id
          WHERE u.address = :address
-         AND u.value_zat >= :min_value
+         AND u.value_zat > :min_value
          AND ({}) -- the transaction is mined or unexpired with minconf 0
          AND u.id NOT IN ({}) -- and the output is unspent
-         AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs",
+         AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+         AND ({}) -- exclude immature coinbase outputs",
         tx_unexpired_condition_minconf_0("t"),
         spent_utxos_clause(),
-        excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts")
+        excluding_wallet_internal_ephemeral_outputs("u", "addresses", "t", "accounts"),
+        excluding_immature_coinbase_outputs("t"),
     ))?;
 
     let addr_str = address.encode(params);
@@ -1163,8 +1208,23 @@ pub(crate) fn get_spendable_transparent_outputs<P: consensus::Parameters>(
 
     let mut utxos = Vec::<WalletUtxo>::new();
     while let Some(row) = rows.next()? {
-        let output = to_unspent_transparent_output(row)?;
+        let mut output = to_unspent_transparent_output(row)?;
         let key_scope = KeyScope::decode(row.get("key_scope")?)?.as_transparent();
+
+        // If the address has a redeem script, compute the known input size for fee
+        // estimation so that the ZIP 317 fee calculator can handle P2SH inputs.
+        let imported_transparent_receiver_script_bytes: Option<Vec<u8>> =
+            row.get("imported_transparent_receiver_script")?;
+        if let Some(rs_bytes) = imported_transparent_receiver_script_bytes {
+            if let Ok(from_chain) = script::FromChain::parse(&script::Code(rs_bytes)) {
+                if let Some(input_size) =
+                    transparent::builder::p2sh_input_serialized_len(&from_chain)
+                {
+                    output = output.with_known_input_size(input_size);
+                }
+            }
+        }
+
         utxos.push(WalletUtxo::new(output, key_scope));
     }
 
@@ -1183,7 +1243,7 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
     account_uuid: AccountUuid,
     target_height: TargetHeight,
     confirmations_policy: ConfirmationsPolicy,
-) -> Result<HashMap<TransparentAddress, (TransparentKeyScope, Balance)>, SqliteClientError> {
+) -> Result<TransparentBalances, SqliteClientError> {
     // We treat all transparent UTXOs as untrusted; however, if zero-conf shielding
     // is enabled, we set the minimum number of confirmations to zero.
     let min_confirmations = if confirmations_policy.allow_zero_conf_shielding() {
@@ -1221,17 +1281,10 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
         let taddr = TransparentAddress::decode(params, &taddr_str)?;
         let value = Zatoshis::from_nonnegative_i64(row.get("value_zat")?)?;
         let key_scope_code: i64 = row.get("key_scope")?;
-        let key_scope = KeyScope::decode(key_scope_code)?
-            .as_transparent()
-            .ok_or_else(|| {
-                SqliteClientError::CorruptedData(format!(
-                    "Invalid key scope code for transparent received output: {}",
-                    key_scope_code
-                ))
-            })?;
+        let key_origin = KeyScope::decode(key_scope_code)?.as_key_origin();
 
-        let entry = result.entry(taddr).or_insert((key_scope, Balance::ZERO));
-        if value < zip317::MARGINAL_FEE {
+        let entry = result.entry(taddr).or_insert((key_origin, Balance::ZERO));
+        if value <= zip317::MARGINAL_FEE {
             entry.1.add_uneconomic_value(value)?;
         } else {
             entry.1.add_spendable_value(value)?;
@@ -1280,17 +1333,10 @@ pub(crate) fn get_transparent_balances<P: consensus::Parameters>(
             let taddr = TransparentAddress::decode(params, &taddr_str)?;
             let value = Zatoshis::from_nonnegative_i64(row.get("value_zat")?)?;
             let key_scope_code: i64 = row.get("key_scope")?;
-            let key_scope = KeyScope::decode(key_scope_code)?
-                .as_transparent()
-                .ok_or_else(|| {
-                    SqliteClientError::CorruptedData(format!(
-                        "Invalid key scope code for transparent received output: {}",
-                        key_scope_code
-                    ))
-                })?;
+            let key_origin = KeyScope::decode(key_scope_code)?.as_key_origin();
 
-            let entry = result.entry(taddr).or_insert((key_scope, Balance::ZERO));
-            if value < zip317::MARGINAL_FEE {
+            let entry = result.entry(taddr).or_insert((key_origin, Balance::ZERO));
+            if value <= zip317::MARGINAL_FEE {
                 entry.1.add_uneconomic_value(value)?;
             } else {
                 entry.1.add_spendable_value(value)?;
@@ -1347,10 +1393,10 @@ pub(crate) fn add_transparent_account_balances(
             .entry(account)
             .or_insert(AccountBalance::ZERO)
             .with_unshielded_balance_mut(|bal| {
-                if value >= zip317::MARGINAL_FEE {
-                    bal.add_spendable_value(value)
-                } else {
+                if value <= zip317::MARGINAL_FEE {
                     bal.add_uneconomic_value(value)
+                } else {
+                    bal.add_spendable_value(value)
                 }
             })?;
     }
@@ -1401,10 +1447,10 @@ pub(crate) fn add_transparent_account_balances(
                 .entry(account)
                 .or_insert(AccountBalance::ZERO)
                 .with_unshielded_balance_mut(|bal| {
-                    if value >= zip317::MARGINAL_FEE {
-                        bal.add_pending_spendable_value(value)
-                    } else {
+                    if value <= zip317::MARGINAL_FEE {
                         bal.add_uneconomic_value(value)
+                    } else {
+                        bal.add_pending_spendable_value(value)
                     }
                 })?;
         }
@@ -1519,7 +1565,7 @@ pub(crate) fn put_received_transparent_utxo<P: consensus::Parameters>(
     params: &P,
     gap_limits: &GapLimits,
     output: &WalletTransparentOutput,
-) -> Result<(AccountRef, KeyScope, UtxoId), SqliteClientError> {
+) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
     let observed_height = chain_tip_height(conn)?.ok_or(SqliteClientError::ChainHeightUnknown)?;
     put_transparent_output(conn, params, gap_limits, output, observed_height, true)
 }
@@ -1777,7 +1823,8 @@ pub(crate) fn get_transparent_address_metadata<P: consensus::Parameters>(
                 key_scope,
                 imported_transparent_receiver_pubkey,
                 exposed_at_height,
-                transparent_receiver_next_check_time
+                transparent_receiver_next_check_time,
+                imported_transparent_receiver_script
              FROM addresses
              JOIN accounts ON addresses.account_id = accounts.id
              WHERE accounts.uuid = :account_uuid
@@ -1797,15 +1844,15 @@ pub(crate) fn get_transparent_address_metadata<P: consensus::Parameters>(
                     let address_index = address_index_from_diversifier_index_be(row.get("diversifier_index_be")?)?;
                     let exposed_at_height = row.get::<_, Option<u32>>("exposed_at_height")?.map(BlockHeight::from);
 
-                    match <Option<TransparentKeyScope>>::from(key_scope).zip(address_index) {
-                        Some((scope, address_index)) => {
+                    match key_scope.as_transparent().zip(address_index) {
+                        Some((t_key_scope, address_index)) => {
                             let exposure = exposed_at_height.map_or(
                                 Ok::<_, SqliteClientError>(Exposure::Unknown),
                                 |at_height| {
-                                    let gap_metadata = match gap_limits.limit_for(key_scope) {
+                                    let gap_metadata = match gap_limits.limit_for(t_key_scope) {
                                         None => GapMetadata::DerivationUnknown,
                                         Some(gap_limit) => {
-                                            find_gap_start(conn, account_id, scope, gap_limit)?.map_or(
+                                            find_gap_start(conn, account_id, t_key_scope, gap_limit)?.map_or(
                                                 GapMetadata::GapRecoverable { gap_limit },
                                                 |gap_start| {
                                                     if let Some(gap_position) = address_index.index().checked_sub(gap_start.index()) {
@@ -1829,46 +1876,73 @@ pub(crate) fn get_transparent_address_metadata<P: consensus::Parameters>(
                             )?;
 
                             Ok(TransparentAddressMetadata::derived(
-                                scope,
+                                t_key_scope,
                                 address_index,
                                 exposure,
                                 next_check_time
                             ))
                         }
                         None => {
-                            if let Some(_pubkey_bytes) = row.get::<_, Option<Vec<u8>>>("imported_transparent_receiver_pubkey")? {
-                                #[cfg(not(feature = "transparent-key-import"))]
-                                let addr_meta = Err(SqliteClientError::CorruptedData(
-                                    "standalone imported transparent addresses are not supported by this build of `zcash_client_sqlite`".to_string()
-                                ));
+                            let _imported_transparent_receiver_script_bytes: Option<Vec<u8>> = row.get("imported_transparent_receiver_script")?;
+                            let _pubkey_bytes = row.get::<_, Option<Vec<u8>>>("imported_transparent_receiver_pubkey")?;
 
-                                #[cfg(feature = "transparent-key-import")]
-                                let addr_meta = {
-                                    let pubkey_bytes = PublicKeyBytes::try_from(_pubkey_bytes).map_err(|_| {
+                            let _standalone_exposure = exposed_at_height.map_or(
+                                Exposure::Unknown,
+                                |at_height| Exposure::Exposed {
+                                    at_height,
+                                    gap_metadata: GapMetadata::DerivationUnknown
+                                }
+                            );
+
+                            #[cfg(feature = "transparent-key-import")]
+                            {
+                                if let Some(ref rs_bytes) = _imported_transparent_receiver_script_bytes {
+                                    use zcash_script::script::{self, Code};
+
+                                    let imported_transparent_receiver_script =
+                                        script::Redeem::parse(&Code(rs_bytes.clone())).map_err(|e| {
+                                            SqliteClientError::CorruptedData(format!(
+                                                "Invalid redeem script: {:?}",
+                                                e
+                                            ))
+                                        })?;
+
+                                    Ok(TransparentAddressMetadata::standalone_script(
+                                        imported_transparent_receiver_script,
+                                        _standalone_exposure,
+                                        next_check_time,
+                                    ))
+                                } else if let Some(ref pubkey_bytes_vec) = _pubkey_bytes {
+                                    let pubkey_bytes = PublicKeyBytes::try_from(pubkey_bytes_vec.clone()).map_err(|_| {
                                         SqliteClientError::CorruptedData(
                                             "imported_transparent_receiver_pubkey must be 33 bytes in length".to_string()
                                         )
                                     })?;
                                     let pubkey = secp256k1::PublicKey::from_bytes(pubkey_bytes)?;
 
-                                    let addr_meta = TransparentAddressMetadata::standalone(
+                                    Ok(TransparentAddressMetadata::standalone_p2pkh(
                                         pubkey,
-                                        exposed_at_height.map_or(
-                                            Exposure::Unknown,
-                                            |at_height| Exposure::Exposed {
-                                                at_height,
-                                                gap_metadata: GapMetadata::DerivationUnknown
-                                            }
-                                        ),
-                                        next_check_time
-                                    );
+                                        _standalone_exposure,
+                                        next_check_time,
+                                    ))
+                                } else {
+                                    Err(SqliteClientError::CorruptedData(
+                                        "imported_transparent_receiver_pubkey or imported_transparent_receiver_script must be set for \"standalone\" transparent addresses".to_string()
+                                    ))
+                                }
+                            }
 
-                                    Ok(addr_meta)
-                                };
-
-                                addr_meta
-                            } else {
-                                Err(SqliteClientError::CorruptedData("imported_transparent_receiver_pubkey must be set for \"standalone\" transparent addresses".to_string()))
+                            #[cfg(not(feature = "transparent-key-import"))]
+                            {
+                                if _pubkey_bytes.is_some() || _imported_transparent_receiver_script_bytes.is_some() {
+                                    Err(SqliteClientError::CorruptedData(
+                                        "standalone imported transparent addresses are not supported by this build of `zcash_client_sqlite`".to_string()
+                                    ))
+                                } else {
+                                    Err(SqliteClientError::CorruptedData(
+                                        "imported_transparent_receiver_pubkey or imported_transparent_receiver_script must be set for \"standalone\" transparent addresses".to_string()
+                                    ))
+                                }
                             }
                         }
                     }
@@ -1961,21 +2035,23 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
     output: &WalletTransparentOutput,
     observation_height: BlockHeight,
     known_unspent: bool,
-) -> Result<(AccountRef, KeyScope, UtxoId), SqliteClientError> {
+) -> Result<(AccountRef, AccountUuid, KeyScope, UtxoId), SqliteClientError> {
     let addr_str = output.recipient_address().encode(params);
 
     // Unlike the shielded pools, we only can receive transparent outputs on addresses for which we
     // have an `addresses` table entry, so we can just query for that here.
-    let (address_id, account_id, key_scope_code) = conn
+    let (address_id, account_id, account_uuid, key_scope_code) = conn
         .query_row(
-            "SELECT id, account_id, key_scope
+            "SELECT addresses.id, account_id, accounts.uuid, key_scope
              FROM addresses
+             JOIN accounts ON accounts.id = addresses.account_id
              WHERE cached_transparent_receiver_address = :transparent_address",
             named_params! {":transparent_address": addr_str},
             |row| {
                 Ok((
                     row.get("id").map(AddressRef)?,
                     row.get("account_id").map(AccountRef)?,
+                    row.get("uuid").map(AccountUuid)?,
                     row.get("key_scope")?,
                 ))
             },
@@ -2128,7 +2204,7 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
         output_height.map_or(observation_height, BlockHeight::from),
     )?;
 
-    Ok((account_id, key_scope, utxo_id))
+    Ok((account_id, account_uuid, key_scope, utxo_id))
 }
 
 /// Adds a request to retrieve transactions involving the specified address to the transparent
@@ -2212,7 +2288,89 @@ mod tests {
         zcash_client_backend::data_api::testing::transparent::gap_limits(
             TestDbFactory::default(),
             BlockCache::new(),
-            GapLimits::default().into(),
+            GapLimits::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_pubkey() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_pubkey(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_pubkey_idempotent() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_pubkey_idempotent(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_pubkey_conflict() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_pubkey_conflict(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_pubkey_balance() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_pubkey_balance(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_spend_from_standalone_pubkey() {
+        zcash_client_backend::data_api::testing::transparent::spend_from_standalone_pubkey(
+            TestDbFactory::default(),
+            BlockCache::new(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_p2sh() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_p2sh(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_p2sh_idempotent() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_p2sh_idempotent(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_p2sh_conflict() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_p2sh_conflict(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_import_standalone_transparent_p2sh_balance() {
+        zcash_client_backend::data_api::testing::transparent::import_standalone_transparent_p2sh_balance(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-key-import")]
+    fn test_spend_from_standalone_p2sh() {
+        zcash_client_backend::data_api::testing::transparent::spend_from_standalone_p2sh(
+            TestDbFactory::default(),
+            BlockCache::new(),
         );
     }
 

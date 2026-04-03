@@ -21,6 +21,8 @@ jobs:
           - Linux
         state:
           - transparent
+          - transparent-inputs-only
+          - transparent-key-encoding-only
           - Sapling-only
           - Orchard
           - all-pools
@@ -29,10 +31,14 @@ jobs:
 
         include:
           - target: Linux
-            os: ubuntu-latest-8cores
+            os: ${{ vars.UBUNTU_LARGE_RUNNER || 'ubuntu-latest' }}
 
           - state: transparent
             transparent-pool: true
+          - state: transparent-inputs-only
+            extra_flags: transparent-inputs
+          - state: transparent-key-encoding-only
+            extra_flags: transparent-key-encoding
           - state: Orchard
             orchard-pool: true
           - state: all-pools
@@ -48,7 +54,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
@@ -59,15 +65,10 @@ jobs:
           all-pools: ${{ matrix.all-pools || false }}
           all-features: ${{ matrix.all-features || false }}
           extra-features: ${{ matrix.extra_flags || '' }}
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: msrv
+          save-if: ${{ matrix.state == 'all-features' }}
       - name: Run tests
         run: >
           cargo test
@@ -97,7 +98,7 @@ jobs:
           - target: macOS
             os: macOS-latest
           - target: Windows
-            os: windows-latest-8cores
+            os: ${{ vars.WINDOWS_LARGE_RUNNER || 'windows-latest' }}
 
           - state: transparent
             transparent-pool: true
@@ -122,7 +123,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
@@ -133,15 +134,10 @@ jobs:
           all-pools: ${{ matrix.all-pools || false }}
           all-features: ${{ matrix.all-features || false }}
           extra-features: ${{ matrix.extra_flags || '' }}
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: msrv
+          save-if: ${{ matrix.state == 'all-features' }}
       - name: Run tests
         run: >
           cargo test
@@ -167,7 +163,7 @@ jobs:
 
         include:
           - target: Linux
-            os: ubuntu-latest-8cores
+            os: ${{ vars.UBUNTU_LARGE_RUNNER || 'ubuntu-latest' }}
 
           - state: transparent
             transparent-pool: true
@@ -184,7 +180,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
@@ -195,15 +191,10 @@ jobs:
           all-pools: false
           all-features: ${{ matrix.all-features || false }}
           extra-features: ${{ matrix.extra_flags || '' }}
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: msrv
+          save-if: "false"
       - name: Run slow tests
         run: >
           cargo test
@@ -246,7 +237,7 @@ jobs:
       RUSTDOCFLAGS: ${{ matrix.rustflags }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
@@ -254,15 +245,10 @@ jobs:
         with:
           all-features: ${{ matrix.all-features || false }}
           extra-features: ${{ matrix.extra_flags || '' }}
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: msrv
+          save-if: "false"
       - name: Run check
         run: >
           cargo check
@@ -280,20 +266,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
         uses: ./.github/actions/prepare
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-latest
+          shared-key: latest
       - uses: dtolnay/rust-toolchain@stable
         id: toolchain
       - run: rustup override set "${TOOLCHAIN}"
@@ -324,7 +304,7 @@ jobs:
             build_deps: >
               gcc-multilib
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           path: crates
@@ -370,7 +350,7 @@ jobs:
             build_deps: >
               gcc-arm-none-eabi
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           path: crates
@@ -417,7 +397,7 @@ jobs:
     name: Bitrot check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       # Build benchmarks to prevent bitrot
@@ -430,7 +410,7 @@ jobs:
     permissions:
       checks: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       # We can't currently use only the common feature set (to exclude checking of
@@ -454,7 +434,7 @@ jobs:
       checks: write
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       # We can't currently use only the common feature set (to exclude checking of
@@ -479,48 +459,13 @@ jobs:
           args: >
             -W clippy::all
 
-  codecov:
-    name: Code coverage
-    runs-on: ubuntu-latest
-    container:
-      image: xd009642/tarpaulin:develop-nightly
-      options: --security-opt seccomp=unconfined
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - id: prepare
-        uses: ./.github/actions/prepare
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: codecov-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Generate coverage report
-        run: >
-          cargo tarpaulin
-          --engine llvm
-          ${{ steps.prepare.outputs.feature-flags }}
-          --release
-          --timeout 600
-          --out xml
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
   # This is run with nightly and `RUSTDOCFLAGS` to emulate the documentation renders on
   # docs.rs and in `.github/workflows/book.yml` as closely as possible.
   doc-links:
     name: Intra-doc links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
@@ -546,17 +491,27 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  readme-graph:
+    name: Readme dependency graph
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check consistency
+        run: python3 .github/helpers/check-dep-graph.py
+
   protobuf:
     name: protobuf consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - id: prepare
@@ -582,7 +537,7 @@ jobs:
     name: UUID validity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - name: Extract UUIDs

@@ -14,32 +14,24 @@
 //!   - A source of randomness.
 
 use blake2b_simd::Hash as Blake2bHash;
+use orchard::primitives::redpallas;
 use rand_core::OsRng;
 
 use ::transparent::sighash::{SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE};
 use zcash_primitives::transaction::{
-    Authorization, TransactionData, TxDigests, TxVersion, sighash::SignableInput,
-    sighash_v5::v5_signature_hash, txid::TxIdDigester,
+    TransactionData, TxDigests, sighash::SignableInput, txid::TxIdDigester,
 };
-use zcash_protocol::consensus::BranchId;
-#[cfg(all(
-    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-    feature = "zip-233"
-))]
-use zcash_protocol::value::Zatoshis;
 
 use crate::{
-    Pczt,
+    ExtractError, ParsedPczt, Pczt,
     common::{
         FLAG_HAS_SIGHASH_SINGLE, FLAG_SHIELDED_MODIFIABLE, FLAG_TRANSPARENT_INPUTS_MODIFIABLE,
         FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE, Global,
     },
 };
 
-use crate::common::determine_lock_time;
-
-const V5_TX_VERSION: u32 = 5;
-const V5_VERSION_GROUP_ID: u32 = 0x26A7270A;
+pub use crate::EffectsOnly;
+use crate::sighash;
 
 pub struct Signer {
     global: Global,
@@ -50,38 +42,28 @@ pub struct Signer {
     tx_data: TransactionData<EffectsOnly>,
     txid_parts: TxDigests<Blake2bHash>,
     shielded_sighash: [u8; 32],
-    secp: secp256k1::Secp256k1<secp256k1::SignOnly>,
+    secp: secp256k1::Secp256k1<secp256k1::All>,
 }
 
 impl Signer {
     /// Instantiates the Signer role with the given PCZT.
     pub fn new(pczt: Pczt) -> Result<Self, Error> {
-        let Pczt {
+        let ParsedPczt {
             global,
             transparent,
             sapling,
             orchard,
-        } = pczt;
-
-        let transparent = transparent.into_parsed().map_err(Error::TransparentParse)?;
-        let sapling = sapling.into_parsed().map_err(Error::SaplingParse)?;
-        let orchard = orchard.into_parsed().map_err(Error::OrchardParse)?;
-
-        let tx_data = pczt_to_tx_data(&global, &transparent, &sapling, &orchard)?;
+            tx_data,
+        } = pczt.extract_tx_data(
+            |t| {
+                t.extract_effects()
+                    .map_err(ExtractError::TransparentExtract)
+            },
+            |s| s.extract_effects().map_err(ExtractError::SaplingExtract),
+            |o| o.extract_effects().map_err(ExtractError::OrchardExtract),
+        )?;
         let txid_parts = tx_data.digest(TxIdDigester);
-
-        // TODO: Pick sighash based on tx version.
-        match (global.tx_version, global.version_group_id) {
-            (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(()),
-            (version, version_group_id) => Err(Error::Global(GlobalError::UnsupportedTxVersion {
-                version,
-                version_group_id,
-            })),
-        }?;
-        let shielded_sighash = v5_signature_hash(&tx_data, &SignableInput::Shielded, &txid_parts)
-            .as_ref()
-            .try_into()
-            .expect("correct length");
+        let shielded_sighash = sighash(&tx_data, &SignableInput::Shielded, &txid_parts);
 
         Ok(Self {
             global,
@@ -91,7 +73,38 @@ impl Signer {
             tx_data,
             txid_parts,
             shielded_sighash,
-            secp: secp256k1::Secp256k1::signing_only(),
+            secp: secp256k1::Secp256k1::new(),
+        })
+    }
+
+    /// Calculates the signature digest that must be signed to authorize shielded spends.
+    ///
+    /// This can be used to produce a signature externally suitable for passing to e.g.
+    /// [`Self::apply_orchard_signature`].}
+    pub fn shielded_sighash(&self) -> [u8; 32] {
+        self.shielded_sighash
+    }
+
+    /// Calculates the signature digest that must be signed to authorize the transparent
+    /// spend at the given index.
+    ///
+    /// This can be used to produce a signature externally suitable for passing to e.g.
+    /// [`Self::append_transparent_signature`].}
+    ///
+    /// Returns an error if `index` is invalid for this PCZT.
+    pub fn transparent_sighash(&self, index: usize) -> Result<[u8; 32], Error> {
+        let input = self
+            .transparent
+            .inputs()
+            .get(index)
+            .ok_or(Error::InvalidIndex)?;
+
+        input.with_signable_input(index, |signable_input| {
+            Ok(sighash(
+                &self.tx_data,
+                &SignableInput::Transparent(signable_input),
+                &self.txid_parts,
+            ))
         })
     }
 
@@ -105,6 +118,49 @@ impl Signer {
         index: usize,
         sk: &secp256k1::SecretKey,
     ) -> Result<(), Error> {
+        self.generate_or_append_transparent_signature(index, |input, tx_data, txid_parts, secp| {
+            input.sign(
+                index,
+                |input| sighash(tx_data, &SignableInput::Transparent(input), txid_parts),
+                sk,
+                secp,
+            )
+        })
+    }
+
+    /// Appends the given signature to the transparent spend.
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT (for example, comfirming that the change amounts are correct) before calling
+    /// this method.
+    pub fn append_transparent_signature(
+        &mut self,
+        index: usize,
+        signature: secp256k1::ecdsa::Signature,
+    ) -> Result<(), Error> {
+        self.generate_or_append_transparent_signature(index, |input, tx_data, txid_parts, secp| {
+            input.append_signature(
+                index,
+                |input| sighash(tx_data, &SignableInput::Transparent(input), txid_parts),
+                signature,
+                secp,
+            )
+        })
+    }
+
+    fn generate_or_append_transparent_signature<F>(
+        &mut self,
+        index: usize,
+        f: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(
+            &mut transparent::pczt::Input,
+            &TransactionData<EffectsOnly>,
+            &TxDigests<Blake2bHash>,
+            &secp256k1::Secp256k1<secp256k1::All>,
+        ) -> Result<(), transparent::pczt::SignerError>,
+    {
         let input = self
             .transparent
             .inputs_mut()
@@ -114,23 +170,8 @@ impl Signer {
         // Check consistency of the input being signed.
         // TODO
 
-        input
-            .sign(
-                index,
-                |input| {
-                    v5_signature_hash(
-                        &self.tx_data,
-                        &SignableInput::Transparent(input),
-                        &self.txid_parts,
-                    )
-                    .as_ref()
-                    .try_into()
-                    .unwrap()
-                },
-                sk,
-                &self.secp,
-            )
-            .map_err(Error::TransparentSign)?;
+        // Generate or apply the signature.
+        f(input, &self.tx_data, &self.txid_parts, &self.secp).map_err(Error::TransparentSign)?;
 
         // Update transaction modifiability:
         // - If the Signer added a signature that does not use `SIGHASH_ANYONECANPAY`, the
@@ -170,6 +211,30 @@ impl Signer {
         index: usize,
         ask: &sapling::keys::SpendAuthorizingKey,
     ) -> Result<(), Error> {
+        self.generate_or_apply_sapling_signature(index, |spend, shielded_sighash| {
+            spend.sign(shielded_sighash, ask, OsRng)
+        })
+    }
+
+    /// Applies the given signature to the Sapling spend.
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT (for example, comfirming that the change amounts are correct) before calling
+    /// this method.
+    pub fn apply_sapling_signature(
+        &mut self,
+        index: usize,
+        signature: redjubjub::Signature<redjubjub::SpendAuth>,
+    ) -> Result<(), Error> {
+        self.generate_or_apply_sapling_signature(index, |spend, shielded_sighash| {
+            spend.apply_signature(shielded_sighash, signature)
+        })
+    }
+
+    fn generate_or_apply_sapling_signature<F>(&mut self, index: usize, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut sapling::pczt::Spend, [u8; 32]) -> Result<(), sapling::pczt::SignerError>,
+    {
         let spend = self
             .sapling
             .spends_mut()
@@ -187,9 +252,8 @@ impl Signer {
         }
         .map_err(Error::SaplingVerify)?;
 
-        spend
-            .sign(self.shielded_sighash, ask, OsRng)
-            .map_err(Error::SaplingSign)?;
+        // Generate or apply the signature.
+        f(spend, self.shielded_sighash).map_err(Error::SaplingSign)?;
 
         // Update transaction modifiability: all transaction effects have been committed
         // to by the signature.
@@ -212,6 +276,30 @@ impl Signer {
         index: usize,
         ask: &orchard::keys::SpendAuthorizingKey,
     ) -> Result<(), Error> {
+        self.generate_or_apply_orchard_signature(index, |spend, shielded_sighash| {
+            spend.sign(shielded_sighash, ask, OsRng)
+        })
+    }
+
+    /// Applies the given signature to the Orchard spend.
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT (for example, comfirming that the change amounts are correct) before calling
+    /// this method.
+    pub fn apply_orchard_signature(
+        &mut self,
+        index: usize,
+        signature: redpallas::Signature<redpallas::SpendAuth>,
+    ) -> Result<(), Error> {
+        self.generate_or_apply_orchard_signature(index, |action, shielded_sighash| {
+            action.apply_signature(shielded_sighash, signature)
+        })
+    }
+
+    fn generate_or_apply_orchard_signature<F>(&mut self, index: usize, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut orchard::pczt::Action, [u8; 32]) -> Result<(), orchard::pczt::SignerError>,
+    {
         let action = self
             .orchard
             .actions_mut()
@@ -230,9 +318,8 @@ impl Signer {
         }
         .map_err(Error::OrchardVerify)?;
 
-        action
-            .sign(self.shielded_sighash, ask, OsRng)
-            .map_err(Error::OrchardSign)?;
+        // Generate or apply the signature.
+        f(action, self.shielded_sighash).map_err(Error::OrchardSign)?;
 
         // Update transaction modifiability: all transaction effects have been committed
         // to by the signature.
@@ -254,83 +341,20 @@ impl Signer {
     }
 }
 
-/// Extracts an unauthorized `TransactionData` from the PCZT.
-///
-/// We don't care about existing proofs or signatures here, because they do not affect the
-/// sighash; we only want the effects of the transaction.
-pub(crate) fn pczt_to_tx_data(
-    global: &Global,
-    transparent: &transparent::pczt::Bundle,
-    sapling: &sapling::pczt::Bundle,
-    orchard: &orchard::pczt::Bundle,
-) -> Result<TransactionData<EffectsOnly>, Error> {
-    let version = match (global.tx_version, global.version_group_id) {
-        (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
-        (version, version_group_id) => Err(Error::Global(GlobalError::UnsupportedTxVersion {
-            version,
-            version_group_id,
-        })),
-    }?;
-
-    let consensus_branch_id = BranchId::try_from(global.consensus_branch_id)
-        .map_err(|_| Error::Global(GlobalError::UnknownConsensusBranchId))?;
-
-    let transparent_bundle = transparent
-        .extract_effects()
-        .map_err(Error::TransparentExtract)?;
-
-    let sapling_bundle = sapling.extract_effects().map_err(Error::SaplingExtract)?;
-
-    let orchard_bundle = orchard.extract_effects().map_err(Error::OrchardExtract)?;
-
-    Ok(TransactionData::from_parts(
-        version,
-        consensus_branch_id,
-        determine_lock_time(global, transparent.inputs()).ok_or(Error::IncompatibleLockTimes)?,
-        global.expiry_height.into(),
-        #[cfg(all(
-            any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-            feature = "zip-233"
-        ))]
-        Zatoshis::ZERO,
-        transparent_bundle,
-        None,
-        sapling_bundle,
-        orchard_bundle,
-    ))
-}
-
-pub struct EffectsOnly;
-
-impl Authorization for EffectsOnly {
-    type TransparentAuth = transparent::bundle::EffectsOnly;
-    type SaplingAuth = sapling::bundle::EffectsOnly;
-    type OrchardAuth = orchard::bundle::EffectsOnly;
-    #[cfg(zcash_unstable = "zfuture")]
-    type TzeAuth = core::convert::Infallible;
-}
-
 /// Errors that can occur while creating signatures for a PCZT.
 #[derive(Debug)]
 pub enum Error {
-    Global(GlobalError),
-    IncompatibleLockTimes,
+    Extract(crate::ExtractError),
     InvalidIndex,
-    OrchardExtract(orchard::pczt::TxExtractorError),
-    OrchardParse(orchard::pczt::ParseError),
     OrchardSign(orchard::pczt::SignerError),
     OrchardVerify(orchard::pczt::VerifyError),
-    SaplingExtract(sapling::pczt::TxExtractorError),
-    SaplingParse(sapling::pczt::ParseError),
     SaplingSign(sapling::pczt::SignerError),
     SaplingVerify(sapling::pczt::VerifyError),
-    TransparentExtract(transparent::pczt::TxExtractorError),
-    TransparentParse(transparent::pczt::ParseError),
     TransparentSign(transparent::pczt::SignerError),
 }
 
-#[derive(Debug)]
-pub enum GlobalError {
-    UnknownConsensusBranchId,
-    UnsupportedTxVersion { version: u32, version_group_id: u32 },
+impl From<crate::ExtractError> for Error {
+    fn from(e: crate::ExtractError) -> Self {
+        Error::Extract(e)
+    }
 }

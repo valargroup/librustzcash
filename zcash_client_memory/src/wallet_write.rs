@@ -25,6 +25,7 @@ use zcash_client_backend::{
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
     wallet::{NoteId, Recipient, WalletTransparentOutput},
 };
+use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
     PoolType,
     ShieldedProtocol::{self, Sapling},
@@ -617,7 +618,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
 
     fn store_decrypted_tx(
         &mut self,
-        d_tx: DecryptedTransaction<Self::AccountId>,
+        d_tx: DecryptedTransaction<Transaction, Self::AccountId>,
     ) -> Result<(), Self::Error> {
         tracing::debug!("store_decrypted_tx");
         self.tx_table.put_tx_data(d_tx.tx(), None, None);
@@ -1060,6 +1061,10 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         Ok(truncation_height)
     }
 
+    fn truncate_to_chain_state(&mut self, _chain_state: ChainState) -> Result<(), Self::Error> {
+        todo!()
+    }
+
     fn import_account_hd(
         &mut self,
         _account_name: &str,
@@ -1256,6 +1261,15 @@ Instead derive the ufvk in the calling code and import it using `import_account_
         &mut self,
         _account: Self::AccountId,
         _pubkey: secp256k1::PublicKey,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    #[cfg(feature = "transparent-key-import")]
+    fn import_standalone_transparent_script(
+        &mut self,
+        _account: Self::AccountId,
+        _script: zcash_script::script::Redeem,
     ) -> Result<(), Self::Error> {
         todo!()
     }

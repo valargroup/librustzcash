@@ -4,9 +4,10 @@ use ::transparent::keys::TransparentKeyScope;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::{self, Display};
+use nonempty::NonEmpty;
 
 use zcash_address::unified::{self, Container, Encoding, Typecode, Ufvk, Uivk};
-use zcash_protocol::consensus;
+use zcash_protocol::{PoolType, consensus};
 use zip32::{AccountId, DiversifierIndex};
 
 use crate::address::UnifiedAddress;
@@ -81,7 +82,7 @@ pub mod sapling {
     }
 }
 
-#[cfg(feature = "transparent-key-encoding")]
+#[cfg(any(feature = "transparent-key-encoding", feature = "transparent-inputs"))]
 pub mod transparent;
 
 #[cfg(feature = "zcashd-compat")]
@@ -208,7 +209,7 @@ impl Era {
 }
 
 /// A set of spending keys that are all associated with a single ZIP-0032 account identifier.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct UnifiedSpendingKey {
     #[cfg(feature = "transparent-inputs")]
     transparent: ::transparent::keys::AccountPrivKey,
@@ -216,6 +217,19 @@ pub struct UnifiedSpendingKey {
     sapling: sapling::ExtendedSpendingKey,
     #[cfg(feature = "orchard")]
     orchard: orchard::keys::SpendingKey,
+}
+
+impl core::fmt::Debug for UnifiedSpendingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("UnifiedSpendingKey");
+        #[cfg(feature = "transparent-inputs")]
+        d.field("transparent", &"...");
+        #[cfg(feature = "sapling")]
+        d.field("sapling", &"...");
+        #[cfg(feature = "orchard")]
+        d.field("orchard", &"...");
+        d.finish()
+    }
 }
 
 impl UnifiedSpendingKey {
@@ -758,8 +772,59 @@ impl From<bip32::Error> for DerivationError {
     }
 }
 
+/// A key that provides the capability to recover outgoing transaction information from
+/// the block chain.
+#[derive(Clone, Copy)]
+pub struct OutgoingViewingKey([u8; 32]);
+
+impl core::fmt::Debug for OutgoingViewingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("OutgoingViewingKey").field(&"...").finish()
+    }
+}
+
+impl From<[u8; 32]> for OutgoingViewingKey {
+    fn from(ovk: [u8; 32]) -> Self {
+        OutgoingViewingKey(ovk)
+    }
+}
+
+#[cfg(feature = "sapling")]
+impl From<OutgoingViewingKey> for ::sapling::keys::OutgoingViewingKey {
+    fn from(value: OutgoingViewingKey) -> Self {
+        ::sapling::keys::OutgoingViewingKey(value.0)
+    }
+}
+
+#[cfg(feature = "sapling")]
+impl From<::sapling::keys::OutgoingViewingKey> for OutgoingViewingKey {
+    fn from(value: ::sapling::keys::OutgoingViewingKey) -> Self {
+        OutgoingViewingKey(value.0)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl From<OutgoingViewingKey> for ::orchard::keys::OutgoingViewingKey {
+    fn from(value: OutgoingViewingKey) -> Self {
+        ::orchard::keys::OutgoingViewingKey::from(value.0)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl From<::orchard::keys::OutgoingViewingKey> for OutgoingViewingKey {
+    fn from(value: ::orchard::keys::OutgoingViewingKey) -> Self {
+        OutgoingViewingKey(*value.as_ref())
+    }
+}
+
+impl AsRef<[u8; 32]> for OutgoingViewingKey {
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// A [ZIP 316](https://zips.z.cash/zip-0316) unified full viewing key.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct UnifiedFullViewingKey {
     #[cfg(feature = "transparent-inputs")]
     transparent: Option<::transparent::keys::AccountPubKey>,
@@ -768,6 +833,27 @@ pub struct UnifiedFullViewingKey {
     #[cfg(feature = "orchard")]
     orchard: Option<orchard::keys::FullViewingKey>,
     unknown: Vec<(u32, Vec<u8>)>,
+}
+
+impl core::fmt::Debug for UnifiedFullViewingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("UnifiedFullViewingKey");
+        #[cfg(feature = "transparent-inputs")]
+        d.field("transparent", &self.transparent.as_ref().map(|_| "..."));
+        #[cfg(feature = "sapling")]
+        d.field("sapling", &self.sapling.as_ref().map(|_| "..."));
+        #[cfg(feature = "orchard")]
+        d.field("orchard", &self.orchard.as_ref().map(|_| "..."));
+        d.field(
+            "unknown_typecodes",
+            &self
+                .unknown
+                .iter()
+                .map(|(typecode, _)| *typecode)
+                .collect::<Vec<_>>(),
+        )
+        .finish()
+    }
 }
 
 impl UnifiedFullViewingKey {
@@ -1080,10 +1166,67 @@ impl UnifiedFullViewingKey {
                 .default_address()
         })
     }
+
+    /// Selects an outgoing viewing key for a transaction's outputs based upon the type(s) of
+    /// inputs spent in the transaction.
+    ///
+    /// This method selects the OVK of the highest-preference item in [ZIP 316] preference order
+    /// from among the item types represented by the provided input types. It will return `None` in
+    /// the case that this FVK does not contain any items corresponding to the provided input
+    /// sources; this should ordinarily never occur because in order to spend an input, a spending
+    /// key of the appropriate type must be available and that spending key should be represented
+    /// among this UFVK's items.
+    pub fn select_ovk(
+        &self,
+        scope: zip32::Scope,
+        input_sources: &NonEmpty<PoolType>,
+    ) -> Option<OutgoingViewingKey> {
+        #[cfg(feature = "orchard")]
+        if let Some(ovk) = input_sources
+            .contains(&PoolType::ORCHARD)
+            .then(|| {
+                self.orchard()
+                    .map(|k| OutgoingViewingKey::from(k.to_ovk(scope)))
+            })
+            .flatten()
+        {
+            return Some(ovk);
+        };
+
+        #[cfg(feature = "sapling")]
+        if let Some(ovk) = input_sources
+            .contains(&PoolType::SAPLING)
+            .then(|| {
+                self.sapling()
+                    .map(|k| OutgoingViewingKey::from(k.to_ovk(scope)))
+            })
+            .flatten()
+        {
+            return Some(ovk);
+        }
+
+        #[cfg(feature = "transparent-inputs")]
+        if let Some(ovk) = input_sources
+            .contains(&PoolType::Transparent)
+            .then(|| {
+                self.transparent().map(|k| {
+                    OutgoingViewingKey(match scope {
+                        zip32::Scope::External => k.external_ovk().as_bytes(),
+                        zip32::Scope::Internal => k.internal_ovk().as_bytes(),
+                    })
+                })
+            })
+            .flatten()
+        {
+            return Some(ovk);
+        }
+
+        None
+    }
 }
 
 /// A [ZIP 316](https://zips.z.cash/zip-0316) unified incoming viewing key.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct UnifiedIncomingViewingKey {
     #[cfg(feature = "transparent-inputs")]
     transparent: Option<::transparent::keys::ExternalIvk>,
@@ -1093,6 +1236,27 @@ pub struct UnifiedIncomingViewingKey {
     orchard: Option<orchard::keys::IncomingViewingKey>,
     /// Stores the unrecognized elements of the unified encoding.
     unknown: Vec<(u32, Vec<u8>)>,
+}
+
+impl core::fmt::Debug for UnifiedIncomingViewingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut d = f.debug_struct("UnifiedIncomingViewingKey");
+        #[cfg(feature = "transparent-inputs")]
+        d.field("transparent", &self.transparent);
+        #[cfg(feature = "sapling")]
+        d.field("sapling", &self.sapling.as_ref().map(|_| "..."));
+        #[cfg(feature = "orchard")]
+        d.field("orchard", &self.orchard.as_ref().map(|_| "..."));
+        d.field(
+            "unknown_typecodes",
+            &self
+                .unknown
+                .iter()
+                .map(|(typecode, _)| *typecode)
+                .collect::<Vec<_>>(),
+        )
+        .finish()
+    }
 }
 
 impl UnifiedIncomingViewingKey {
@@ -1583,13 +1747,17 @@ mod tests {
 
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::{address::Address, encoding::AddressCodec},
+        crate::encoding::AddressCodec,
         ::transparent::keys::{AccountPrivKey, IncomingViewingKey},
         alloc::string::ToString,
         alloc::vec::Vec,
-        zcash_address::test_vectors,
-        zip32::DiversifierIndex,
     };
+
+    #[cfg(all(
+        feature = "transparent-inputs",
+        any(feature = "orchard", feature = "sapling")
+    ))]
+    use {crate::address::Address, zcash_address::test_vectors, zip32::DiversifierIndex};
 
     #[cfg(feature = "unstable")]
     use super::{Era, UnifiedSpendingKey, testing::arb_unified_spending_key};
@@ -1748,7 +1916,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "transparent-inputs")]
+    #[cfg(all(
+        feature = "transparent-inputs",
+        any(feature = "orchard", feature = "sapling")
+    ))]
     fn ufvk_derivation() {
         use crate::keys::UnifiedAddressRequest;
 
@@ -1930,7 +2101,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "transparent-inputs")]
+    #[cfg(all(
+        feature = "transparent-inputs",
+        any(feature = "orchard", feature = "sapling")
+    ))]
     fn uivk_derivation() {
         use crate::keys::UnifiedAddressRequest;
 
@@ -2026,5 +2200,102 @@ mod tests {
             #[cfg(feature = "transparent-inputs")]
             assert_eq!(decoded.transparent().to_bytes(), usk.transparent().to_bytes());
         }
+    }
+
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn usk_debug_redaction() {
+        let seed = [0u8; 64];
+        let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, &seed, AccountId::ZERO).unwrap();
+        assert!(format!("{:?}", usk).contains("\"...\""));
+    }
+
+    #[test]
+    #[cfg(any(feature = "orchard", feature = "sapling"))]
+    fn ufvk_debug_redaction() {
+        #[cfg(feature = "orchard")]
+        let orchard = {
+            let sk =
+                orchard::keys::SpendingKey::from_zip32_seed(&[0; 32], 0, AccountId::ZERO).unwrap();
+            Some(orchard::keys::FullViewingKey::from(&sk))
+        };
+
+        #[cfg(feature = "sapling")]
+        let sapling = {
+            let extsk = sapling::spending_key(&[0; 32], 0, AccountId::ZERO);
+            Some(extsk.to_diversifiable_full_viewing_key())
+        };
+
+        #[cfg(feature = "transparent-inputs")]
+        let transparent = {
+            let privkey =
+                AccountPrivKey::from_seed(&MAIN_NETWORK, &[0; 32], AccountId::ZERO).unwrap();
+            Some(privkey.to_account_pubkey())
+        };
+
+        let ufvk = UnifiedFullViewingKey::new(
+            #[cfg(feature = "transparent-inputs")]
+            transparent,
+            #[cfg(feature = "sapling")]
+            sapling,
+            #[cfg(feature = "orchard")]
+            orchard,
+        )
+        .unwrap();
+
+        let debug_str = format!("{:?}", ufvk);
+        #[cfg(feature = "transparent-inputs")]
+        assert!(debug_str.contains("transparent: Some(\"...\")"));
+        #[cfg(feature = "sapling")]
+        assert!(debug_str.contains("sapling: Some(\"...\")"));
+        #[cfg(feature = "orchard")]
+        assert!(debug_str.contains("orchard: Some(\"...\")"));
+    }
+
+    #[test]
+    #[cfg(any(feature = "orchard", feature = "sapling"))]
+    fn uivk_debug_redaction() {
+        #[cfg(feature = "orchard")]
+        let orchard = {
+            let sk =
+                orchard::keys::SpendingKey::from_zip32_seed(&[0; 32], 0, AccountId::ZERO).unwrap();
+            Some(orchard::keys::FullViewingKey::from(&sk).to_ivk(Scope::External))
+        };
+
+        #[cfg(feature = "sapling")]
+        let sapling = {
+            let extsk = sapling::spending_key(&[0; 32], 0, AccountId::ZERO);
+            Some(extsk.to_diversifiable_full_viewing_key().to_external_ivk())
+        };
+
+        #[cfg(feature = "transparent-inputs")]
+        let transparent = {
+            let privkey =
+                AccountPrivKey::from_seed(&MAIN_NETWORK, &[0; 32], AccountId::ZERO).unwrap();
+            Some(privkey.to_account_pubkey().derive_external_ivk().unwrap())
+        };
+
+        let uivk = UnifiedIncomingViewingKey::new(
+            #[cfg(feature = "transparent-inputs")]
+            transparent,
+            #[cfg(feature = "sapling")]
+            sapling,
+            #[cfg(feature = "orchard")]
+            orchard,
+        );
+
+        let debug_str = format!("{:?}", uivk);
+        #[cfg(feature = "sapling")]
+        assert!(debug_str.contains("sapling: Some(\"...\")"));
+        #[cfg(feature = "orchard")]
+        assert!(debug_str.contains("orchard: Some(\"...\")"));
+    }
+
+    #[test]
+    fn ovk_debug_redaction() {
+        assert_eq!(
+            format!("{:?}", super::OutgoingViewingKey::from([0u8; 32])),
+            "OutgoingViewingKey(\"...\")"
+        );
     }
 }

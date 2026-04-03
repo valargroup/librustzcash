@@ -43,6 +43,7 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
     /// * spend a prior shielded output;
     /// * pay to an output pool for which the corresponding feature is not enabled;
     /// * pay to a TEX address if the "transparent-inputs" feature is not enabled.
+    /// * a proposal step has no inputs
     ProposalNotSupported,
 
     /// No account could be found corresponding to a provided ID.
@@ -71,8 +72,8 @@ pub enum Error<DataSourceError, CommitmentTreeError, SelectionError, FeeError, C
     /// An error occurred building a new transaction.
     Builder(builder::Error<FeeError>),
 
-    /// It is forbidden to provide a memo when constructing a transparent output.
-    MemoForbidden,
+    /// An error occurred constructing a payment for the transaction.
+    Payment(zip321::PaymentError),
 
     /// Attempted to send change to an unsupported pool.
     ///
@@ -210,10 +211,7 @@ where
             ),
             Error::ScanRequired => write!(f, "Must scan blocks first"),
             Error::Builder(e) => write!(f, "An error occurred building the transaction: {e}"),
-            Error::MemoForbidden => write!(
-                f,
-                "It is not possible to send a memo to a transparent address."
-            ),
+            Error::Payment(e) => write!(f, "An error occurred constructing a payment: {e}"),
             Error::UnsupportedChangeType(t) => write!(
                 f,
                 "Attempted to send change to an unsupported pool type: {t}"

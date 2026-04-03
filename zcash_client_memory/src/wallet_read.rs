@@ -7,10 +7,13 @@ use nonempty::NonEmpty;
 use secrecy::{ExposeSecret, SecretVec};
 use shardtree::store::ShardStore as _;
 use zcash_client_backend::data_api::{
-    AddressInfo, BlockMetadata, NullifierQuery, WalletRead, WalletSummary, Zip32Derivation,
+    AddressInfo, BlockMetadata, NullifierQuery, ReceivedTransactionOutput, WalletRead,
+    WalletSummary, Zip32Derivation,
     scanning::ScanRange,
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
+#[cfg(feature = "transparent-inputs")]
+use zcash_client_backend::data_api::{TransparentBalances, TransparentKeyOrigin};
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBalance, AccountSource, Balance, Progress, Ratio, SeedRelevance,
@@ -33,10 +36,7 @@ use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(feature = "transparent-inputs")]
 use {
-    transparent::{
-        address::TransparentAddress,
-        keys::{NonHardenedChildIndex, TransparentKeyScope},
-    },
+    transparent::{address::TransparentAddress, keys::NonHardenedChildIndex},
     zcash_client_backend::wallet::{Exposure, TransparentAddressMetadata},
     zip32::Scope,
 };
@@ -547,6 +547,11 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                         BranchId::for_height(&self.params, expiry_height),
                         tx_data.lock_time(),
                         expiry_height,
+                        #[cfg(all(
+                            any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
+                            feature = "zip-233"
+                        ))]
+                        tx_data.zip233_amount(),
                         tx_data.transparent_bundle().cloned(),
                         tx_data.sprout_bundle().cloned(),
                         tx_data.sapling_bundle().cloned(),
@@ -686,7 +691,7 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         account_id: Self::AccountId,
         target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
-    ) -> Result<HashMap<TransparentAddress, (TransparentKeyScope, Balance)>, Self::Error> {
+    ) -> Result<TransparentBalances, Self::Error> {
         tracing::debug!("get_transparent_balances");
 
         let mut balances = HashMap::new();
@@ -702,9 +707,12 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         }) {
             if self.utxo_is_spendable(outpoint, target_height, confirmations_policy)? {
                 let address = txo.address;
+                let key_origin = TransparentKeyOrigin::Derived {
+                    scope: txo.key_scope,
+                };
                 let entry = balances
                     .entry(address)
-                    .or_insert((txo.key_scope, Balance::ZERO));
+                    .or_insert((key_origin, Balance::ZERO));
 
                 entry.1.add_spendable_value(txo.txout.value())?;
             }
@@ -736,6 +744,15 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
     #[cfg(feature = "transparent-inputs")]
     fn utxo_query_height(&self, _account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
+        todo!()
+    }
+
+    fn get_received_outputs(
+        &self,
+        _txid: TxId,
+        _target_height: TargetHeight,
+        _confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<Vec<ReceivedTransactionOutput>, Self::Error> {
         todo!()
     }
 }

@@ -45,13 +45,9 @@ use crate::{
 #[cfg(feature = "transparent-inputs")]
 use {
     crate::TransparentAddressMetadata,
-    ::transparent::{
-        address::TransparentAddress,
-        bundle::OutPoint,
-        keys::{NonHardenedChildIndex, TransparentKeyScope},
-    },
+    ::transparent::{address::TransparentAddress, bundle::OutPoint, keys::NonHardenedChildIndex},
     core::ops::Range,
-    testing::transparent::GapLimits,
+    zcash_keys::keys::transparent::gap_limits::GapLimits,
 };
 
 /// Tuesday, 25 February 2025 00:00:00Z (the day the clock code was added).
@@ -195,7 +191,7 @@ impl DataStoreFactory for TestDbFactory {
             WalletDb::for_path(data_file.path(), network, test_clock(), test_rng()).unwrap();
         #[cfg(feature = "transparent-inputs")]
         if let Some(gap_limits) = gap_limits {
-            db_data = db_data.with_gap_limits(gap_limits.into());
+            db_data = db_data.with_gap_limits(gap_limits);
         }
 
         let migrator = WalletMigrator::new();
@@ -225,7 +221,7 @@ impl Reset for TestDb {
                 .new_data_store(
                     network,
                     #[cfg(feature = "transparent-inputs")]
-                    Some(gap_limits.into()),
+                    Some(gap_limits),
                 )
                 .unwrap(),
         );

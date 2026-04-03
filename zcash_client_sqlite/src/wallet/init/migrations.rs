@@ -33,6 +33,7 @@ mod sapling_memo_consistency;
 mod sent_notes_to_internal;
 mod shardtree_support;
 mod spend_key_available;
+mod standalone_p2sh;
 mod support_legacy_sqlite;
 mod support_zcashd_wallet_import;
 mod transparent_gap_limit_handling;
@@ -49,6 +50,7 @@ mod v_transactions_net;
 mod v_transactions_note_uniqueness;
 mod v_transactions_shielding_balance;
 mod v_transactions_transparent_history;
+mod v_tx_outputs_key_scopes;
 mod v_tx_outputs_return_addrs;
 mod v_tx_outputs_use_legacy_false;
 mod wallet_summaries;
@@ -131,8 +133,10 @@ pub(super) fn all_migrations<
     //                     \                       \         v_received_output_spends_account      /        /
     //                      \                       \               /                             /        /
     //                       `------------------- account_delete_cascade ---------------------------------'
-    //                                                      |
-    //                                               pir_spent_notes
+    //                                          /         |               \
+    //                           v_tx_outputs_key_scopes  |           standalone_p2sh
+    //                                                    |
+    //                                             pir_spent_notes
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -218,6 +222,8 @@ pub(super) fn all_migrations<
         Box::new(v_received_output_spends_account::Migration),
         Box::new(add_transaction_trust_marker::Migration),
         Box::new(account_delete_cascade::Migration),
+        Box::new(v_tx_outputs_key_scopes::Migration),
+        Box::new(standalone_p2sh::Migration),
         Box::new(pir_spent_notes::Migration),
     ]
 }
@@ -359,7 +365,11 @@ pub const V_0_18_5: &[Uuid] = &[
 pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[pir_spent_notes::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
+    v_tx_outputs_key_scopes::MIGRATION_ID,
+    standalone_p2sh::MIGRATION_ID,
+    pir_spent_notes::MIGRATION_ID,
+];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,

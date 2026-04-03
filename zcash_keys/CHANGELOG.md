@@ -9,8 +9,32 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_keys::keys::OutgoingViewingKey`
+- `zcash_keys::keys::UnifiedFullViewingKey::select_ovk`
+- `zcash_keys::keys::transparent::gap_limits` module (behind the
+  `transparent-inputs` feature flag), containing:
+  - `GapLimits` type (moved from `zcash_client_backend::wallet::transparent`).
+  - `GapLimits::limit_for`
+  - `AddressStore` trait
+  - `generate_gap_addresses`
+  - `generate_address_list`
+  - `GapAddressesError`
+
 ### Changed
 - MSRV is now 1.85.1.
+- Migrated to `orchard 0.12`, `sapling-crypto 0.6`.
+- The `std` feature flag now enables the equivalent flag on the dependencies
+  `orchard`, `sapling-crypto`, `zcash_transparent`, and `zcash_address`.
+
+### Fixed
+- `Debug` output for `zcash_keys::keys::transparent::Key` now redacts its
+  secret key material.
+- `Debug` output for `zcash_keys::keys::{UnifiedSpendingKey,
+  OutgoingViewingKey, UnifiedFullViewingKey, UnifiedIncomingViewingKey}` now
+  redacts sensitive key material. `UnifiedFullViewingKey` and `UnifiedIncomingViewingKey`
+  no longer delegates shielded components to external `Debug` implementations
+  or emits raw unknown-item bytes.
 
 ## [0.12.0] - 2025-10-13
 

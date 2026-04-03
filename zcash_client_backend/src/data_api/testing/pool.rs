@@ -38,8 +38,8 @@ use crate::{
         chain::{self, ChainState, CommitmentTreeRoot, ScanSummary},
         error::Error,
         testing::{
-            AddressType, CacheInsertionResult, CachedBlock, FakeCompactOutput, InitialChainState,
-            TestBuilder, single_output_change_strategy,
+            AddressType, CacheInsertionResult, FakeCompactOutput, InitialChainState, TestBuilder,
+            single_output_change_strategy,
         },
         wallet::{
             ConfirmationsPolicy, TargetHeight, TransferErrT, decrypt_and_store_transaction,
@@ -81,8 +81,15 @@ use zcash_protocol::PoolType;
 #[cfg(feature = "pczt")]
 use {
     pczt::roles::{prover::Prover, signer::Signer},
+    rand_core::OsRng,
+    transparent::builder::TransparentSigningSet,
+    zcash_primitives::transaction::builder::{BuildConfig, Builder},
     zcash_proofs::prover::LocalTxProver,
+    zcash_script::opcode::PushValue,
 };
+
+pub mod dsl;
+use dsl::{TestDsl, TestNoteConfig};
 
 /// Trait that exposes the pool-specific types and operations necessary to run the
 /// single-shielded-pool tests on a given pool.
@@ -161,9 +168,12 @@ pub trait ShieldedPoolTester {
         exclude: &[DbT::NoteRef],
     ) -> Result<Vec<ReceivedNote<DbT::NoteRef, Self::Note>>, <DbT as InputSource>::Error>;
 
-    fn decrypted_pool_outputs_count<A>(d_tx: &DecryptedTransaction<'_, A>) -> usize;
+    fn decrypted_pool_outputs_count<A>(d_tx: &DecryptedTransaction<Transaction, A>) -> usize;
 
-    fn with_decrypted_pool_memos<A>(d_tx: &DecryptedTransaction<'_, A>, f: impl FnMut(&MemoBytes));
+    fn with_decrypted_pool_memos<A>(
+        d_tx: &DecryptedTransaction<Transaction, A>,
+        f: impl FnMut(&MemoBytes),
+    );
 
     fn try_output_recovery<P: consensus::Parameters>(
         params: &P,
@@ -201,35 +211,10 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
     // Add funds to the wallet in a single note
-    let value = Zatoshis::const_from_u64(60000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance
-    assert_eq!(st.get_total_balance(account.id()), value);
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        value
-    );
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let (h, _, _) = st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60000));
 
     let to_extsk = T::sk(&[0xf5; 32]);
     let to: Address = T::sk_default_address(&to_extsk);
@@ -250,6 +235,7 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
     );
     let input_selector = GreedyInputSelector::new();
 
+    let account = st.get_account();
     let proposal = st
         .propose_transfer(
             account.id(),
@@ -387,13 +373,8 @@ pub fn zip_315_confirmations_test_steps<T: ShieldedPoolTester>(
     cache: impl TestCache,
     input_trust: InputTrust,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
     let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
     let starting_balance = Zatoshis::const_from_u64(60_000);
 
     // Add funds to the wallet in a single note, owned by the internal spending key,
@@ -411,26 +392,34 @@ pub fn zip_315_confirmations_test_steps<T: ShieldedPoolTester>(
     };
     let min_confirmations = u32::from(min_confirmations);
 
-    // Generate a block to create the inputs that we will spend.
-    let (h, r, _) = st.generate_next_block(&dfvk, address_type, starting_balance);
-    let txid = r.txids()[0];
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance at 1 confirmation.
-    assert_eq!(st.get_total_balance(account.id()), starting_balance);
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        starting_balance
+    let (_, r, _) = st.add_a_single_note_checking_balance(
+        TestNoteConfig::from(starting_balance).with_address_type(address_type),
     );
+    let txid = r.txids()[0];
 
     // Mark the external input as explicitly trusted, if so requested
-    if input_trust == InputTrust::ExternalTrusted {
+    let trusted = input_trust == InputTrust::ExternalTrusted;
+    if trusted {
         st.wallet_mut().set_tx_trust(txid, true).unwrap();
     }
 
     let add_confirmation = |i: u32| {
         let (h, _) = st.generate_empty_block();
         st.scan_cached_blocks(h, 1);
+        let outputs = st
+            .wallet()
+            .get_received_outputs(txid, TargetHeight::from(h + 1), confirmations_policy)
+            .unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(
+            outputs[0].confirmations_until_spendable(),
+            u32::from(if trusted {
+                confirmations_policy.trusted()
+            } else {
+                confirmations_policy.untrusted()
+            })
+            .saturating_sub(i + 1)
+        );
         ConfirmationStep {
             i,
             confirmation_requirement: min_confirmations,
@@ -441,7 +430,7 @@ pub fn zip_315_confirmations_test_steps<T: ShieldedPoolTester>(
         }
     };
 
-    // Generate `min_confirmations` confirmations by mining blocks
+    // Generate N confirmations by mining blocks
     let steps = (1u32..min_confirmations)
         .map(add_confirmation)
         .collect::<Vec<_>>();
@@ -488,36 +477,21 @@ pub fn spend_max_spendable_single_step_proposed_transfer<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
-
-    // Add funds to the wallet in a single note
+    // Add funds to the wallet in two notes over 5 blocks
     let value = Zatoshis::const_from_u64(60000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let h = st
+        .add_notes_checking_balance([Some(value), None, None, None, Some(value)])
+        .block_height()
+        .unwrap();
 
+    // Spendable balance matches total balance
+    let account = st.test_account().cloned().unwrap();
     let confirmation_policy = ConfirmationsPolicy::new_symmetrical(
         NonZeroU32::new(2).expect("2 is not zero"),
         #[cfg(feature = "transparent-inputs")]
         false,
-    );
-    st.generate_empty_block();
-    st.generate_empty_block();
-    st.generate_empty_block();
-
-    st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-
-    st.scan_cached_blocks(h, 5);
-
-    // Spendable balance matches total balance
-    assert_eq!(
-        st.get_total_balance(account.id()),
-        Zatoshis::const_from_u64(120_000)
     );
     assert_eq!(
         st.get_spendable_balance(account.id(), confirmation_policy),
@@ -531,11 +505,12 @@ pub fn spend_max_spendable_single_step_proposed_transfer<T: ShieldedPoolTester>(
 
     let send_max_memo = "Test Send Max memo".parse::<Memo>().unwrap();
 
+    let addy = to.to_zcash_address(st.network());
     let proposal = st
         .propose_send_max_transfer(
             account.id(),
             &fee_rule,
-            to.to_zcash_address(st.network()),
+            addy,
             Some(MemoBytes::from(send_max_memo.clone())),
             MaxSpendMode::MaxSpendable,
             confirmation_policy,
@@ -654,35 +629,12 @@ pub fn spend_everything_single_step_proposed_transfer<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
 
     // Add funds to the wallet in a single note
-    let value = Zatoshis::const_from_u64(60000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance
-    assert_eq!(st.get_total_balance(account.id()), value);
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        value
-    );
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let (h, _, _) = st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60000));
 
     let to_extsk = T::sk(&[0xf5; 32]);
     let to: Address = T::sk_default_address(&to_extsk);
@@ -691,11 +643,12 @@ pub fn spend_everything_single_step_proposed_transfer<T: ShieldedPoolTester>(
 
     let send_max_memo = "Test Send Max memo".parse::<Memo>().unwrap();
 
+    let addy = to.to_zcash_address(st.network());
     let proposal = st
         .propose_send_max_transfer(
             account.id(),
             &fee_rule,
-            to.to_zcash_address(st.network()),
+            addy,
             Some(MemoBytes::from(send_max_memo.clone())),
             MaxSpendMode::Everything,
             ConfirmationsPolicy::MIN,
@@ -810,35 +763,10 @@ pub fn fails_to_send_max_spendable_to_transparent_with_memo<T: ShieldedPoolTeste
 ) {
     use crate::data_api::MaxSpendMode;
 
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
     // Add funds to the wallet in a single note
-    let value = Zatoshis::const_from_u64(60000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance
-    assert_eq!(st.get_total_balance(account.id()), value);
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        value
-    );
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60000));
 
     let account = st.test_account().cloned().unwrap();
     let (default_addr, _) = account.usk().default_transparent_address();
@@ -849,16 +777,19 @@ pub fn fails_to_send_max_spendable_to_transparent_with_memo<T: ShieldedPoolTeste
 
     let send_max_memo = "Test Send Max memo".parse::<Memo>().unwrap();
 
+    let addy = to.to_zcash_address(st.network());
     assert_matches!(
         st.propose_send_max_transfer(
             account.id(),
             &fee_rule,
-            to.to_zcash_address(st.network()),
+            addy,
             Some(MemoBytes::from(send_max_memo.clone())),
             MaxSpendMode::Everything,
             ConfirmationsPolicy::MIN
         ),
-        Err(data_api::error::Error::MemoForbidden)
+        Err(data_api::error::Error::Payment(
+            zip321::PaymentError::TransparentMemo
+        ))
     );
 }
 
@@ -878,36 +809,16 @@ pub fn spend_everything_proposal_fails_when_unconfirmed_funds_present<T: Shielde
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
-
-    // Add funds to the wallet in a single note
-    let value = Zatoshis::const_from_u64(60000);
-
-    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-
-    st.generate_empty_block();
-    st.generate_empty_block();
-    let later_on_value = Zatoshis::const_from_u64(123456);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, later_on_value);
-    st.scan_cached_blocks(h1, 4);
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+    st.add_notes_checking_balance([
+        Some(Zatoshis::const_from_u64(60000)),
+        None,
+        None,
+        Some(Zatoshis::const_from_u64(123456)),
+    ]);
 
     // Spendable balance doesn't match total balance
+    let account = st.test_account().cloned().unwrap();
     let total_balance = st.get_total_balance(account.id());
     let spendable_balance = st.get_spendable_balance(
         account.id(),
@@ -926,11 +837,12 @@ pub fn spend_everything_proposal_fails_when_unconfirmed_funds_present<T: Shielde
 
     let send_max_memo = "Test Send Max memo".parse::<Memo>().unwrap();
 
+    let addy = to.to_zcash_address(st.network());
     assert_matches!(
         st.propose_send_max_transfer(
             account.id(),
             &fee_rule,
-            to.to_zcash_address(st.network()),
+            addy,
             Some(MemoBytes::from(send_max_memo.clone())),
             MaxSpendMode::Everything,
             ConfirmationsPolicy::new_symmetrical_unchecked(
@@ -953,43 +865,26 @@ pub fn spend_everything_proposal_fails_when_unconfirmed_funds_present<T: Shielde
 /// - Add more funds
 /// - Attempts to construct a request to spend the whole balance to an external address in the
 ///   same pool.
-/// - succeds at doing so
+/// - succeeds at doing so
 pub fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present<
     T: ShieldedPoolTester,
 >(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
-
-    // Add funds to the wallet in a single note
-    let value = Zatoshis::const_from_u64(60000);
-
-    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-
-    st.generate_empty_block();
-    st.generate_empty_block();
-    let later_on_value = Zatoshis::const_from_u64(123456);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, later_on_value);
-    st.scan_cached_blocks(h1, 4);
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+    let h = st
+        .add_notes_checking_balance([
+            Some(Zatoshis::const_from_u64(60000)),
+            None,
+            None,
+            Some(Zatoshis::const_from_u64(123456)),
+        ])
+        .block_height()
+        .unwrap();
 
     // Spendable balance doesn't match total balance
+    let account = st.test_account().cloned().unwrap();
     let total_balance = st.get_total_balance(account.id());
     let spendable_balance = st.get_spendable_balance(
         account.id(),
@@ -1008,11 +903,12 @@ pub fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present<
 
     let send_max_memo = "Test Send Max memo".parse::<Memo>().unwrap();
 
+    let addy = to.to_zcash_address(st.network());
     let proposal = st
         .propose_send_max_transfer(
             account.id(),
             &fee_rule,
-            to.to_zcash_address(st.network()),
+            addy,
             Some(MemoBytes::from(send_max_memo.clone())),
             MaxSpendMode::MaxSpendable,
             ConfirmationsPolicy::new_symmetrical_unchecked(
@@ -1119,46 +1015,27 @@ pub fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present<
 /// This test attempts to send the max spendable funds to a TEX address recipient
 /// checks that the transactions were stored and that the amounts involved are correct
 #[cfg(feature = "transparent-inputs")]
-pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    use crate::data_api::{MaxSpendMode, OutputOfSentTx, testing::transparent::GapLimits};
+    use crate::data_api::{MaxSpendMode, OutputOfSentTx};
+    use zcash_keys::keys::transparent::gap_limits::GapLimits;
 
-    let gap_limits = GapLimits::new(10, 5, 3);
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .with_gap_limits(gap_limits)
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache)
+        .map(|builder| builder.with_gap_limits(GapLimits::new(10, 5, 3)))
+        .build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
-    let dfvk = T::test_account_fvk(&st);
-
-    let add_funds = |st: &mut TestState<_, DSF::DataStore, _>, value| {
-        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-        st.scan_cached_blocks(h, 1);
-
-        assert_eq!(
-            st.wallet()
-                .block_max_scanned()
-                .unwrap()
-                .unwrap()
-                .block_height(),
-            h
-        );
-        h
-    };
 
     let value = Zatoshis::const_from_u64(100000);
 
     // Add funds to the wallet.
-    add_funds(&mut st, value);
+    st.add_a_single_note_checking_balance(value);
     let initial_balance = value;
     assert_eq!(
         st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
@@ -1186,11 +1063,12 @@ pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPool
 
     // We use `st.propose_standard_transfer` here in order to also test round-trip
     // serialization of the proposal.
+    let addy = tex_addr.to_zcash_address(st.network());
     let proposal = st
         .propose_send_max_transfer(
             account_id,
             &fee_rule,
-            tex_addr.to_zcash_address(st.network()),
+            addy,
             None,
             MaxSpendMode::Everything,
             ConfirmationsPolicy::MIN,
@@ -1295,41 +1173,19 @@ pub fn spend_everything_multi_step_single_note_proposed_transfer<T: ShieldedPool
 /// This test attempts to send the max spendable funds to a TEX address recipient
 /// checks that the transactions were stored and that the amounts involved are correct
 #[cfg(feature = "transparent-inputs")]
-pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    use crate::data_api::{OutputOfSentTx, testing::transparent::GapLimits};
+    use crate::data_api::OutputOfSentTx;
+    use zcash_keys::keys::transparent::gap_limits::GapLimits;
 
-    let gap_limits = GapLimits::new(10, 5, 3);
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .with_gap_limits(gap_limits)
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let account_id = account.id();
-    let dfvk = T::test_account_fvk(&st);
-
-    let add_funds = |st: &mut TestState<_, DSF::DataStore, _>, value| {
-        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-        st.scan_cached_blocks(h, 1);
-
-        assert_eq!(
-            st.wallet()
-                .block_max_scanned()
-                .unwrap()
-                .unwrap()
-                .block_height(),
-            h
-        );
-        h
-    };
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache)
+        .map(|builder| builder.with_gap_limits(GapLimits::new(10, 5, 3)))
+        .build::<T>();
 
     let number_of_notes = 3u64;
     let note_value = Zatoshis::const_from_u64(100000);
@@ -1337,10 +1193,12 @@ pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolT
 
     // Add funds to the wallet.
     for _ in 0..number_of_notes {
-        add_funds(&mut st, note_value);
+        st.add_a_single_note_checking_balance(note_value);
     }
 
     let initial_balance = value;
+    let account = st.test_account().cloned().unwrap();
+    let account_id = account.id();
     assert_eq!(
         st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
         initial_balance
@@ -1364,11 +1222,12 @@ pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolT
 
     // We use `st.propose_standard_transfer` here in order to also test round-trip
     // serialization of the proposal.
+    let addy = tex_addr.to_zcash_address(st.network());
     let proposal = st
         .propose_send_max_transfer(
             account_id,
             &fee_rule,
-            tex_addr.to_zcash_address(st.network()),
+            addy,
             None,
             MaxSpendMode::Everything,
             ConfirmationsPolicy::MIN,
@@ -1468,42 +1327,20 @@ pub fn spend_everything_multi_step_many_notes_proposed_transfer<T: ShieldedPoolT
 #[cfg(feature = "transparent-inputs")]
 pub fn spend_everything_multi_step_with_marginal_notes_proposed_transfer<
     T: ShieldedPoolTester,
-    DSF,
+    Dsf,
 >(
-    ds_factory: DSF,
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    use crate::data_api::{MaxSpendMode, OutputOfSentTx, testing::transparent::GapLimits};
+    use crate::data_api::{MaxSpendMode, OutputOfSentTx};
+    use zcash_keys::keys::transparent::gap_limits::GapLimits;
 
-    let gap_limits = GapLimits::new(10, 5, 3);
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .with_gap_limits(gap_limits)
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let account_id = account.id();
-    let dfvk = T::test_account_fvk(&st);
-
-    let add_funds = |st: &mut TestState<_, DSF::DataStore, _>, value| {
-        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-        st.scan_cached_blocks(h, 1);
-
-        assert_eq!(
-            st.wallet()
-                .block_max_scanned()
-                .unwrap()
-                .unwrap()
-                .block_height(),
-            h
-        );
-        h
-    };
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache)
+        .map(|builder| builder.with_gap_limits(GapLimits::new(10, 5, 3)))
+        .build::<T>();
 
     let number_of_notes = 10u64;
     let note_value = Zatoshis::const_from_u64(100000);
@@ -1511,10 +1348,12 @@ pub fn spend_everything_multi_step_with_marginal_notes_proposed_transfer<
         (note_value * number_of_notes).expect("sum of notes should not fail.");
 
     for _ in 0..number_of_notes {
-        add_funds(&mut st, note_value);
-        add_funds(&mut st, zip317::MARGINAL_FEE);
+        st.add_a_single_note_checking_balance(note_value);
+        st.add_a_single_note_checking_balance(zip317::MARGINAL_FEE);
     }
 
+    let account = st.test_account().cloned().unwrap();
+    let account_id = account.id();
     assert_eq!(
         st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
         non_marginal_notes_value
@@ -1540,11 +1379,12 @@ pub fn spend_everything_multi_step_with_marginal_notes_proposed_transfer<
 
     // We use `st.propose_standard_transfer` here in order to also test round-trip
     // serialization of the proposal.
+    let addy = tex_addr.to_zcash_address(st.network());
     let proposal = st
         .propose_send_max_transfer(
             account_id,
             &fee_rule,
-            tex_addr.to_zcash_address(st.network()),
+            addy,
             None,
             MaxSpendMode::Everything,
             ConfirmationsPolicy::MIN,
@@ -1646,35 +1486,11 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(650_0000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance
-    assert_eq!(st.get_total_balance(account.id()), value);
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        value
-    );
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let (h, _, _) = st.add_a_single_note_checking_balance(value);
 
     let to_extsk = T::sk(&[0xf5; 32]);
     let to: Address = T::sk_default_address(&to_extsk);
@@ -1697,6 +1513,7 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
         ),
     );
 
+    let account = st.test_account().cloned().unwrap();
     let proposal = st
         .propose_transfer(
             account.id(),
@@ -1827,33 +1644,30 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
 }
 
 #[cfg(feature = "transparent-inputs")]
-pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
-    is_reached_gap_limit: impl Fn(&<DSF::DataStore as WalletRead>::Error, DSF::AccountId, u32) -> bool,
+    is_reached_gap_limit: impl Fn(&<Dsf::DataStore as WalletRead>::Error, Dsf::AccountId, u32) -> bool,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
 {
     use crate::{
-        data_api::{OutputOfSentTx, TransactionStatus, testing::transparent::GapLimits},
+        data_api::{OutputOfSentTx, TransactionStatus},
         wallet::{Exposure, TransparentAddressSource},
     };
+    use zcash_keys::keys::transparent::gap_limits::GapLimits;
 
     let gap_limits = GapLimits::new(10, 5, 3);
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .with_gap_limits(gap_limits)
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache)
+        .map(|builder| builder.with_gap_limits(gap_limits))
+        .build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
     let dfvk = T::test_account_fvk(&st);
     let tex_addr = Address::Tex([0x4; 20]);
 
-    let add_funds = |st: &mut TestState<_, DSF::DataStore, _>, value| {
+    let add_funds = |st: &mut TestState<_, Dsf::DataStore, _>, value| {
         let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
         st.scan_cached_blocks(h, 1);
 
@@ -1871,7 +1685,7 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
     let value = Zatoshis::const_from_u64(100000);
     let transfer_amount = Zatoshis::const_from_u64(50000);
 
-    let run_test = |st: &mut TestState<_, DSF::DataStore, _>, expected_index, prior_balance| {
+    let run_test = |st: &mut TestState<_, Dsf::DataStore, _>, expected_index, prior_balance| {
         // Add funds to the wallet.
         add_funds(st, value);
         let initial_balance: Option<Zatoshis> = prior_balance + value;
@@ -2127,7 +1941,7 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
         "new_known_addrs must have known_addrs as its prefix"
     );
 
-    let reservation_should_succeed = |st: &mut TestState<_, DSF::DataStore, _>, n: u32| {
+    let reservation_should_succeed = |st: &mut TestState<_, Dsf::DataStore, _>, n: u32| {
         let reserved = st
             .wallet_mut()
             .reserve_next_n_ephemeral_addresses(account_id, n.try_into().unwrap())
@@ -2136,7 +1950,7 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
         reserved
     };
     let reservation_should_fail =
-        |st: &mut TestState<_, DSF::DataStore, _>, n: u32, expected_bad_index| {
+        |st: &mut TestState<_, Dsf::DataStore, _>, n: u32, expected_bad_index| {
             assert_matches!(st
             .wallet_mut()
             .reserve_next_n_ephemeral_addresses(account_id, n.try_into().unwrap()),
@@ -2194,35 +2008,11 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(60000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance
-    assert_eq!(st.get_total_balance(account.id()), value);
-    assert_eq!(
-        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
-        value
-    );
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let (h, _, _) = st.add_a_single_note_checking_balance(value);
 
     let spend_amount = Zatoshis::const_from_u64(50000);
     let to_extsk = T::sk(&[0xf5; 32]);
@@ -2244,6 +2034,7 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
     );
     let input_selector = GreedyInputSelector::new();
 
+    let account = st.test_account().cloned().unwrap();
     let proposal = st
         .propose_transfer(
             account.id(),
@@ -2360,22 +2151,19 @@ pub fn spend_all_funds_single_step_proposed_transfer<T: ShieldedPoolTester>(
 /// - all funds are spent
 /// - Fees are the least possible: in this case 15000 for tr0 and 10000 Zats for tr1
 #[cfg(feature = "transparent-inputs")]
-pub fn spend_all_funds_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn spend_all_funds_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    use crate::data_api::{OutputOfSentTx, testing::transparent::GapLimits};
+    use crate::data_api::OutputOfSentTx;
+    use zcash_keys::keys::transparent::gap_limits::GapLimits;
 
-    let gap_limits = GapLimits::new(10, 5, 3);
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .with_gap_limits(gap_limits)
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache)
+        .map(|builder| builder.with_gap_limits(GapLimits::new(10, 5, 3)))
+        .build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -2387,15 +2175,6 @@ pub fn spend_all_funds_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
     // Add funds to the wallet.
     let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
     st.scan_cached_blocks(h, 1);
-
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
 
     let initial_balance = value;
     assert_eq!(
@@ -2523,23 +2302,19 @@ pub fn spend_all_funds_multi_step_proposed_transfer<T: ShieldedPoolTester, DSF>(
 }
 
 #[cfg(feature = "transparent-inputs")]
-pub fn proposal_fails_if_not_all_ephemeral_outputs_consumed<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn proposal_fails_if_not_all_ephemeral_outputs_consumed<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
+    Dsf: DataStoreFactory,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
     let dfvk = T::test_account_fvk(&st);
 
-    let add_funds = |st: &mut TestState<_, DSF::DataStore, _>, value| {
+    let add_funds = |st: &mut TestState<_, Dsf::DataStore, _>, value| {
         let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
         st.scan_cached_blocks(h, 1);
 
@@ -2609,13 +2384,10 @@ pub fn proposal_fails_if_not_all_ephemeral_outputs_consumed<T: ShieldedPoolTeste
     );
 }
 
-pub fn create_to_address_fails_on_incorrect_usk<T: ShieldedPoolTester, DSF: DataStoreFactory>(
-    ds_factory: DSF,
+pub fn create_to_address_fails_on_incorrect_usk<T: ShieldedPoolTester, Dsf: DataStoreFactory>(
+    ds_factory: Dsf,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, ()).build::<T>();
     let dfvk = T::test_account_fvk(&st);
     let to = T::fvk_default_address(&dfvk);
 
@@ -2623,7 +2395,7 @@ pub fn create_to_address_fails_on_incorrect_usk<T: ShieldedPoolTester, DSF: Data
     let acct1 = zip32::AccountId::try_from(1).unwrap();
     let usk1 = UnifiedSpendingKey::from_seed(st.network(), &[1u8; 32], acct1).unwrap();
 
-    let input_selector = GreedyInputSelector::<DSF::DataStore>::new();
+    let input_selector = GreedyInputSelector::<Dsf::DataStore>::new();
     let change_strategy =
         single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
 
@@ -2647,15 +2419,12 @@ pub fn create_to_address_fails_on_incorrect_usk<T: ShieldedPoolTester, DSF: Data
     );
 }
 
-pub fn proposal_fails_with_no_blocks<T: ShieldedPoolTester, DSF>(ds_factory: DSF)
+pub fn proposal_fails_with_no_blocks<T: ShieldedPoolTester, Dsf>(ds_factory: Dsf)
 where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, ()).build::<T>();
 
     let account_id = st.test_account().unwrap().id();
     let dfvk = T::test_account_fvk(&st);
@@ -2684,11 +2453,7 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -2696,15 +2461,7 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
 
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
-    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h1, 1);
-
-    // Spendable balance matches total balance at 1 confirmation.
-    assert_eq!(st.get_total_balance(account_id), value);
-    assert_eq!(
-        st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
-        value
-    );
+    st.add_a_single_note_checking_balance(value);
 
     // Value is considered pending at 10 confirmations.
     assert_eq!(
@@ -2730,8 +2487,7 @@ pub fn spend_fails_on_unverified_notes<T: ShieldedPoolTester>(
     assert_eq!(summary.map(|s| s.progress().scan()), Some(Ratio::new(1, 1)));
 
     // Add more funds to the wallet in a second note
-    let (h2, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h2, 1);
+    let (h2, _, _) = st.add_a_single_note_checking_balance(value);
 
     // Verified balance does not include the second note
     let total = (value + value).unwrap();
@@ -2878,33 +2634,19 @@ pub fn spend_fails_on_locked_notes<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let account_id = account.id();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let fee_rule = StandardFeeRule::Zip317;
 
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
-    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h1, 1);
-
-    // Spendable balance matches total balance at 1 confirmation.
-    assert_eq!(st.get_total_balance(account_id), value);
-    assert_eq!(
-        st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
-        value
-    );
+    let (h1, _, _) = st.add_a_single_note_checking_balance(value);
 
     // Send some of the funds to another address, but don't mine the tx.
     let extsk2 = T::sk(&[0xf5; 32]);
     let to = T::sk_default_address(&extsk2);
+    let account = st.test_account().cloned().unwrap();
+    let account_id = account.id();
     let proposal = st
         .propose_standard_transfer::<Infallible>(
             account_id,
@@ -3021,17 +2763,13 @@ pub fn spend_fails_on_locked_notes<T: ShieldedPoolTester>(
     );
 }
 
-pub fn ovk_policy_prevents_recovery_from_chain<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn ovk_policy_prevents_recovery_from_chain<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
+    Dsf: DataStoreFactory,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
@@ -3039,15 +2777,7 @@ pub fn ovk_policy_prevents_recovery_from_chain<T: ShieldedPoolTester, DSF>(
 
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
-    let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h1, 1);
-
-    // Spendable balance matches total balance at 1 confirmation.
-    assert_eq!(st.get_total_balance(account_id), value);
-    assert_eq!(
-        st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
-        value
-    );
+    let (h1, _, _) = st.add_a_single_note_checking_balance(value);
 
     let extsk2 = T::sk(&[0xf5; 32]);
     let addr2 = T::sk_default_address(&extsk2);
@@ -3055,14 +2785,14 @@ pub fn ovk_policy_prevents_recovery_from_chain<T: ShieldedPoolTester, DSF>(
     let fee_rule = StandardFeeRule::Zip317;
 
     #[allow(clippy::type_complexity)]
-    let send_and_recover_with_policy = |st: &mut TestState<_, DSF::DataStore, _>,
+    let send_and_recover_with_policy = |st: &mut TestState<_, Dsf::DataStore, _>,
                                         ovk_policy|
      -> Result<
         Option<(Note, Address, MemoBytes)>,
         TransferErrT<
-            DSF::DataStore,
-            GreedyInputSelector<DSF::DataStore>,
-            SingleOutputChangeStrategy<DSF::DataStore>,
+            Dsf::DataStore,
+            GreedyInputSelector<Dsf::DataStore>,
+            SingleOutputChangeStrategy<Dsf::DataStore>,
         >,
     > {
         let proposal = st.propose_standard_transfer(
@@ -3119,32 +2849,18 @@ pub fn spend_succeeds_to_t_addr_zero_change<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let account_id = account.id();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(70000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance at 1 confirmation.
-    assert_eq!(st.get_total_balance(account_id), value);
-    assert_eq!(
-        st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
-        value
-    );
+    st.add_a_single_note_checking_balance(value);
 
     let fee_rule = StandardFeeRule::Zip317;
 
     // TODO: generate_next_block_from_tx does not currently support transparent outputs.
     let to = TransparentAddress::PublicKeyHash([7; 20]).into();
+    let account = st.test_account().cloned().unwrap();
+    let account_id = account.id();
     let proposal = st
         .propose_standard_transfer::<Infallible>(
             account_id,
@@ -3169,29 +2885,17 @@ pub fn change_note_spends_succeed<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let account_id = account.id();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     // Add funds to the wallet in a single note owned by the internal spending key
     let value = Zatoshis::const_from_u64(70000);
-    let (h, _, _) = st.generate_next_block(&dfvk, AddressType::Internal, value);
-    st.scan_cached_blocks(h, 1);
-
-    // Spendable balance matches total balance at 1 confirmation.
-    assert_eq!(st.get_total_balance(account_id), value);
-    assert_eq!(
-        st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN),
-        value
+    st.add_a_single_note_checking_balance(
+        TestNoteConfig::from(value).with_address_type(AddressType::Internal),
     );
 
     // Value is considered pending at 10 confirmations.
+    let account = st.test_account().cloned().unwrap();
+    let account_id = account.id();
     assert_eq!(
         st.get_pending_shielded_balance(account_id, ConfirmationsPolicy::default()),
         value
@@ -3403,12 +3107,12 @@ where
     );
 }
 
-pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::DataStore: Reset,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::DataStore: Reset,
 {
     let mut st = TestBuilder::new()
         .with_data_store_factory(ds_factory)
@@ -3519,37 +3223,23 @@ pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedP
 }
 
 #[allow(dead_code)]
-pub fn zip317_spend<T: ShieldedPoolTester, DSF: DataStoreFactory>(
-    ds_factory: DSF,
+pub fn zip317_spend<T: ShieldedPoolTester, Dsf: DataStoreFactory>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
     let dfvk = T::test_account_fvk(&st);
 
     // Add funds to the wallet
-    let (h1, _, _) = st.generate_next_block(
-        &dfvk,
-        AddressType::Internal,
-        Zatoshis::const_from_u64(50000),
-    );
+    st.add_notes_checking_balance([Some(Zatoshis::const_from_u64(50000))]);
 
-    // Add 10 dust notes to the wallet
+    // Add 10 uneconomic (dust) notes to the wallet
     for _ in 1..=10 {
-        st.generate_next_block(
-            &dfvk,
-            AddressType::DefaultExternal,
-            Zatoshis::const_from_u64(1000),
-        );
+        st.add_notes_checking_balance([Some(Zatoshis::const_from_u64(1000))]);
     }
-
-    st.scan_cached_blocks(h1, 11);
 
     // Spendable balance matches total balance
     let total = Zatoshis::const_from_u64(60000);
@@ -3559,7 +3249,7 @@ pub fn zip317_spend<T: ShieldedPoolTester, DSF: DataStoreFactory>(
         total
     );
 
-    let input_selector = GreedyInputSelector::<DSF::DataStore>::new();
+    let input_selector = GreedyInputSelector::<Dsf::DataStore>::new();
     let change_strategy =
         single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
 
@@ -3616,19 +3306,15 @@ pub fn zip317_spend<T: ShieldedPoolTester, DSF: DataStoreFactory>(
 }
 
 #[cfg(feature = "transparent-inputs")]
-pub fn shield_transparent<T: ShieldedPoolTester, DSF>(ds_factory: DSF, cache: impl TestCache)
+pub fn shield_transparent<T: ShieldedPoolTester, Dsf>(ds_factory: Dsf, cache: impl TestCache)
 where
-    DSF: DataStoreFactory,
-    <<DSF as DataStoreFactory>::DataStore as WalletWrite>::UtxoRef: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <<Dsf as DataStoreFactory>::DataStore as WalletWrite>::UtxoRef: std::fmt::Debug,
 {
     use zcash_keys::keys::UnifiedAddressRequest;
     use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let dfvk = T::test_account_fvk(&st);
@@ -3875,31 +3561,22 @@ pub fn birthday_in_anchor_shard<T: ShieldedPoolTester>(
     assert_eq!(spendable.len(), 1);
 }
 
-pub fn checkpoint_gaps<T: ShieldedPoolTester, DSF: DataStoreFactory>(
-    ds_factory: DSF,
+pub fn checkpoint_gaps<T: ShieldedPoolTester, Dsf: DataStoreFactory>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     // Generate a block with funds belonging to our wallet.
-    st.generate_next_block(
-        &dfvk,
-        AddressType::DefaultExternal,
-        Zatoshis::const_from_u64(500000),
-    );
-    st.scan_cached_blocks(account.birthday().height(), 1);
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(500000));
 
     // Create a gap of 10 blocks having no shielded outputs, then add a block that doesn't
     // belong to us so that we can get a checkpoint in the tree.
+    let account = st.test_account().cloned().unwrap();
     let not_our_key = T::sk_to_fvk(&T::sk(&[0xf5; 32]));
     let not_our_value = Zatoshis::const_from_u64(10000);
+    let sapling_end_size = st.latest_cached_block().unwrap().sapling_end_size();
+    let orchard_end_size = st.latest_cached_block().unwrap().orchard_end_size();
     st.generate_block_at(
         account.birthday().height() + 10,
         BlockHash([0; 32]),
@@ -3908,8 +3585,8 @@ pub fn checkpoint_gaps<T: ShieldedPoolTester, DSF: DataStoreFactory>(
             AddressType::DefaultExternal,
             not_our_value,
         )],
-        st.latest_cached_block().unwrap().sapling_end_size(),
-        st.latest_cached_block().unwrap().orchard_end_size(),
+        sapling_end_size,
+        orchard_end_size,
         false,
     );
 
@@ -3933,7 +3610,7 @@ pub fn checkpoint_gaps<T: ShieldedPoolTester, DSF: DataStoreFactory>(
     .unwrap();
     assert_eq!(spendable.len(), 1);
 
-    let input_selector = GreedyInputSelector::<DSF::DataStore>::new();
+    let input_selector = GreedyInputSelector::<Dsf::DataStore>::new();
     let change_strategy =
         single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
 
@@ -3967,12 +3644,10 @@ pub fn pool_crossing_required<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32])) // TODO: Allow for Orchard
-        // activation after Sapling
-        .build();
+    // TODO: Allow for Orchard activation after Sapling
+    // Here we choose P0, but this has no effect since we supply the viewing keys
+    // and generate the blocks directly on the state.
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<P0>();
 
     let account = st.test_account().cloned().unwrap();
 
@@ -4059,12 +3734,8 @@ pub fn fully_funded_fully_private<P0: ShieldedPoolTester, P1: ShieldedPoolTester
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32])) // TODO: Allow for Orchard
-        // activation after Sapling
-        .build();
+    // TODO: Allow for Orchard activation after Sapling
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<P0>();
 
     let account = st.test_account().cloned().unwrap();
 
@@ -4153,12 +3824,8 @@ pub fn fully_funded_send_to_t<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32])) // TODO: Allow for Orchard
-        // activation after Sapling
-        .build();
+    // TODO: Allow for Orchard activation after Sapling
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<P0>();
 
     let account = st.test_account().cloned().unwrap();
 
@@ -4247,12 +3914,8 @@ pub fn multi_pool_checkpoint<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32])) // TODO: Allow for Orchard
-        // activation after Sapling
-        .build();
+    // TODO: Allow for Orchard activation after Sapling
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<P0>();
 
     let account = st.test_account().cloned().unwrap();
     let acct_id = account.id();
@@ -4420,12 +4083,8 @@ pub fn multi_pool_checkpoints_with_pruning<P0: ShieldedPoolTester, P1: ShieldedP
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32])) // TODO: Allow for Orchard
-        // activation after Sapling
-        .build();
+    // TODO: Allow for Orchard activation after Sapling
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<P0>();
 
     let account = st.test_account().cloned().unwrap();
 
@@ -4454,11 +4113,7 @@ pub fn valid_chain_states<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let dfvk = T::test_account_fvk(&st);
 
@@ -4492,11 +4147,7 @@ pub fn invalid_chain_cache_disconnected<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let dfvk = T::test_account_fvk(&st);
 
@@ -4546,16 +4197,12 @@ pub fn invalid_chain_cache_disconnected<T: ShieldedPoolTester>(
     );
 }
 
-pub fn data_db_truncation<T: ShieldedPoolTester, DSF>(ds_factory: DSF, cache: impl TestCache)
+pub fn data_db_truncation<T: ShieldedPoolTester, Dsf>(ds_factory: Dsf, cache: impl TestCache)
 where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let dfvk = T::test_account_fvk(&st);
@@ -4611,23 +4258,354 @@ where
     );
 }
 
-pub fn reorg_to_checkpoint<T: ShieldedPoolTester, DSF, C>(ds_factory: DSF, cache: C)
+pub fn truncate_to_chain_state<T: ShieldedPoolTester, Dsf>(ds_factory: Dsf, cache: impl TestCache)
 where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
-    C: TestCache,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
+    // Test plan:
+    // 1. Set up test environment with account
+    // 2. Generate and scan initial blocks to populate the note commitment tree
+    // 3. Capture the chain state at a specific height
+    // 4. Generate and scan blocks beyond PRUNING_DEPTH to ensure early checkpoints are pruned
+    // 5. Verify that normal truncate_to_height fails due to missing checkpoints
+    // 6. Test that truncate_to_chain_state succeeds using the captured chain state
+    // 7. Verify wallet state after truncation
+
+    use crate::data_api::ll::wallet::PRUNING_DEPTH;
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let sapling_activation = st
+        .network()
+        .activation_height(consensus::NetworkUpgrade::Sapling)
+        .unwrap();
+
+    // Step 2: Generate and scan initial blocks to populate the note commitment tree.
+    // We use an "other" fvk so that notes won't be tracked by the wallet (keeping the
+    // test focused on tree state rather than wallet balances).
+    let seed = [1u8; 32];
+    let other_sk = T::sk(&seed);
+    let other_fvk = T::sk_to_fvk(&other_sk);
+
+    let initial_block_count = 8u32;
+    for _ in 0..initial_block_count {
+        st.generate_next_block(
+            &other_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10000),
+        );
+    }
+    let scan_start = sapling_activation;
+    st.scan_cached_blocks(scan_start, initial_block_count as usize);
+
+    // Step 3: Capture the chain state at the current tip. The CachedBlock tracks the
+    // exact frontier that corresponds to the end of each generated block.
+    let capture_height = sapling_activation + initial_block_count - 1;
+    let captured_chain_state = st
+        .latest_cached_block()
+        .expect("should have cached blocks")
+        .chain_state()
+        .clone();
+    assert_eq!(captured_chain_state.block_height(), capture_height);
+
+    // Step 4: Generate and scan blocks well beyond PRUNING_DEPTH so that the checkpoint
+    // at capture_height is pruned from the note commitment tree.
+    let extra_blocks = PRUNING_DEPTH + 10;
+    for _ in 0..extra_blocks {
+        st.generate_next_block(
+            &other_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5000),
+        );
+    }
+    st.scan_cached_blocks(capture_height + 1, extra_blocks as usize);
+
+    let tip = st
+        .wallet()
+        .chain_height()
+        .unwrap()
+        .expect("chain tip should be set");
+    assert!(
+        tip >= capture_height + PRUNING_DEPTH,
+        "tip should be beyond pruning depth from capture height"
+    );
+
+    // Step 5: Verify that truncate_to_height fails at capture_height because the
+    // checkpoint has been pruned.
+    let truncation_result = st.wallet_mut().truncate_to_height(capture_height);
+    assert!(
+        truncation_result.is_err(),
+        "truncate_to_height should fail when checkpoint has been pruned"
+    );
+
+    // Step 6: truncate_to_chain_state should succeed because it inserts the frontier
+    // as a checkpoint before truncating.
+    st.wallet_mut()
+        .truncate_to_chain_state(captured_chain_state.clone())
+        .expect("truncate_to_chain_state should succeed");
+
+    // Step 7: Verify wallet state after truncation.
+    // The chain tip should now be at the capture height.
+    let new_tip = st
+        .wallet()
+        .chain_height()
+        .unwrap()
+        .expect("chain tip should still be set after truncation");
+    assert_eq!(new_tip, capture_height);
+
+    // The block hash at capture_height should match what was in the captured chain state.
+    let hash_at_capture = st
+        .wallet()
+        .get_block_hash(capture_height)
+        .unwrap()
+        .expect("block hash should exist at capture height");
+    assert_eq!(hash_at_capture, captured_chain_state.block_hash());
+
+    // Blocks above the capture height should have been removed.
+    assert_eq!(
+        st.wallet().get_block_hash(capture_height + 1).unwrap(),
+        None,
+        "blocks above capture height should be removed"
+    );
+}
+
+pub fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    // Regression test: truncate_to_chain_state should succeed when truncating to a height
+    // below the wallet birthday (where no entry exists in the blocks table). Previously,
+    // this would fail with RequestedRewindInvalid because select_truncation_height requires
+    // the target height to have an entry in the blocks table.
+
+    use crate::data_api::ll::wallet::PRUNING_DEPTH;
+
     let mut st = TestBuilder::new()
         .with_data_store_factory(ds_factory)
         .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .with_initial_chain_state(|rng, network| {
+            let birthday_height = network.activation_height(NetworkUpgrade::Sapling).unwrap() + 200;
+
+            let (prior_sapling_roots, sapling_initial_tree) =
+                Frontier::random_with_prior_subtree_roots(rng, 1u64, NonZeroU8::new(16).unwrap());
+            let prior_sapling_roots = prior_sapling_roots
+                .into_iter()
+                .map(|root| CommitmentTreeRoot::from_parts(birthday_height - 100, root))
+                .collect::<Vec<_>>();
+
+            #[cfg(feature = "orchard")]
+            let (prior_orchard_roots, orchard_initial_tree) =
+                Frontier::random_with_prior_subtree_roots(rng, 1u64, NonZeroU8::new(16).unwrap());
+            #[cfg(feature = "orchard")]
+            let prior_orchard_roots = prior_orchard_roots
+                .into_iter()
+                .map(|root| CommitmentTreeRoot::from_parts(birthday_height - 100, root))
+                .collect::<Vec<_>>();
+
+            InitialChainState {
+                chain_state: ChainState::new(
+                    birthday_height - 1,
+                    BlockHash([5; 32]),
+                    sapling_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    orchard_initial_tree,
+                ),
+                prior_sapling_roots,
+                #[cfg(feature = "orchard")]
+                prior_orchard_roots,
+            }
+        })
+        .with_account_having_current_birthday()
         .build();
+
+    // Generate and scan a few initial blocks from the birthday height.
+    let other_fvk = T::random_fvk(st.rng_mut());
+    let birthday_height = st.test_account().unwrap().birthday().height();
+
+    for _ in 0..5 {
+        st.generate_next_block(
+            &other_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10000),
+        );
+    }
+    st.scan_cached_blocks(birthday_height, 5);
+
+    // Generate and scan blocks well beyond PRUNING_DEPTH to ensure early checkpoints
+    // are pruned from the note commitment tree.
+    let extra_blocks = PRUNING_DEPTH + 10;
+    for _ in 0..extra_blocks {
+        st.generate_next_block(
+            &other_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5000),
+        );
+    }
+    st.scan_cached_blocks(birthday_height + 5, extra_blocks as usize);
+
+    // Get the prior chain state from the account birthday. This chain state is at
+    // birthday_height - 1, which has valid tree frontiers but NO entry in the blocks
+    // table (since the wallet never scanned a block at that height).
+    let prior_chain_state = st
+        .test_account()
+        .unwrap()
+        .birthday()
+        .prior_chain_state()
+        .clone();
+
+    // This should succeed. On the buggy code, this fails with RequestedRewindInvalid
+    // because select_truncation_height cannot find an entry in the blocks table at the
+    // target height.
+    let _target_height = prior_chain_state.block_height();
+    st.wallet_mut()
+        .truncate_to_chain_state(prior_chain_state)
+        .expect("truncate_to_chain_state below birthday should succeed");
+
+    // All blocks were above the target height, so they should have been removed.
+    assert_eq!(
+        st.wallet().get_block_hash(birthday_height).unwrap(),
+        None,
+        "blocks at birthday height should be removed after truncating below birthday"
+    );
+}
+
+pub fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    // Regression test: when truncate_to_chain_state is called with a target height above
+    // the max scanned height, the frontier insertion must be skipped (it would introduce
+    // a subtree root discontinuity) but the scan queue must still be trimmed. Without the
+    // fix, inserting a frontier in shard 2 when the wallet only has shard 0 fails because
+    // shard 1's subtree root is unknown.
+
+    use crate::data_api::ll::wallet::PRUNING_DEPTH;
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let birthday_height = st.test_account().unwrap().birthday().height();
+
+    // Generate and scan initial blocks, then scan beyond PRUNING_DEPTH to ensure
+    // early checkpoints are pruned.
+    let other_fvk = T::random_fvk(st.rng_mut());
+    let initial_blocks = 5u32;
+    for _ in 0..initial_blocks {
+        st.generate_next_block(
+            &other_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(10000),
+        );
+    }
+    st.scan_cached_blocks(birthday_height, initial_blocks as usize);
+
+    let extra_blocks = PRUNING_DEPTH + 10;
+    for _ in 0..extra_blocks {
+        st.generate_next_block(
+            &other_fvk,
+            AddressType::DefaultExternal,
+            Zatoshis::const_from_u64(5000),
+        );
+    }
+    st.scan_cached_blocks(birthday_height + initial_blocks, extra_blocks as usize);
+    let max_scanned = birthday_height + initial_blocks + extra_blocks - 1;
+
+    // Simulate downloading subtree roots from the network: add a known subtree root
+    // for shard 0 only. This creates a state where shard 0 exists in the shard store
+    // but shard 1 does not.
+    T::put_subtree_roots(
+        &mut st,
+        0,
+        &[CommitmentTreeRoot::from_parts(
+            birthday_height,
+            T::empty_tree_leaf(),
+        )],
+    )
+    .unwrap();
+
+    // Extend the scan queue beyond max_scanned.
+    let chain_tip = max_scanned + 500;
+    st.wallet_mut().update_chain_tip(chain_tip).unwrap();
+
+    // Construct a ChainState above max_scanned with a frontier in shard 2. The wallet
+    // has shard 0 (from put_subtree_roots above) but does NOT have shard 1. Inserting a
+    // frontier in shard 2 introduces a discontinuity because shard 1's subtree root is
+    // unknown.
+    let target_height = max_scanned + 50;
+    let shard_2_tree_size: u64 = (0x2 << 16) + 2;
+    let (_, shard2_sapling_frontier) = Frontier::random_with_prior_subtree_roots(
+        st.rng_mut(),
+        shard_2_tree_size,
+        NonZeroU8::new(16).unwrap(),
+    );
+    #[cfg(feature = "orchard")]
+    let (_, shard2_orchard_frontier) = Frontier::random_with_prior_subtree_roots(
+        st.rng_mut(),
+        shard_2_tree_size,
+        NonZeroU8::new(16).unwrap(),
+    );
+
+    let target_chain_state = ChainState::new(
+        target_height,
+        BlockHash([7; 32]),
+        shard2_sapling_frontier,
+        #[cfg(feature = "orchard")]
+        shard2_orchard_frontier,
+    );
+
+    // Verify the scan queue extends beyond the target.
+    let pre_truncation_tip = st
+        .wallet()
+        .chain_height()
+        .unwrap()
+        .expect("chain tip should be set");
+    assert!(pre_truncation_tip > target_height);
+
+    // Truncate to the target height, which is above max_scanned. With the fix, this
+    // skips the frontier insertion (avoiding the discontinuity) and trims the scan queue.
+    // Without the fix, this would fail because inserting a frontier in shard 2 requires
+    // shard 1's subtree root, which is unknown.
+    st.wallet_mut()
+        .truncate_to_chain_state(target_chain_state)
+        .expect("truncate_to_chain_state above max scanned should succeed");
+
+    // The scan queue should have been trimmed to the target height.
+    let post_truncation_tip = st
+        .wallet()
+        .chain_height()
+        .unwrap()
+        .expect("chain tip should still be set after truncation");
+    assert_eq!(
+        post_truncation_tip, target_height,
+        "scan queue should be trimmed to target height, not extend to the old chain tip"
+    );
+
+    // Existing blocks below max_scanned should be preserved.
+    assert!(
+        st.wallet().get_block_hash(max_scanned).unwrap().is_some(),
+        "blocks at max_scanned should be preserved"
+    );
+}
+
+pub fn reorg_to_checkpoint<T: ShieldedPoolTester, Dsf, C>(ds_factory: Dsf, cache: C)
+where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+    C: TestCache,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
 
     // Create a sequence of blocks to serve as the foundation of our chain state.
     let p0_fvk = T::random_fvk(st.rng_mut());
-    let gen_random_block = |st: &mut TestState<C, DSF::DataStore, LocalNetwork>,
+    let gen_random_block = |st: &mut TestState<C, Dsf::DataStore, LocalNetwork>,
                             output_count: usize| {
         let fake_outputs =
             std::iter::repeat_with(|| FakeCompactOutput::random(st.rng_mut(), p0_fvk.clone()))
@@ -4755,11 +4733,7 @@ pub fn scan_cached_blocks_allows_blocks_out_of_order<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let dfvk = T::test_account_fvk(&st);
@@ -4807,18 +4781,14 @@ pub fn scan_cached_blocks_allows_blocks_out_of_order<T: ShieldedPoolTester>(
     );
 }
 
-pub fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let dfvk = T::test_account_fvk(&st);
@@ -4856,19 +4826,14 @@ pub fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester, DSF>(
     );
 }
 
-// TODO: This test can probably be entirely removed, as the following test duplicates it entirely.
-pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let dfvk = T::test_account_fvk(&st);
@@ -4878,14 +4843,7 @@ pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, DSF>(
 
     // Create a fake CompactBlock sending value to the address
     let value = Zatoshis::const_from_u64(50000);
-    let (received_height, _, nf) =
-        st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-
-    // Scan the cache
-    st.scan_cached_blocks(received_height, 1);
-
-    // Account balance should reflect the received note
-    assert_eq!(st.get_total_balance(account.id()), value);
+    let (_, _, nf) = st.add_a_single_note_checking_balance(value);
 
     // Create a second fake CompactBlock spending value from the address
     let not_our_key = T::sk_to_fvk(&T::sk(&[0xf5; 32]));
@@ -4903,18 +4861,14 @@ pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, DSF>(
     );
 }
 
-pub fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
     let dfvk = T::test_account_fvk(&st);
@@ -4952,36 +4906,28 @@ pub fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester, DSF
     );
 }
 
-pub fn metadata_queries_exclude_unwanted_notes<T: ShieldedPoolTester, DSF, TC>(
-    ds_factory: DSF,
+pub fn metadata_queries_exclude_unwanted_notes<T: ShieldedPoolTester, Dsf, TC>(
+    ds_factory: Dsf,
     cache: TC,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: std::fmt::Debug,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
     TC: TestCache,
 {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     // Create 10 blocks with successively increasing value
-    let value = Zatoshis::const_from_u64(100_0000);
-    let (h0, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-    let mut note_values = vec![value];
-    for i in 2..=10 {
-        let value = Zatoshis::const_from_u64(i * 100_0000);
-        st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
-        note_values.push(value);
-    }
-    st.scan_cached_blocks(h0, 10);
-    let target_height = TargetHeight::from(h0 + 10);
+    let note_values = (1..=10)
+        .map(|i| Zatoshis::const_from_u64(i * 100_0000))
+        .collect::<Vec<_>>();
+    let h0 = st
+        .add_notes_checking_balance(note_values.clone().into_iter().map(Some))
+        .first_block_height()
+        .unwrap();
 
-    let test_meta = |st: &TestState<TC, DSF::DataStore, LocalNetwork>, query, expected_count| {
+    let target_height = TargetHeight::from(h0 + 10);
+    let account = st.test_account().cloned().unwrap();
+    let test_meta = |st: &TestState<TC, Dsf::DataStore, LocalNetwork>, query, expected_count| {
         let metadata = st
             .wallet()
             .get_account_metadata(account.id(), &query, target_height, &[])
@@ -4993,12 +4939,12 @@ pub fn metadata_queries_exclude_unwanted_notes<T: ShieldedPoolTester, DSF, TC>(
     test_meta(
         &st,
         NoteFilter::ExceedsMinValue(Zatoshis::const_from_u64(1000_0000)),
-        Some(1),
+        Some(0),
     );
     test_meta(
         &st,
         NoteFilter::ExceedsMinValue(Zatoshis::const_from_u64(500_0000)),
-        Some(6),
+        Some(5),
     );
     test_meta(
         &st,
@@ -5040,12 +4986,12 @@ pub fn metadata_queries_exclude_unwanted_notes<T: ShieldedPoolTester, DSF, TC>(
 }
 
 #[cfg(feature = "pczt")]
-pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
+pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
     cache: impl TestCache,
 ) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
 {
     use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
 
@@ -5170,11 +5116,7 @@ pub fn wallet_recovery_computes_fees<T: ShieldedPoolTester, DsF: DataStoreFactor
 ) {
     use secrecy::ExposeSecret;
 
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let seed = Secret::new(st.test_seed().unwrap().expose_secret().clone());
     let source_account = st.test_account().cloned().unwrap();
@@ -5183,14 +5125,11 @@ pub fn wallet_recovery_computes_fees<T: ShieldedPoolTester, DsF: DataStoreFactor
         .create_account("dest", &seed, source_account.birthday(), None)
         .unwrap();
 
-    let from = T::test_account_fvk(&st);
     let (to, _) = dest_usk.default_transparent_address();
 
     // Get some funds in the source account
     let note_value = Zatoshis::const_from_u64(350000);
-    st.generate_next_block(&from, AddressType::DefaultExternal, note_value);
-    st.generate_next_block(&from, AddressType::DefaultExternal, note_value);
-    st.scan_cached_blocks(source_account.birthday().height(), 2);
+    let _summary = st.add_notes_checking_balance([Some(note_value), Some(note_value)]);
 
     // Create two transactions sending from the source account to a transparent address in the
     // destination account.
@@ -5323,48 +5262,18 @@ pub fn receive_two_notes_with_same_value<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(dsf)
-        .with_block_cache(cache)
-        .with_account_from_sapling_activation(BlockHash([0; 32]))
-        .build();
-
-    let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
 
     // Add funds to the wallet in two identical notes
     let value = Zatoshis::const_from_u64(60000);
-    let outputs = [
-        FakeCompactOutput::new(&dfvk, AddressType::DefaultExternal, value),
-        FakeCompactOutput::new(&dfvk, AddressType::DefaultExternal, value),
-    ];
-    let total_value = (value + value).unwrap();
-
-    // `st.generate_next_block` with multiple outputs.
-    let pre_activation_block = CachedBlock::none(st.sapling_activation_height() - 1);
-    let prior_cached_block = st.latest_cached_block().unwrap_or(&pre_activation_block);
-    let h = prior_cached_block.height() + 1;
-    st.generate_block_at(
-        h,
-        prior_cached_block.chain_state.block_hash(),
-        &outputs,
-        prior_cached_block.sapling_end_size,
-        prior_cached_block.orchard_end_size,
-        false,
-    );
-
-    st.scan_cached_blocks(h, 1);
-    assert_eq!(
-        st.wallet()
-            .block_max_scanned()
-            .unwrap()
-            .unwrap()
-            .block_height(),
-        h
-    );
+    let h = st
+        .add_notes_checking_balance([[value, value]])
+        .block_height()
+        .unwrap();
 
     // Spendable balance matches total balance.
-    assert_eq!(st.get_total_balance(account.id()), total_value);
+    let account = st.test_account().cloned().unwrap();
+    let total_value = (value + value).unwrap();
     assert_eq!(
         st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
         total_value
@@ -5393,4 +5302,119 @@ pub fn receive_two_notes_with_same_value<T: ShieldedPoolTester>(
     for note in spendable_notes {
         assert_eq!(T::note_value(note.note()), value);
     }
+}
+
+#[cfg(feature = "pczt")]
+fn build_transparent_coinbase_tx(
+    network: &LocalNetwork,
+    target_height: TargetHeight,
+    value: Zatoshis,
+    recipient: TransparentAddress,
+    miner_data: Option<PushValue>,
+) -> zcash_primitives::transaction::builder::BuildResult {
+    let build_config = BuildConfig::Coinbase { miner_data };
+    let mut builder = Builder::new(*network, BlockHeight::from(target_height), build_config);
+
+    // Add transparent output to recipient
+    builder.add_transparent_output(&recipient, value).unwrap();
+
+    // Build the transaction (coinbase transactions don't need provers)
+    builder
+        .build(
+            // unused internally
+            &TransparentSigningSet::new(),
+            // unused internally
+            &[],
+            // unused internally
+            &[],
+            OsRng,
+            &LocalTxProver::bundled(),
+            &LocalTxProver::bundled(),
+            // unused internally
+            &StandardFeeRule::Zip317,
+        )
+        .unwrap()
+}
+
+#[cfg(all(feature = "pczt", feature = "transparent-inputs"))]
+/// Tests that immature coinbase outputs are excluded from note selection.
+pub fn immature_coinbase_outputs_are_excluded_from_note_selection<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // Get the default transparent address
+    let (t_addr, _) = st.get_account().usk().default_transparent_address();
+
+    let coinbase_value = Zatoshis::const_from_u64(50000);
+
+    // Get the height where the coinbase tx will be mined
+    let coinbase_height = st.sapling_activation_height();
+
+    // Construct the coinbase transaction and mine the block
+    let coinbase_build_result = build_transparent_coinbase_tx(
+        st.network(),
+        TargetHeight::from(coinbase_height),
+        coinbase_value,
+        t_addr,
+        None,
+    );
+    let coinbase_tx = coinbase_build_result.transaction();
+    let (h, _) = st.generate_next_block_from_tx(0, coinbase_tx);
+    st.scan_cached_blocks(h, 1);
+
+    let params = *st.network();
+    decrypt_and_store_transaction(&params, st.wallet_mut(), coinbase_tx, Some(h)).unwrap();
+
+    for i in 1..=99 {
+        let latest_block_height = st.add_empty_blocks(1);
+
+        // Verify the coinbase UTXO is **not** spendable
+        let spendable_utxos = st
+            .wallet()
+            .get_spendable_transparent_outputs(
+                &t_addr,
+                TargetHeight::from(h + i),
+                ConfirmationsPolicy::default(),
+            )
+            .unwrap();
+        let confirmations = latest_block_height - h;
+        assert!(
+            spendable_utxos.is_empty(),
+            "{i}: Immature coinbase output is spendable at blockheight {latest_block_height} \
+            with {confirmations} confirmations \
+            (should only be spendable at 100):\n \
+            {spendable_utxos:#?}"
+        );
+    }
+
+    // Add the last block and ensure that the coinbase transaction is spendable
+    let latest_height = st.add_empty_blocks(1);
+    let confirmations = latest_height - h;
+    let target_height = TargetHeight::from(latest_height + 1);
+    let spendable_utxos = st
+        .wallet()
+        .get_spendable_transparent_outputs(&t_addr, target_height, ConfirmationsPolicy::default())
+        .unwrap();
+    assert!(
+        !spendable_utxos.is_empty(),
+        "Coinbase output should be spendable at blockheight {latest_height} \
+        with {confirmations} confirmations since the coinbase tx was mined (at {h})\n \
+        target_height {target_height:?} - coinbase_tx.mined_height {h} = {}",
+        u32::from(target_height) - u32::from(h)
+    );
+
+    // Verify we can propose shielding the coinbase utxo
+    let account = st.get_account().id();
+    let _proposal = st
+        .propose_shielding(
+            &GreedyInputSelector::new(),
+            &single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL),
+            Zatoshis::from_u64(10000).unwrap(),
+            &[t_addr],
+            account,
+            ConfirmationsPolicy::default(),
+        )
+        .unwrap();
 }

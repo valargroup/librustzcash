@@ -28,6 +28,7 @@ const MIN_SQLITE_MINOR_VERSION: u32 = 35;
 
 const MIGRATIONS_TABLE: &str = "schemer_migrations";
 
+/// Errors that can occur when applying migrations to the wallet database.
 #[derive(Debug)]
 pub enum WalletMigrationError {
     /// A feature required by the wallet database is not supported by the version of
@@ -246,8 +247,8 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
             unreachable!("we don't service transaction data requests in migrations")
         }
         #[cfg(feature = "transparent-key-import")]
-        SqliteClientError::PubkeyImportConflict(_) => {
-            unreachable!("we do not import pubkeys in migrations")
+        SqliteClientError::StandaloneImportConflict(_) => {
+            unreachable!("we do not import standalone transparent addresses in migrations")
         }
     }
 }

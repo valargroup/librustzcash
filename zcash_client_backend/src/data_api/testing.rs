@@ -41,15 +41,17 @@ use zcash_protocol::{
     memo::{Memo, MemoBytes},
     value::{ZatBalance, Zatoshis},
 };
+#[cfg(feature = "transparent-key-import")]
+use zcash_script::script;
 use zip32::DiversifierIndex;
 use zip321::Payment;
 
 use super::{
     Account, AccountBalance, AccountBirthday, AccountMeta, AccountPurpose, AccountSource,
     AddressInfo, BlockMetadata, DecryptedTransaction, InputSource, NoteFilter, NullifierQuery,
-    ReceivedNotes, SAPLING_SHARD_HEIGHT, ScannedBlock, SeedRelevance, SentTransaction,
-    TransactionDataRequest, TransactionStatus, WalletCommitmentTrees, WalletRead, WalletSummary,
-    WalletTest, WalletWrite, Zip32Derivation,
+    ReceivedNotes, ReceivedTransactionOutput, SAPLING_SHARD_HEIGHT, ScannedBlock, SeedRelevance,
+    SentTransaction, TransactionDataRequest, TransactionStatus, WalletCommitmentTrees, WalletRead,
+    WalletSummary, WalletTest, WalletWrite, Zip32Derivation,
     chain::{BlockSource, ChainState, CommitmentTreeRoot, ScanSummary, scan_cached_blocks},
     error::Error,
     scanning::ScanRange,
@@ -74,10 +76,13 @@ use crate::{
 
 #[cfg(feature = "transparent-inputs")]
 use {
-    super::{TransactionsInvolvingAddress, wallet::input_selection::ShieldingSelector},
-    crate::{data_api::Balance, wallet::TransparentAddressMetadata},
-    ::transparent::{address::TransparentAddress, keys::TransparentKeyScope},
-    transparent::GapLimits,
+    super::{
+        TransactionsInvolvingAddress, TransparentBalances,
+        wallet::input_selection::ShieldingSelector,
+    },
+    crate::wallet::TransparentAddressMetadata,
+    ::transparent::address::TransparentAddress,
+    zcash_keys::keys::transparent::gap_limits::GapLimits,
 };
 
 #[cfg(feature = "orchard")]
@@ -95,6 +100,7 @@ pub mod orchard;
 pub mod transparent;
 
 /// Information about a transaction that the wallet is interested in.
+#[derive(Debug)]
 pub struct TransactionSummary<AccountId> {
     account_id: AccountId,
     txid: TxId,
@@ -336,6 +342,11 @@ impl CachedBlock {
         }
     }
 
+    /// Returns the chain state as of the end of this block.
+    pub fn chain_state(&self) -> &ChainState {
+        &self.chain_state
+    }
+
     /// Returns the height of this block.
     pub fn height(&self) -> BlockHeight {
         self.chain_state.block_height()
@@ -390,6 +401,10 @@ impl<A: Account> Account for TestAccount<A> {
 
     fn name(&self) -> Option<&str> {
         self.account.name()
+    }
+
+    fn birthday_height(&self) -> BlockHeight {
+        self.account.birthday_height()
     }
 
     fn source(&self) -> &AccountSource {
@@ -541,35 +556,25 @@ where
 
     /// Creates a fake block at the expected next height containing a single output of the
     /// given value, and inserts it into the cache.
+    ///
+    /// This is a proxy for `generate_next_block_multi`.
     pub fn generate_next_block<Fvk: TestFvk>(
         &mut self,
         recipient_fvk: &Fvk,
         recipient_address_type: AddressType,
         value: Zatoshis,
     ) -> (BlockHeight, Cache::InsertResult, Fvk::Nullifier) {
-        let pre_activation_block = CachedBlock::none(self.sapling_activation_height() - 1);
-        let prior_cached_block = self.latest_cached_block().unwrap_or(&pre_activation_block);
-        let height = prior_cached_block.height() + 1;
-
-        let (res, nfs) = self.generate_block_at(
-            height,
-            prior_cached_block.chain_state.block_hash(),
-            &[FakeCompactOutput::new(
-                recipient_fvk,
-                recipient_address_type,
-                value,
-            )],
-            prior_cached_block.sapling_end_size,
-            prior_cached_block.orchard_end_size,
-            false,
-        );
+        let (height, res, nfs) = self.generate_next_block_multi(&[FakeCompactOutput::new(
+            recipient_fvk,
+            recipient_address_type,
+            value,
+        )]);
 
         (height, res, nfs[0])
     }
 
     /// Creates a fake block at the expected next height containing multiple outputs
     /// and inserts it into the cache.
-    #[allow(dead_code)]
     pub fn generate_next_block_multi<Fvk: TestFvk>(
         &mut self,
         outputs: &[FakeCompactOutput<Fvk>],
@@ -591,7 +596,6 @@ where
     }
 
     /// Adds an empty block to the cache, advancing the simulated chain height.
-    #[allow(dead_code)] // used only for tests that are flagged off by default
     pub fn generate_empty_block(&mut self) -> (BlockHeight, Cache::InsertResult) {
         let new_hash = {
             let mut hash = vec![0; 32];
@@ -826,7 +830,7 @@ where
     ParamsT: consensus::Parameters + Send + 'static,
     DbT: InputSource + WalletTest + WalletWrite + WalletCommitmentTrees,
     <DbT as WalletRead>::AccountId:
-        std::fmt::Debug + ConditionallySelectable + Default + Send + 'static,
+        std::fmt::Debug + ConditionallySelectable + Default + Send + Sync + 'static,
 {
     /// Invokes [`scan_cached_blocks`] with the given arguments, expecting success.
     pub fn scan_cached_blocks(&mut self, from_height: BlockHeight, limit: usize) -> ScanSummary {
@@ -967,6 +971,8 @@ where
             change_strategy,
             request,
             confirmations_policy,
+            #[cfg(feature = "unstable")]
+            None,
         )?;
 
         create_proposed_transactions(
@@ -977,6 +983,8 @@ where
             &SpendingKeys::from_unified_spending_key(usk.clone()),
             ovk_policy,
             &proposal,
+            #[cfg(feature = "unstable")]
+            None,
         )
     }
 
@@ -1006,6 +1014,8 @@ where
             change_strategy,
             request,
             confirmations_policy,
+            #[cfg(feature = "unstable")]
+            None,
         )
     }
 
@@ -1074,6 +1084,8 @@ where
             memo,
             change_memo,
             fallback_change_pool,
+            #[cfg(feature = "unstable")]
+            None,
         );
 
         if let Ok(proposal) = &result {
@@ -1141,6 +1153,8 @@ where
             &SpendingKeys::from_unified_spending_key(usk.clone()),
             ovk_policy,
             proposal,
+            #[cfg(feature = "unstable")]
+            None,
         )
     }
 
@@ -1404,7 +1418,14 @@ pub struct InitialChainState {
 /// Trait representing the ability to construct a new data store for use in a test.
 pub trait DataStoreFactory {
     type Error: core::fmt::Debug;
-    type AccountId: std::fmt::Debug + ConditionallySelectable + Default + Hash + Eq + Send + 'static;
+    type AccountId: std::fmt::Debug
+        + ConditionallySelectable
+        + Default
+        + Hash
+        + Eq
+        + Send
+        + Sync
+        + 'static;
     type Account: Account<AccountId = Self::AccountId> + Clone;
     type DsError: core::fmt::Debug;
     type DataStore: InputSource<AccountId = Self::AccountId, Error = Self::DsError>
@@ -1478,7 +1499,7 @@ impl Default for TestBuilder<(), ()> {
 
 impl<A> TestBuilder<(), A> {
     /// Adds a block cache to the test environment.
-    pub fn with_block_cache<C: TestCache>(self, cache: C) -> TestBuilder<C, A> {
+    pub fn with_block_cache<C>(self, cache: C) -> TestBuilder<C, A> {
         TestBuilder {
             rng: self.rng,
             network: self.network,
@@ -2121,7 +2142,7 @@ impl TestFvk for ::orchard::keys::FullViewingKey {
 /// Configures how a [`TestFvk`] receives a particular output.
 ///
 /// Used with [`TestFvk::add_output`] and [`TestFvk::add_logical_action`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum AddressType {
     /// The output will be sent to the default address of the full viewing key.
     DefaultExternal,
@@ -2210,7 +2231,7 @@ fn fake_compact_tx<R: RngCore + CryptoRng>(rng: &mut R) -> CompactTx {
     let mut ctx = CompactTx::default();
     let mut txid = vec![0; 32];
     rng.fill_bytes(&mut txid);
-    ctx.hash = txid;
+    ctx.txid = txid;
 
     ctx
 }
@@ -2292,6 +2313,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
 }
 
 /// Create a fake CompactBlock at the given height containing only the given transaction.
+// TODO: `tx` could be a slice and we could add multiple transactions here
 fn fake_compact_block_from_tx(
     height: BlockHeight,
     prev_hash: BlockHash,
@@ -2304,7 +2326,7 @@ fn fake_compact_block_from_tx(
     // Create a fake CompactTx containing the transaction.
     let mut ctx = CompactTx {
         index: tx_index as u64,
-        hash: tx.txid().as_ref().to_vec(),
+        txid: tx.txid().as_ref().to_vec(),
         ..Default::default()
     };
 
@@ -2617,7 +2639,7 @@ impl InputSource for MockWalletDb {
 impl WalletRead for MockWalletDb {
     type Error = ();
     type AccountId = u32;
-    type Account = (Self::AccountId, UnifiedFullViewingKey);
+    type Account = (Self::AccountId, UnifiedFullViewingKey, BlockHeight);
 
     fn get_account_ids(&self) -> Result<Vec<Self::AccountId>, Self::Error> {
         Ok(Vec::new())
@@ -2770,7 +2792,7 @@ impl WalletRead for MockWalletDb {
         _account: Self::AccountId,
         _target_height: TargetHeight,
         _confirmations_policy: ConfirmationsPolicy,
-    ) -> Result<HashMap<TransparentAddress, (TransparentKeyScope, Balance)>, Self::Error> {
+    ) -> Result<TransparentBalances, Self::Error> {
         Ok(HashMap::new())
     }
 
@@ -2789,6 +2811,15 @@ impl WalletRead for MockWalletDb {
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
+        Ok(vec![])
+    }
+
+    fn get_received_outputs(
+        &self,
+        _txid: TxId,
+        _target_height: TargetHeight,
+        _confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<Vec<ReceivedTransactionOutput>, Self::Error> {
         Ok(vec![])
     }
 }
@@ -2844,6 +2875,15 @@ impl WalletWrite for MockWalletDb {
         todo!()
     }
 
+    #[cfg(feature = "transparent-key-import")]
+    fn import_standalone_transparent_script(
+        &mut self,
+        _account: Self::AccountId,
+        _script: script::Redeem,
+    ) -> Result<(), Self::Error> {
+        todo!()
+    }
+
     fn get_next_available_address(
         &mut self,
         _account: Self::AccountId,
@@ -2876,7 +2916,7 @@ impl WalletWrite for MockWalletDb {
 
     fn store_decrypted_tx(
         &mut self,
-        _received_tx: DecryptedTransaction<Self::AccountId>,
+        _received_tx: DecryptedTransaction<Transaction, Self::AccountId>,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -2896,6 +2936,10 @@ impl WalletWrite for MockWalletDb {
         &mut self,
         _block_height: BlockHeight,
     ) -> Result<BlockHeight, Self::Error> {
+        Err(())
+    }
+
+    fn truncate_to_chain_state(&mut self, _chain_state: ChainState) -> Result<(), Self::Error> {
         Err(())
     }
 

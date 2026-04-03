@@ -10,6 +10,48 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- The following columns have been added to the exposed `v_tx_outputs` view:
+  - `transaction_id`
+  - `tx_mined_height`
+  - `tx_trust_status`
+  - `recipient_key_scope`
+- `zcash_client_sqlite::TxRef`
+- `impl<'a> Borrow<rusqlite::Transaction<'a>> for zcash_client_sqlite::SqlTransaction<'a>`
+- `impl zcash_client_backend::data_api::ll::LowLevelWalletRead for WalletDb`
+- `impl zcash_client_backend::data_api::ll::LowLevelWalletWrite for WalletDb`
+- `impl Hash for zcash_client_sqlite::{ReceivedNoteId, UtxoId, TxRef}`
+- `impl {PartialOrd, Ord} for zcash_client_sqlite::UtxoId`
+- `impl zcash_keys::keys::transparent::gap_limits::AddressStore for WalletDb`
+  (behind the `transparent-inputs` feature flag)
+- `zcash_client_sqlite::AccountRef` is now public.
+- Implement standalone P2SH address import support
+  - `impl zcash_client_backend::data_api::WalletWrite::import_standalone_transparent_script()`
+- `impl<'conn, P, CL, R> WalletWrite for WalletDb<SqlTransaction<'conn>, P, CL, R>` to
+  enable calling `WalletWrite` methods inside `WalletDb::transactionally` (amortizing the
+  database transaction overhead).
+
+### Changed
+- Migrated to `orchard 0.12`, `sapling-crypto 0.6`.
+- Renamed `zcash_client_sqlite::error::PubkeyImportConflict` to
+  `zcash_client_sqlite::error::StandaloneImportConflict`
+- P2SH UTXOs returned by `get_spendable_transparent_outputs` now include a
+  precomputed input size for accurate ZIP 317 fee estimation.
+
+### Removed
+- `zcash_client_sqlite::GapLimits` use `zcash_keys::keys::transparent::GapLimits` instead.
+- `zcash_client_sqlite::UtxoId` contents are now private.
+- The inadvertently-exposed `zcash_client_sqlite::chain::migrations::blockmeta::init` 
+  module has been removed from the public API.
+
+### Fixed
+- `get_transparent_balances` no longer fails for standalone transparent addresses
+  that have no `TransparentKeyScope`. Previously, it would error when encountering
+  a `KeyScope` that could not be converted to a `TransparentKeyScope`.
+- Notes are now consistently treated as having "uneconomic value" if their value is less
+  than **or equal to** the marginal fee. Previously, some call sites only considered
+  note uneconomic if their value was less than the marginal fee.
+
 ## [0.19.5] - 2026-03-10
 
 ### Fixed
@@ -61,7 +103,7 @@ workspace.
 
 ### Fixed
 - A bug was fixed in `WalletDb::get_transaction` that could cause transaction
-  retrieval to return an error instead of `None` for transactions for which the 
+  retrieval to return an error instead of `None` for transactions for which the
   raw transaction data was not available.
 
 ## [0.18.9] - 2025-10-22

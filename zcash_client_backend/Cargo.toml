@@ -27,7 +27,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 zcash_address.workspace = true
 zcash_encoding.workspace = true
-zcash_keys = { workspace = true, features = ["sapling"] }
+zcash_keys = { workspace = true, features = ["std", "sapling"] }
 zcash_note_encryption.workspace = true
 zcash_primitives = { workspace = true, features = ["std", "circuits"] }
 zcash_protocol.workspace = true
@@ -40,7 +40,7 @@ pczt = { workspace = true, optional = true }
 # Dependencies exposed in a public API:
 # (Breaking upgrades to these require a breaking upgrade to this crate.)
 # - Data Access API
-time.workspace = true
+time = { workspace = true, features = ["std"] }
 nonempty.workspace = true
 
 # - CSPRNG

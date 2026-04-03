@@ -10,6 +10,16 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_protocol::consensus::TxIndex`
+- `zcash_protocol::consensus::COINBASE_MATURITY_BLOCKS`
+- `zcash_protocol::consensus::BranchId::{has_sprout, has_sapling, has_orchard}`
+
+## [0.7.2] - 2025-12-10
+
+### Added
+- `zcash_protocol::txid::TxId::NULL`
+
 ## [0.7.1] - 2025-10-18
 
 ### Fixed

@@ -10,6 +10,17 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_address::ZcashAddress::is_transparent_only`
+
+### Fixed
+- `Debug` output for `zcash_address::unified::{Fvk, Ivk}` now
+  redacts viewing key material instead of emitting raw key bytes.
+
+### Removed
+
+- Removed deprecated `zcash_address::Network`, use `zcash_protocol::consensus::Network` instead.
+
 ## [0.10.1] - 2025-10-18
 
 ### Fixed
