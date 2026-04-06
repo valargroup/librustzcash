@@ -27,13 +27,12 @@ type PirWitnessResult =
 pub mod testing {
     use rusqlite::Connection;
 
-    use secrecy::SecretVec;
-    use zcash_protocol::consensus::Network;
-
-    use crate::{WalletDb, wallet::init::WalletMigrator};
-
     #[cfg(test)]
     fn migrate_and_setup(path: impl AsRef<std::path::Path>) -> Connection {
+        use secrecy::SecretVec;
+        use zcash_protocol::consensus::Network;
+
+        use crate::{WalletDb, wallet::init::WalletMigrator};
         let mut db = WalletDb::for_path(
             path.as_ref(),
             Network::TestNetwork,
