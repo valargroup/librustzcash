@@ -1351,6 +1351,14 @@ pub(super) const TABLE_PIR_SPENT_NOTES: &str = "CREATE TABLE pir_spent_notes (
         REFERENCES orchard_received_notes ( id ) ON DELETE CASCADE
 )";
 
+pub(super) const TABLE_PIR_WITNESS_DATA: &str = "CREATE TABLE pir_witness_data (
+    note_id INTEGER NOT NULL PRIMARY KEY
+        REFERENCES orchard_received_notes ( id ) ON DELETE CASCADE,
+    siblings BLOB NOT NULL CHECK ( length ( siblings ) = 1024 ),
+    anchor_height INTEGER NOT NULL,
+    anchor_root BLOB NOT NULL CHECK ( length ( anchor_root ) = 32 )
+)";
+
 pub(super) const VIEW_ADDRESS_FIRST_USE: &str = "
     CREATE VIEW v_address_first_use AS
     SELECT
