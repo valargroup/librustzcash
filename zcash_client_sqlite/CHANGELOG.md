@@ -15,6 +15,25 @@ workspace.
   and unspent as of a given height, for governance voting snapshots.
 - `WalletDb::generate_orchard_witnesses_at_frontier` generates Merkle
   witnesses at a historical frontier using an ephemeral in-memory tree.
+- `spendability-pir` feature flag, enabling PIR (Private Information Retrieval)
+  for immediate Orchard note spendability. This includes:
+  - `zcash_client_sqlite::wallet::pir` module for spent-note tracking via
+    nullifier PIR queries against an external server.
+  - `zcash_client_sqlite::wallet::pir_witness` module for storing PIR-obtained
+    Merkle authentication paths, enabling notes to be spent before the wallet
+    finishes scanning.
+  - `WalletCommitmentTrees::get_pir_orchard_merkle_path` implementation for
+    `WalletDb`.
+- `pir_spent_notes` and `pir_witness_data` database migrations (unconditional,
+  not feature-gated) to keep the migration DAG identical across all builds.
+
+### Changed
+- When `spendability-pir` is enabled, `get_wallet_summary` and note selection
+  skip the unscanned-range spendability gate for Orchard notes, and notes with
+  PIR witnesses are treated as spendable even when their shard is not fully
+  scanned.
+- `truncate_to_height` now unconditionally clears the `pir_spent_notes` and
+  `pir_witness_data` tables to avoid stale data after reorgs.
 
 ## [0.19.5] - 2026-03-10
 

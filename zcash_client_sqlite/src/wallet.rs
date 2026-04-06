@@ -161,6 +161,10 @@ pub(crate) mod encoding;
 pub mod init;
 #[cfg(feature = "orchard")]
 pub(crate) mod orchard;
+#[cfg(feature = "spendability-pir")]
+pub mod pir;
+#[cfg(feature = "spendability-pir")]
+pub mod pir_witness;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
 #[cfg(feature = "transparent-inputs")]
@@ -2154,20 +2158,48 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         let untrusted_height =
             target_height.saturating_sub(u32::from(confirmations_policy.untrusted()));
 
+        // With PIR sync, Orchard note spendability is discovered via nullifier PIR rather than
+        // sequential shard-tree scanning.
+        // Skip the spendability gate that would otherwise block spending.
+        #[cfg(feature = "spendability-pir")]
+        let any_spendable = if table_prefix == "orchard" {
+            true
+        } else {
+            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?
+        };
+        #[cfg(not(feature = "spendability-pir"))]
         let any_spendable =
             anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?;
+
+        #[cfg(feature = "spendability-pir")]
+        let pir_witness_available = table_prefix == "orchard";
+        #[cfg(not(feature = "spendability-pir"))]
+        let pir_witness_available = false;
+
+        let pir_witness_join = if pir_witness_available {
+            "LEFT OUTER JOIN pir_witness_data pw ON pw.note_id = rn.id"
+        } else {
+            ""
+        };
+        let pir_witness_col = if pir_witness_available {
+            ", CASE WHEN pw.note_id IS NOT NULL THEN 1 ELSE 0 END AS has_pir_witness"
+        } else {
+            ""
+        };
 
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
                     scan_state.max_priority,
                     t.mined_height AS mined_height,
                     MAX(tt.mined_height) AS max_shielding_input_height
+                    {pir_witness_col}
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
              LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
                 ON rn.commitment_tree_position >= scan_state.start_position
                 AND rn.commitment_tree_position < scan_state.end_position_exclusive
+             {pir_witness_join}
              LEFT OUTER JOIN transparent_received_output_spends ros
                 ON ros.transaction_id = t.id_tx
              LEFT OUTER JOIN transparent_received_outputs tro
@@ -2216,6 +2248,12 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                 },
             )?;
 
+            let has_pir_witness = if pir_witness_available {
+                row.get::<_, bool>("has_pir_witness")?
+            } else {
+                false
+            };
+
             let received_height = row
                 .get::<_, Option<u32>>("mined_height")?
                 .map(BlockHeight::from);
@@ -2228,7 +2266,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             // the shard that its witness resides in is sufficiently scanned that we can construct
             // the witness for the note, and the note has enough confirmations to be spent.
             let is_spendable = any_spendable
-                && max_priority <= ScanPriority::Scanned
+                && (max_priority <= ScanPriority::Scanned || has_pir_witness)
                 && match recipient_key_scope {
                     Some(KeyScope::INTERNAL) => {
                         // The note was has at least `trusted` confirmations.
@@ -3319,6 +3357,18 @@ pub(crate) fn truncate_to_height<P: consensus::Parameters>(
          WHERE mined_height > :height",
         named_params![":height": u32::from(truncation_height)],
     )?;
+
+    // Clear all PIR spent-note entries unconditionally. After a reorg the on-chain
+    // nullifier set may have changed, so stale PIR exclusions must not persist.
+    // The table is created unconditionally (migration is not feature-gated), so this
+    // DELETE is valid in all builds — for non-PIR builds it is a harmless no-op on
+    // an always-empty table.
+    conn.execute("DELETE FROM pir_spent_notes", [])?;
+
+    // Clear PIR witness data — the authentication paths are bound to a specific
+    // anchor height that may no longer be valid after a reorg. Same unconditional
+    // pattern as pir_spent_notes.
+    conn.execute("DELETE FROM pir_witness_data", [])?;
 
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
     // affected block records from the database.
