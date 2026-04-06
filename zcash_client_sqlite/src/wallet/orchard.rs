@@ -672,4 +672,702 @@ pub(crate) mod tests {
     fn receive_two_notes_with_same_value() {
         testing::pool::receive_two_notes_with_same_value::<OrchardPoolTester>();
     }
+
+    /// Verifies the full PIR witness fallback path in `create_proposed_transactions`:
+    /// when ShardTree checkpoints are unavailable, the transaction builder falls back
+    /// to PIR-stored witnesses and anchors to build a valid Orchard spend.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn pir_witness_fallback_creates_transaction() {
+        use std::convert::Infallible;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, WalletCommitmentTrees,
+                testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+                wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+            },
+            fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+            wallet::OvkPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::Payment;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        let value = Zatoshis::const_from_u64(60000);
+        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+
+        assert_eq!(st.get_total_balance(account.id()), value);
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            value,
+        );
+
+        // Find note DB id and commitment tree position.
+        let (note_id, note_position): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id, commitment_tree_position FROM orchard_received_notes LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let position = incrementalmerkletree::Position::from(note_position as u64);
+
+        // Extract the real witness from the ShardTree while it is still complete.
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h)?
+                        .expect("root exists at scanned height");
+
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(position, &h)?
+                        .expect("witness exists for scanned note");
+
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        // Store as PIR witness (simulates what the PIR client would do).
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            note_id,
+            &siblings_bytes,
+            u32::from(h) as u64,
+            &anchor_root_bytes,
+        )
+        .unwrap();
+
+        assert!(pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap());
+
+        // Remove ShardTree checkpoints so the tree path in build_proposed_transaction
+        // returns Err, triggering the PIR fallback in pir_orchard_witness_fallback.
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "DELETE FROM orchard_tree_checkpoint_marks_removed;
+                 DELETE FROM orchard_tree_checkpoints;",
+            )
+            .unwrap();
+
+        // Propose a transfer — coin selection still works because the shard is
+        // marked as scanned and the note has a PIR witness.
+        let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+        let to = OrchardPoolTester::sk_default_address(&to_extsk);
+        let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10000),
+        )])
+        .unwrap();
+
+        let change_strategy = SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            OrchardPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+
+        // Create the transaction — ShardTree has no checkpoints so the normal
+        // witness path fails, and the PIR fallback produces the spend.
+        let result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+
+        assert!(
+            result.is_ok(),
+            "PIR witness fallback should create transaction: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    /// When no PIR witness is stored for a note, transaction creation should fail
+    /// rather than silently produce an invalid spend.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn pir_witness_missing_fails_transaction() {
+        use std::convert::Infallible;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _,
+                testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+                wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+            },
+            fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+            wallet::OvkPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::Payment;
+
+        use crate::testing::{BlockCache, db::TestDbFactory};
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        let value = Zatoshis::const_from_u64(60000);
+        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+
+        // Remove ShardTree checkpoints but do NOT insert a PIR witness.
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "DELETE FROM orchard_tree_checkpoint_marks_removed;
+                 DELETE FROM orchard_tree_checkpoints;",
+            )
+            .unwrap();
+
+        let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+        let to = OrchardPoolTester::sk_default_address(&to_extsk);
+        let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10000),
+        )])
+        .unwrap();
+
+        let change_strategy = SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            OrchardPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+
+        let result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+
+        assert!(
+            result.is_err(),
+            "Should fail when no PIR witness is available"
+        );
+    }
+
+    /// When two notes have PIR witnesses with different anchor roots, transaction
+    /// creation should fail because the Orchard bundle requires a single anchor.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn pir_witness_anchor_mismatch_fails_transaction() {
+        use std::convert::Infallible;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, WalletCommitmentTrees,
+                testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+                wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+            },
+            fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+            wallet::OvkPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::Payment;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        // Generate two blocks with one note each so the proposal selects both.
+        let value = Zatoshis::const_from_u64(50000);
+        let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        let (h2, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h2, 1);
+
+        // Extract real witnesses from ShardTree, but forge a different anchor root
+        // for the second note to simulate an anchor mismatch.
+        let notes: Vec<(i64, i64)> = {
+            let mut stmt = st
+                .wallet()
+                .conn()
+                .prepare(
+                    "SELECT id, commitment_tree_position FROM orchard_received_notes \
+                     ORDER BY id",
+                )
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(notes.len(), 2);
+
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h2)?
+                        .expect("root exists");
+                    let pos = incrementalmerkletree::Position::from(notes[0].1 as u64);
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(pos, &h2)?
+                        .expect("witness exists");
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        // Note 1: real anchor root
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            notes[0].0,
+            &siblings_bytes,
+            u32::from(h2) as u64,
+            &anchor_root_bytes,
+        )
+        .unwrap();
+
+        // Note 2: deliberately different anchor root
+        let mut bad_root = anchor_root_bytes;
+        bad_root[0] ^= 0xFF;
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            notes[1].0,
+            &siblings_bytes,
+            u32::from(h2) as u64,
+            &bad_root,
+        )
+        .unwrap();
+
+        // Remove ShardTree checkpoints to force PIR path.
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "DELETE FROM orchard_tree_checkpoint_marks_removed;
+                 DELETE FROM orchard_tree_checkpoints;",
+            )
+            .unwrap();
+
+        let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+        let to = OrchardPoolTester::sk_default_address(&to_extsk);
+        // Request enough to force both notes into the proposal.
+        let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(60000),
+        )])
+        .unwrap();
+
+        let change_strategy = SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            OrchardPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+
+        let result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+
+        assert!(
+            result.is_err(),
+            "Should fail when PIR witnesses have different anchor roots"
+        );
+    }
+
+    /// Verifies that coin selection includes a note whose shard is NOT fully scanned
+    /// when a PIR witness is available. This exercises the `OR EXISTS` branch of
+    /// `shard_scanned_condition` — without it, the note would be excluded.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn pir_witness_enables_selection_for_unscanned_shard() {
+        use std::convert::Infallible;
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, WalletCommitmentTrees,
+                testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+                wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+            },
+            fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+            wallet::OvkPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::Payment;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        let value = Zatoshis::const_from_u64(60000);
+        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+
+        // Extract the real witness while ShardTree is complete.
+        let (note_id, note_position): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id, commitment_tree_position FROM orchard_received_notes LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let position = incrementalmerkletree::Position::from(note_position as u64);
+
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h)?
+                        .expect("root exists");
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(position, &h)?
+                        .expect("witness exists");
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            note_id,
+            &siblings_bytes,
+            u32::from(h) as u64,
+            &anchor_root_bytes,
+        )
+        .unwrap();
+
+        // Mark the shard as unscanned by raising scan_queue priority to ChainTip (50),
+        // which is above Scanned (10). This simulates a note in a shard that hasn't
+        // been fully scanned yet.
+        st.wallet()
+            .conn()
+            .execute("UPDATE scan_queue SET priority = 50", [])
+            .unwrap();
+
+        // Also remove ShardTree checkpoints so the normal witness path fails.
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "DELETE FROM orchard_tree_checkpoint_marks_removed;
+                 DELETE FROM orchard_tree_checkpoints;",
+            )
+            .unwrap();
+
+        // Verify the shard really looks unscanned from the view's perspective.
+        let max_priority: i64 = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT max_priority FROM v_orchard_shards_scan_state LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            max_priority > 10,
+            "shard should appear unscanned (priority {max_priority} > Scanned=10)"
+        );
+
+        // Coin selection should still include the note thanks to the PIR witness.
+        let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+        let to = OrchardPoolTester::sk_default_address(&to_extsk);
+        let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10000),
+        )])
+        .unwrap();
+
+        let change_strategy = SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            OrchardPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+
+        let result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Note in unscanned shard with PIR witness should be spendable: {:?}",
+            result.err()
+        );
+    }
+
+    /// Verifies that `get_wallet_summary` reports a PIR-witnessed note as spendable
+    /// even when its shard is not fully scanned. This exercises the `|| has_pir_witness`
+    /// branch in the wallet summary query, separate from coin selection.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn wallet_summary_includes_pir_witnessed_note_as_spendable() {
+        use zcash_client_backend::data_api::{
+            Account as _, WalletCommitmentTrees,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+            wallet::ConfirmationsPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        let value = Zatoshis::const_from_u64(60000);
+        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+
+        // Confirm spendable before we manipulate scan state.
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            value,
+        );
+
+        // Extract witness and store as PIR.
+        let (note_id, note_position): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id, commitment_tree_position FROM orchard_received_notes LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let position = incrementalmerkletree::Position::from(note_position as u64);
+
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h)?
+                        .expect("root exists");
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(position, &h)?
+                        .expect("witness exists");
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            note_id,
+            &siblings_bytes,
+            u32::from(h) as u64,
+            &anchor_root_bytes,
+        )
+        .unwrap();
+
+        // Mark shard as unscanned (ChainTip=50 > Scanned=10).
+        st.wallet()
+            .conn()
+            .execute("UPDATE scan_queue SET priority = 50", [])
+            .unwrap();
+
+        // Without PIR witness, the note would NOT be spendable (shard unscanned).
+        // With PIR witness, get_wallet_summary should still report it as spendable.
+        let spendable = st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN);
+        assert_eq!(
+            spendable, value,
+            "PIR-witnessed note in unscanned shard should appear spendable in wallet summary"
+        );
+    }
+
+    /// Verifies that `truncate_to_height` clears the `pir_witness_data` table to
+    /// avoid stale authentication paths after a reorg.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn truncate_to_height_clears_pir_witness_data() {
+        use zcash_client_backend::data_api::{
+            WalletCommitmentTrees,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        let value = Zatoshis::const_from_u64(60000);
+        let (h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        let (h2, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h2, 1);
+
+        let (note_id, note_position): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id, commitment_tree_position FROM orchard_received_notes LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let position = incrementalmerkletree::Position::from(note_position as u64);
+
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h2)?
+                        .expect("root exists");
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(position, &h2)?
+                        .expect("witness exists");
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            note_id,
+            &siblings_bytes,
+            u32::from(h2) as u64,
+            &anchor_root_bytes,
+        )
+        .unwrap();
+
+        assert!(pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap());
+
+        // Truncate to the first block, rewinding past the second.
+        st.truncate_to_height(h1);
+
+        assert!(
+            !pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap(),
+            "PIR witness data should be cleared after truncate_to_height"
+        );
+    }
 }

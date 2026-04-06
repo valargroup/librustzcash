@@ -1,6 +1,6 @@
 //! PIR (Private Information Retrieval) spent-note tracking.
 //!
-//! When the `sync-nullifier-pir` feature is enabled, Orchard note spendability is
+//! When the `spendability-pir` feature is enabled, Orchard note spendability is
 //! discovered by checking nullifiers against an external PIR server rather than
 //! waiting for sequential shard-tree scanning. This module provides the data layer
 //! for recording and querying PIR-detected spends.

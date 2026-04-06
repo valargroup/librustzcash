@@ -3105,6 +3105,14 @@ pub trait WalletWrite: WalletRead {
     }
 }
 
+/// The result of a PIR Orchard witness lookup: Merkle path, anchor height, and anchor root.
+#[cfg(all(feature = "orchard", feature = "spendability-pir"))]
+pub type PirOrchardWitness = (
+    incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>,
+    u64,
+    [u8; 32],
+);
+
 /// This trait describes a capability for manipulating wallet note commitment trees.
 #[cfg_attr(feature = "test-dependencies", delegatable_trait)]
 pub trait WalletCommitmentTrees {
@@ -3168,4 +3176,19 @@ pub trait WalletCommitmentTrees {
         start_index: u64,
         roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>>;
+
+    /// Retrieves a PIR-provided Orchard Merkle authentication path for the note at the
+    /// given commitment tree position. Returns the path, anchor height, and anchor root.
+    ///
+    /// The default implementation returns `Ok(None)`, indicating no PIR witness is
+    /// available. See [`zcash_client_sqlite::WalletDb`] for the production implementation
+    /// backed by the `pir_witness_data` table.
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
+    fn get_pir_orchard_merkle_path(
+        &self,
+        position: incrementalmerkletree::Position,
+    ) -> Result<Option<PirOrchardWitness>, Self::Error> {
+        let _ = position;
+        Ok(None)
+    }
 }

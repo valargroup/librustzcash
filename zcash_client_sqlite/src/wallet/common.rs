@@ -122,11 +122,25 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
     // PIR rows are unconditional (no tx_unexpired_condition) because they reflect
     // confirmed on-chain nullifier state, not pending transactions. Stale PIR rows
     // are cleared by truncate_to_height on reorg/rescan.
-    #[cfg(feature = "sync-nullifier-pir")]
+    #[cfg(feature = "spendability-pir")]
     if table_prefix == "orchard" {
         return format!("{base} UNION SELECT note_id FROM pir_spent_notes");
     }
     base
+}
+
+/// Returns the SQL condition for the shard-scanned gate in coin selection.
+///
+/// Without `spendability-pir`, requires `scan_state.max_priority <= :scanned_priority`.
+/// With the feature enabled for Orchard, also accepts notes that have a PIR witness.
+fn shard_scanned_condition(protocol: ShieldedProtocol) -> &'static str {
+    #[cfg(feature = "spendability-pir")]
+    if matches!(protocol, ShieldedProtocol::Orchard) {
+        return "scan_state.max_priority <= :scanned_priority \
+                OR EXISTS (SELECT 1 FROM pir_witness_data pw WHERE pw.note_id = rn.id)";
+    }
+    let _ = protocol;
+    "scan_state.max_priority <= :scanned_priority"
 }
 
 fn unscanned_tip_exists(
@@ -384,6 +398,24 @@ where
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
 
+    // With witness PIR, Orchard notes that have a PIR-obtained authentication path
+    // can be considered shard-scanned for spending purposes.
+    #[cfg(feature = "spendability-pir")]
+    let pir_witness_available = matches!(protocol, ShieldedProtocol::Orchard);
+    #[cfg(not(feature = "spendability-pir"))]
+    let pir_witness_available = false;
+
+    let pir_witness_join = if pir_witness_available {
+        "LEFT OUTER JOIN pir_witness_data pw ON pw.note_id = rn.id"
+    } else {
+        ""
+    };
+    let pir_witness_col = if pir_witness_available {
+        ", CASE WHEN pw.note_id IS NOT NULL THEN 1 ELSE 0 END AS has_pir_witness"
+    } else {
+        ""
+    };
+
     // Select all unspent notes belonging to the given account, ignoring dust notes.
     let mut stmt_select_notes = conn.prepare_cached(&format!(
         "SELECT
@@ -395,12 +427,14 @@ where
              IFNULL(t.trust_status, 0) AS trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
              MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+             {pir_witness_col}
          FROM {table_prefix}_received_notes rn
          INNER JOIN accounts ON accounts.id = rn.account_id
          INNER JOIN transactions t ON t.id_tx = rn.transaction_id
          LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
             ON rn.commitment_tree_position >= scan_state.start_position
             AND rn.commitment_tree_position < scan_state.end_position_exclusive
+         {pir_witness_join}
          LEFT OUTER JOIN transparent_received_output_spends ros
             ON ros.transaction_id = t.id_tx
          LEFT OUTER JOIN transparent_received_outputs tro
@@ -445,6 +479,11 @@ where
             let max_priority_raw = row.get::<_, Option<i64>>("max_priority")?;
             let tx_trust_status = row.get::<_, bool>("trust_status")?;
             let tx_shielding_inputs_trusted = row.get::<_, bool>("min_shielding_input_trust")?;
+            let has_pir_witness = if pir_witness_available {
+                row.get::<_, bool>("has_pir_witness")?
+            } else {
+                false
+            };
             let shard_scan_priority = max_priority_raw
                 .map(|code| {
                     parse_priority_code(code).ok_or_else(|| {
@@ -458,6 +497,7 @@ where
             Ok((
                 result_note,
                 shard_scan_priority,
+                has_pir_witness,
                 tx_trust_status,
                 tx_shielding_inputs_trusted,
             ))
@@ -470,10 +510,17 @@ where
 
     row_results
         .map(|t| match t? {
-            (Some(note), max_shard_priority, trusted, tx_shielding_inputs_trusted) => {
+            (
+                Some(note),
+                max_shard_priority,
+                has_pir_witness,
+                trusted,
+                tx_shielding_inputs_trusted,
+            ) => {
                 let shard_scanned = max_shard_priority
                     .iter()
-                    .any(|p| *p <= ScanPriority::Scanned);
+                    .any(|p| *p <= ScanPriority::Scanned)
+                    || has_pir_witness;
 
                 let mined_at_anchor = note
                     .mined_height()
@@ -551,14 +598,18 @@ where
     // With PIR sync, Orchard note spendability is discovered via nullifier PIR rather than
     // sequential shard-tree scanning.
     // Not skipping the unscanned range check would otherwise block spending.
-    #[cfg(feature = "sync-nullifier-pir")]
+    #[cfg(feature = "spendability-pir")]
     let skip_unscanned_check = matches!(protocol, ShieldedProtocol::Orchard);
-    #[cfg(not(feature = "sync-nullifier-pir"))]
+    #[cfg(not(feature = "spendability-pir"))]
     let skip_unscanned_check = false;
 
     if !skip_unscanned_check && unscanned_tip_exists(conn, anchor_height, table_prefix)? {
         return Ok(vec![]);
     }
+
+    // With witness PIR, Orchard notes that have a PIR-obtained authentication path
+    // can be spent even when their shard is not fully scanned.
+    let shard_scanned_condition = shard_scanned_condition(protocol);
 
     // The goal of this SQL statement is to select the oldest notes until the required
     // value has been reached.
@@ -604,10 +655,7 @@ where
              AND accounts.ufvk IS NOT NULL
              AND recipient_key_scope IS NOT NULL
              AND nf IS NOT NULL
-             -- the shard containing the note is fully scanned; this condition will exclude
-             -- notes for which `scan_state.max_priority IS NULL` (which will also arise if
-             -- `rn.commitment_tree_position IS NULL`; hence we don't need that explicit filter)
-             AND scan_state.max_priority <= :scanned_priority
+             AND ({shard_scanned_condition})
              AND t.block <= :anchor_height
              AND rn.id NOT IN rarray(:exclude)
              AND rn.id NOT IN ({})

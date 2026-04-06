@@ -10,6 +10,13 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_client_backend::data_api::WalletCommitmentTrees::get_pir_orchard_merkle_path`
+  default trait method (behind `orchard` + `spendability-pir` feature flags) for
+  retrieving PIR-provided Orchard Merkle authentication paths.
+- `spendability-pir` feature flag, enabling PIR-based Orchard note spendability
+  via witness construction from an external PIR server.
+
 ## [0.21.2] - 2026-03-10
 - The following APIs no longer crash in certain regtest mode configurations with
   fewer NUs active:

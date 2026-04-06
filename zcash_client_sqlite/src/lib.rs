@@ -437,6 +437,75 @@ impl<P, CL, R> WalletDb<Connection, P, CL, R> {
     }
 }
 
+#[cfg(feature = "spendability-pir")]
+impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Returns all Orchard notes that are candidates for PIR nullifier checking:
+    /// unspent notes with a known nullifier whose shard may not yet be fully scanned.
+    pub fn get_unspent_orchard_notes_for_pir(
+        &self,
+    ) -> Result<Vec<wallet::pir::UnspentOrchardNote>, SqliteClientError> {
+        wallet::pir::get_unspent_orchard_notes_for_pir(self.conn.borrow())
+    }
+
+    /// Records a note as spent according to a PIR nullifier query. The note will be
+    /// excluded from balance calculations and coin selection.
+    pub fn insert_pir_spent_note(&self, note_id: i64) -> Result<(), SqliteClientError> {
+        wallet::pir::insert_pir_spent_note(self.conn.borrow(), note_id)
+    }
+
+    /// Returns information about notes that are pending in unconfirmed transactions,
+    /// for display in the wallet UI.
+    pub fn get_pir_pending_spends(
+        &self,
+    ) -> Result<wallet::pir::PirPendingSpendsResult, SqliteClientError> {
+        wallet::pir::get_pir_pending_spends(self.conn.borrow())
+    }
+
+    /// Returns Orchard notes that need a PIR witness: they have a commitment tree
+    /// position, are unspent, and their shard is not fully scanned.
+    pub fn get_notes_needing_pir_witness(
+        &self,
+    ) -> Result<Vec<wallet::pir_witness::NoteNeedingWitness>, SqliteClientError> {
+        wallet::pir_witness::get_notes_needing_pir_witness(self.conn.borrow())
+    }
+
+    /// Stores a PIR-obtained Merkle authentication path for a note. The siblings
+    /// are ordered leaf-to-root. The insert is idempotent: duplicate calls for the
+    /// same `note_id` are silently ignored.
+    pub fn insert_pir_witness(
+        &self,
+        note_id: i64,
+        siblings: &[[u8; 32]; 32],
+        anchor_height: u64,
+        anchor_root: &[u8; 32],
+    ) -> Result<(), SqliteClientError> {
+        wallet::pir_witness::insert_pir_witness(
+            self.conn.borrow(),
+            note_id,
+            siblings,
+            anchor_height,
+            anchor_root,
+        )
+    }
+
+    /// Retrieves a stored PIR witness for the given note, or `None` if no witness
+    /// has been stored.
+    pub fn get_pir_witness(
+        &self,
+        note_id: i64,
+    ) -> Result<Option<wallet::pir_witness::PirWitnessRow>, SqliteClientError> {
+        wallet::pir_witness::get_pir_witness(self.conn.borrow(), note_id)
+    }
+
+    /// Returns all notes that have PIR witnesses and are still unspent. Useful for
+    /// displaying PIR-spendable balance in the wallet UI.
+    pub fn get_pir_witnessed_notes(
+        &self,
+    ) -> Result<Vec<wallet::pir_witness::PirWitnessedNote>, SqliteClientError> {
+        wallet::pir_witness::get_pir_witnessed_notes(self.conn.borrow())
+    }
+}
+
 #[cfg(feature = "transparent-inputs")]
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
     /// Sets the gap limits to be used by the wallet in transparent address generation.
@@ -2246,6 +2315,21 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL, R> Wallet
             .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?;
         Ok(())
     }
+
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
+    fn get_pir_orchard_merkle_path(
+        &self,
+        position: incrementalmerkletree::Position,
+    ) -> Result<Option<data_api::PirOrchardWitness>, Self::Error> {
+        wallet::pir_witness::get_pir_merkle_path_by_position(self.conn.borrow(), position).map_err(
+            |e| match e {
+                SqliteClientError::DbError(e) => commitment_tree::Error::Query(e),
+                other => commitment_tree::Error::Query(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(other),
+                )),
+            },
+        )
+    }
 }
 
 impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
@@ -2307,6 +2391,21 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
             start_index,
             roots,
         )
+    }
+
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
+    fn get_pir_orchard_merkle_path(
+        &self,
+        position: incrementalmerkletree::Position,
+    ) -> Result<Option<data_api::PirOrchardWitness>, Self::Error> {
+        wallet::pir_witness::get_pir_merkle_path_by_position(self.conn.0, position).map_err(|e| {
+            match e {
+                SqliteClientError::DbError(e) => commitment_tree::Error::Query(e),
+                other => commitment_tree::Error::Query(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(other),
+                )),
+            }
+        })
     }
 }
 

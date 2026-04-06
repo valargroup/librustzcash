@@ -1082,46 +1082,65 @@ where
     };
 
     #[cfg(feature = "orchard")]
-    let (orchard_anchor, orchard_inputs) = if proposal_step
-        .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
-    {
-        proposal_step.shielded_inputs().map_or_else(
-            || Ok((Some(orchard::Anchor::empty_tree()), vec![])),
-            |inputs| {
-                wallet_db.with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|orchard_tree| {
-                    let anchor = orchard_tree
-                        .root_at_checkpoint_id(&inputs.anchor_height())?
-                        .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
-                        .into();
+    let orchard_tree_result: Result<_, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>> =
+        if proposal_step.involves(PoolType::Shielded(ShieldedProtocol::Orchard)) {
+            proposal_step.shielded_inputs().map_or_else(
+                || Ok((Some(orchard::Anchor::empty_tree()), vec![])),
+                |inputs| {
+                    wallet_db.with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(
+                        |orchard_tree| {
+                            let anchor = orchard_tree
+                                .root_at_checkpoint_id(&inputs.anchor_height())?
+                                .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
+                                .into();
 
-                    let orchard_inputs = inputs
-                        .notes()
-                        .iter()
-                        .filter_map(|selected| match selected.note() {
-                            #[cfg(feature = "orchard")]
-                            Note::Orchard(note) => orchard_tree
-                                .witness_at_checkpoint_id_caching(
-                                    selected.note_commitment_tree_position(),
-                                    &inputs.anchor_height(),
-                                )
-                                .and_then(|witness| {
-                                    witness
-                                        .ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                            let orchard_inputs = inputs
+                                .notes()
+                                .iter()
+                                .filter_map(|selected| match selected.note() {
+                                    #[cfg(feature = "orchard")]
+                                    Note::Orchard(note) => orchard_tree
+                                        .witness_at_checkpoint_id_caching(
+                                            selected.note_commitment_tree_position(),
+                                            &inputs.anchor_height(),
+                                        )
+                                        .and_then(|witness| {
+                                            witness.ok_or(ShardTreeError::Query(
+                                                QueryError::CheckpointPruned,
+                                            ))
+                                        })
+                                        .map(|merkle_path| Some((note, merkle_path)))
+                                        .map_err(Error::from)
+                                        .transpose(),
+                                    Note::Sapling(_) => None,
                                 })
-                                .map(|merkle_path| Some((note, merkle_path)))
-                                .map_err(Error::from)
-                                .transpose(),
-                            Note::Sapling(_) => None,
-                        })
-                        .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()?;
+                                .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()?;
 
-                    Ok((Some(anchor), orchard_inputs))
-                })
-            },
-        )?
-    } else {
-        (None, vec![])
+                            Ok((Some(anchor), orchard_inputs))
+                        },
+                    )
+                },
+            )
+        } else {
+            Ok((None, vec![]))
+        };
+
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
+    let (orchard_anchor, orchard_inputs) = match orchard_tree_result {
+        Ok(result) => result,
+        Err(Error::CommitmentTree(ShardTreeError::Query(_)))
+        | Err(Error::Proposal(ProposalError::AnchorNotFound(_))) => {
+            if let Some(inputs) = proposal_step.shielded_inputs() {
+                pir_orchard_witness_fallback(wallet_db, inputs)?
+            } else {
+                (None, vec![])
+            }
+        }
+        Err(other) => return Err(other),
     };
+    #[cfg(all(feature = "orchard", not(feature = "spendability-pir")))]
+    let (orchard_anchor, orchard_inputs) = orchard_tree_result?;
+
     #[cfg(not(feature = "orchard"))]
     let orchard_anchor = None;
 
@@ -1540,6 +1559,78 @@ where
 // `unused_transparent_outputs` maps `StepOutput`s for transparent outputs
 // that have not been consumed so far, to the corresponding pair of
 // `TransparentAddress` and `Outpoint`.
+/// Falls back to PIR-stored witnesses when ShardTree witnesses are unavailable
+/// (shard incomplete). Retrieves a `MerklePath` for each Orchard note from the
+/// `pir_witness_data` table. All PIR witnesses must share the same anchor root;
+/// that root becomes the transaction's Orchard anchor.
+#[cfg(all(feature = "orchard", feature = "spendability-pir"))]
+#[allow(clippy::type_complexity)]
+fn pir_orchard_witness_fallback<'a, DbT, InputsErrT, FeeErrT, ChangeErrT, N>(
+    wallet_db: &mut DbT,
+    inputs: &'a crate::proposal::ShieldedInputs<N>,
+) -> Result<
+    (
+        Option<orchard::Anchor>,
+        Vec<(
+            &'a orchard::Note,
+            incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>,
+        )>,
+    ),
+    Error<
+        <DbT as WalletRead>::Error,
+        <DbT as WalletCommitmentTrees>::Error,
+        InputsErrT,
+        FeeErrT,
+        ChangeErrT,
+        N,
+    >,
+>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+{
+    use crate::wallet::Note;
+
+    let mut pir_anchor: Option<orchard::Anchor> = None;
+    let mut orchard_inputs = vec![];
+
+    for selected in inputs.notes().iter() {
+        if let Note::Orchard(note) = selected.note() {
+            let position = selected.note_commitment_tree_position();
+
+            let (merkle_path, _anchor_height, anchor_root) = wallet_db
+                .get_pir_orchard_merkle_path(position)
+                .map_err(|e| Error::CommitmentTree(ShardTreeError::Storage(e)))?
+                .ok_or(Error::CommitmentTree(ShardTreeError::Query(
+                    QueryError::CheckpointPruned,
+                )))?;
+
+            let root_hash: orchard::tree::MerkleHashOrchard =
+                Option::from(orchard::tree::MerkleHashOrchard::from_bytes(&anchor_root))
+                    .ok_or_else(|| {
+                        Error::CommitmentTree(ShardTreeError::Query(QueryError::CheckpointPruned))
+                    })?;
+            let anchor: orchard::Anchor = root_hash.into();
+
+            match &pir_anchor {
+                None => pir_anchor = Some(anchor),
+                Some(existing) if *existing == anchor => {}
+                Some(_) => {
+                    return Err(Error::Proposal(ProposalError::AnchorNotFound(
+                        inputs.anchor_height(),
+                    )));
+                }
+            }
+
+            orchard_inputs.push((note, merkle_path));
+        }
+    }
+
+    Ok((
+        pir_anchor.or(Some(orchard::Anchor::empty_tree())),
+        orchard_inputs,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 fn create_proposed_transaction<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(

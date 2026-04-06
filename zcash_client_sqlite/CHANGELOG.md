@@ -11,18 +11,25 @@ workspace.
 ## [Unreleased]
 
 ### Added
-- `zcash_client_sqlite::wallet::pir` module behind the `sync-nullifier-pir` feature
-  flag, providing PIR (Private Information Retrieval) spent-note tracking. This
-  enables Orchard note spendability detection via nullifier PIR queries against
-  an external server, without waiting for sequential shard-tree scanning.
-- `pir_spent_notes` database migration (unconditional, not feature-gated) to keep
-  the migration DAG identical across all builds.
+- `spendability-pir` feature flag, enabling PIR (Private Information Retrieval)
+  for immediate Orchard note spendability. This includes:
+  - `zcash_client_sqlite::wallet::pir` module for spent-note tracking via
+    nullifier PIR queries against an external server.
+  - `zcash_client_sqlite::wallet::pir_witness` module for storing PIR-obtained
+    Merkle authentication paths, enabling notes to be spent before the wallet
+    finishes scanning.
+  - `WalletCommitmentTrees::get_pir_orchard_merkle_path` implementation for
+    `WalletDb`.
+- `pir_spent_notes` and `pir_witness_data` database migrations (unconditional,
+  not feature-gated) to keep the migration DAG identical across all builds.
 
 ### Changed
-- When `sync-nullifier-pir` is enabled, `get_wallet_summary` and note selection
-  skip the unscanned-range spendability gate for Orchard notes.
-- `truncate_to_height` now unconditionally clears the `pir_spent_notes` table
-  to avoid stale PIR exclusions after reorgs.
+- When `spendability-pir` is enabled, `get_wallet_summary` and note selection
+  skip the unscanned-range spendability gate for Orchard notes, and notes with
+  PIR witnesses are treated as spendable even when their shard is not fully
+  scanned.
+- `truncate_to_height` now unconditionally clears the `pir_spent_notes` and
+  `pir_witness_data` tables to avoid stale data after reorgs.
 
 ## [0.19.5] - 2026-03-10
 
