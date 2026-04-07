@@ -561,13 +561,34 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         wallet::pir_witness::get_pir_witnessed_notes(self.conn.borrow())
     }
 
+    /// Returns the internal account row ID and account UUID for an Orchard note.
+    /// Used by the FFI layer to look up FVK context for change discovery.
+    pub fn get_account_for_orchard_note(
+        &self,
+        note_id: i64,
+    ) -> Result<(i64, AccountUuid), SqliteClientError> {
+        let conn = self.conn.borrow();
+        conn.query_row(
+            "SELECT rn.account_id, a.uuid
+             FROM orchard_received_notes rn
+             INNER JOIN accounts a ON a.id = rn.account_id
+             WHERE rn.id = ?1",
+            [note_id],
+            |row| {
+                let account_id: i64 = row.get(0)?;
+                let uuid: uuid::Uuid = row.get(1)?;
+                Ok((account_id, AccountUuid(uuid)))
+            },
+        )
+        .map_err(|e| e.into())
+    }
+
     /// Inserts a provisional change note discovered via PIR trial decryption.
-    /// Resolves the account UUID to an internal row ID and stores the note.
     /// Returns the row ID of the inserted (or existing) row.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_pir_provisional_note(
         &self,
-        account_uuid: AccountUuid,
+        account_id: i64,
         spent_note_id: i64,
         value: u64,
         position: u64,
@@ -578,14 +599,8 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         cmx: &[u8; 32],
         spend_height: u32,
     ) -> Result<i64, SqliteClientError> {
-        let conn = self.conn.borrow();
-        let account_id: i64 = conn.query_row(
-            "SELECT id FROM accounts WHERE uuid = :uuid",
-            rusqlite::named_params! { ":uuid": account_uuid.expose_uuid().as_bytes().as_slice() },
-            |row| row.get(0),
-        )?;
         wallet::pir_provisional::insert_pir_provisional_note(
-            conn,
+            self.conn.borrow(),
             account_id,
             spent_note_id,
             value,
