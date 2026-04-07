@@ -1599,6 +1599,111 @@ pub(crate) mod tests {
         );
     }
 
+    /// Verifies that wallet summary aggregation remains note-specific when only a
+    /// subset of Orchard notes have PIR witnesses available.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn wallet_summary_only_upgrades_pir_witnessed_notes() {
+        use zcash_client_backend::data_api::{
+            Account as _, WalletCommitmentTrees,
+            testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+            wallet::ConfirmationsPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+
+        let first_value = Zatoshis::const_from_u64(60_000);
+        let second_value = Zatoshis::const_from_u64(80_000);
+
+        let (_h1, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, first_value);
+        st.scan_cached_blocks(_h1, 1);
+        let (h2, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, second_value);
+        st.scan_cached_blocks(h2, 1);
+
+        let (first_note_id, first_note_position): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id, commitment_tree_position FROM orchard_received_notes ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let first_position = incrementalmerkletree::Position::from(first_note_position as u64);
+
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h2)?
+                        .expect("root exists");
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(first_position, &h2)?
+                        .expect("witness exists");
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        pir_witness::insert_pir_witness(
+            st.wallet().conn(),
+            first_note_id,
+            &siblings_bytes,
+            u32::from(h2) as u64,
+            &anchor_root_bytes,
+        )
+        .unwrap();
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE scan_queue SET priority = 50", [])
+            .unwrap();
+
+        let summary = st
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .expect("wallet summary should be present");
+        let orchard_balance = summary
+            .account_balances()
+            .get(&account.id())
+            .expect("account balance should exist")
+            .orchard_balance();
+
+        assert_eq!(
+            orchard_balance.spendable_value(),
+            first_value,
+            "only the PIR-witnessed Orchard note should remain spendable"
+        );
+        assert_eq!(
+            orchard_balance.value_pending_spendability(),
+            second_value,
+            "unresolved Orchard notes should remain pending spendability"
+        );
+        assert_eq!(
+            orchard_balance.total(),
+            (first_value + second_value).expect("sum should fit in Zatoshi range"),
+            "wallet summary should preserve the full Orchard total while splitting readiness note-by-note"
+        );
+    }
+
     /// Verifies that `truncate_to_height` clears the `pir_witness_data` table to
     /// avoid stale authentication paths after a reorg.
     #[cfg(feature = "spendability-pir")]

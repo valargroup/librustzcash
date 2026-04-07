@@ -595,9 +595,9 @@ where
         note_reconstruction_cols,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
-    // With PIR sync, Orchard note spendability is discovered via nullifier PIR rather than
-    // sequential shard-tree scanning.
-    // Not skipping the unscanned range check would otherwise block spending.
+    // With witness PIR, Orchard spendability can be proven note-by-note even when the
+    // global shard-tree scan is incomplete. The per-note shard condition below remains
+    // authoritative for deciding which notes are actually eligible.
     #[cfg(feature = "spendability-pir")]
     let skip_unscanned_check = matches!(protocol, ShieldedProtocol::Orchard);
     #[cfg(not(feature = "spendability-pir"))]

@@ -2158,9 +2158,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         let untrusted_height =
             target_height.saturating_sub(u32::from(confirmations_policy.untrusted()));
 
-        // With PIR sync, Orchard note spendability is discovered via nullifier PIR rather than
-        // sequential shard-tree scanning.
-        // Skip the spendability gate that would otherwise block spending.
+        // With witness PIR enabled, Orchard spendability can be determined on a note-specific
+        // basis even when the global shard-tree scan is incomplete.
+        // Bypass the global gate here and let the per-note `has_pir_witness` / scan-state checks
+        // below decide whether each Orchard note is spendable.
         #[cfg(feature = "spendability-pir")]
         let any_spendable = if table_prefix == "orchard" {
             true
