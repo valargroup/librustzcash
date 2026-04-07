@@ -2,15 +2,17 @@
 //!
 //! When nullifier PIR detects a note as spent, the wallet trial-decrypts the
 //! spending transaction's actions to discover change notes. These "provisional"
-//! notes live here until the canonical scanner catches up.
+//! notes live in `pir_notes` (with `canonical_note_id = NULL`) until the
+//! canonical scanner catches up.
 //!
 //! A provisional note becomes spendable once a PIR witness is obtained
-//! (`has_pir_witness = 1`). When the scanner processes the same block and
-//! inserts the canonical note into `orchard_received_notes`, the provisional
-//! row is marked `discovered_by_scanner = 1` (reconciliation) rather than
-//! deleted, so that its descendants in the recursive chain remain valid.
+//! (`witness_siblings IS NOT NULL`). When the scanner processes the same block
+//! and inserts the canonical note into `orchard_received_notes`, the row is
+//! reconciled by setting `canonical_note_id` and `discovered_by_scanner = 1`,
+//! rather than deleted, so that its descendants in the recursive chain remain
+//! valid.
 
-use rusqlite::{Connection, OptionalExtension, named_params};
+use rusqlite::{Connection, named_params};
 
 use crate::error::SqliteClientError;
 
@@ -37,7 +39,6 @@ pub struct ProvisionalNoteForPIR {
 pub fn insert_pir_provisional_note(
     conn: &Connection,
     account_id: i64,
-    spent_note_id: i64,
     value: u64,
     position: u64,
     diversifier: &[u8; 11],
@@ -50,15 +51,14 @@ pub fn insert_pir_provisional_note(
     parent_provisional_id: Option<i64>,
 ) -> Result<i64, SqliteClientError> {
     conn.execute(
-        "INSERT OR IGNORE INTO pir_provisional_notes
-            (account_id, spent_note_id, value, position, diversifier,
-             rseed, rho, nullifier, cmx, spend_height, depth, parent_provisional_id)
+        "INSERT OR IGNORE INTO pir_notes
+            (account_id, value, position, diversifier,
+             rseed, rho, nullifier, cmx, spend_height, depth, parent_id)
          VALUES
-            (:account_id, :spent_note_id, :value, :position, :diversifier,
-             :rseed, :rho, :nullifier, :cmx, :spend_height, :depth, :parent_provisional_id)",
+            (:account_id, :value, :position, :diversifier,
+             :rseed, :rho, :nullifier, :cmx, :spend_height, :depth, :parent_id)",
         named_params! {
             ":account_id": account_id,
-            ":spent_note_id": spent_note_id,
             ":value": i64::try_from(value).expect("note value fits i64"),
             ":position": i64::try_from(position).expect("position fits i64"),
             ":diversifier": &diversifier[..],
@@ -68,12 +68,12 @@ pub fn insert_pir_provisional_note(
             ":cmx": &cmx[..],
             ":spend_height": spend_height,
             ":depth": depth,
-            ":parent_provisional_id": parent_provisional_id,
+            ":parent_id": parent_provisional_id,
         },
     )?;
 
     let row_id: i64 = conn.query_row(
-        "SELECT id FROM pir_provisional_notes WHERE position = :position",
+        "SELECT id FROM pir_notes WHERE position = :position",
         named_params! { ":position": i64::try_from(position).expect("position fits i64") },
         |row| row.get(0),
     )?;
@@ -81,15 +81,28 @@ pub fn insert_pir_provisional_note(
     Ok(row_id)
 }
 
-/// Sets `has_pir_witness = 1` for a provisional note after a PIR witness is
-/// obtained, making it eligible for balance and coin selection.
+/// Sets witness data on a provisional note after a PIR witness is obtained,
+/// making it eligible for balance and coin selection.
 pub fn mark_provisional_note_witnessed(
     conn: &Connection,
     note_id: i64,
+    siblings: &[[u8; 32]; 32],
+    anchor_height: u64,
+    anchor_root: &[u8; 32],
 ) -> Result<bool, SqliteClientError> {
+    let siblings_blob: Vec<u8> = siblings.iter().flat_map(|s| s.iter()).copied().collect();
     let rows = conn.execute(
-        "UPDATE pir_provisional_notes SET has_pir_witness = 1 WHERE id = :id",
-        named_params! { ":id": note_id },
+        "UPDATE pir_notes
+         SET witness_siblings = :siblings,
+             witness_anchor_height = :anchor_height,
+             witness_anchor_root = :anchor_root
+         WHERE id = :id AND canonical_note_id IS NULL",
+        named_params! {
+            ":id": note_id,
+            ":siblings": siblings_blob,
+            ":anchor_height": anchor_height as i64,
+            ":anchor_root": &anchor_root[..],
+        },
     )?;
     Ok(rows > 0)
 }
@@ -97,13 +110,29 @@ pub fn mark_provisional_note_witnessed(
 /// Returns provisional notes whose nullifiers have not yet been checked via PIR.
 ///
 /// Excludes notes already reconciled by the scanner (`discovered_by_scanner = 1`).
+///
+/// `spent_note_id` is the canonical `orchard_received_notes` ID at the root of each
+/// note's parent chain. It is resolved via a recursive CTE that walks `parent_id`
+/// links up to the node whose `canonical_note_id` is set.
 pub fn get_provisional_notes_for_pir_check(
     conn: &Connection,
 ) -> Result<Vec<ProvisionalNoteForPIR>, SqliteClientError> {
     let mut stmt = conn.prepare(
-        "SELECT id, nullifier, value, spent_note_id, depth FROM pir_provisional_notes
-         WHERE pir_checked = 0
-           AND discovered_by_scanner = 0",
+        "WITH RECURSIVE root_chain(node_id, root_canonical_id) AS (
+             SELECT id, canonical_note_id FROM pir_notes
+             WHERE canonical_note_id IS NOT NULL
+             UNION ALL
+             SELECT child.id, rc.root_canonical_id
+             FROM pir_notes child
+             JOIN root_chain rc ON child.parent_id = rc.node_id
+         )
+         SELECT pn.id, pn.nullifier, pn.value, pn.depth,
+                COALESCE(rc.root_canonical_id, 0) AS spent_note_id
+         FROM pir_notes pn
+         LEFT JOIN root_chain rc ON rc.node_id = pn.id
+         WHERE pn.canonical_note_id IS NULL
+           AND pn.pir_checked = 0
+           AND pn.discovered_by_scanner = 0",
     )?;
     let rows = stmt.query_map(
         [],
@@ -136,7 +165,7 @@ pub fn mark_provisional_pir_result(
     is_spent: bool,
 ) -> Result<(), SqliteClientError> {
     conn.execute(
-        "UPDATE pir_provisional_notes
+        "UPDATE pir_notes
          SET pir_checked = 1, is_spent = MAX(is_spent, :is_spent)
          WHERE id = :id",
         named_params! {
@@ -150,11 +179,10 @@ pub fn mark_provisional_pir_result(
 /// Reconciles a provisional note with the canonical scanner.
 ///
 /// When the scanner inserts a canonical note at the same tree position, this
-/// function marks the provisional row as `discovered_by_scanner = 1` instead
-/// of deleting it. If the provisional note was already detected as spent by
-/// PIR (`is_spent = 1`), the canonical note's id is inserted into
-/// `pir_spent_notes` to prevent double-counting (the scanner hasn't reached
-/// the spending block yet, so it considers the canonical note unspent).
+/// function sets `canonical_note_id` and `discovered_by_scanner = 1` on the
+/// existing row. The `is_spent` flag is already on the same row, so no
+/// cross-table transfer is needed — the `spent_notes_clause` will pick it up
+/// via `canonical_note_id`.
 ///
 /// The provisional note's descendants remain valid in the DB.
 pub fn reconcile_provisional_for_position(
@@ -164,39 +192,19 @@ pub fn reconcile_provisional_for_position(
 ) -> Result<bool, SqliteClientError> {
     let pos_i64 = i64::try_from(position).expect("position fits i64");
 
-    let is_spent: Option<bool> = conn
-        .query_row(
-            "SELECT is_spent FROM pir_provisional_notes WHERE position = :position",
-            named_params! { ":position": pos_i64 },
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    let Some(is_spent) = is_spent else {
-        return Ok(false);
-    };
-
-    if is_spent {
-        conn.execute(
-            "INSERT INTO pir_spent_notes (note_id)
-             SELECT :note_id
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM orchard_received_note_spends
-                 WHERE orchard_received_note_id = :note_id
-             )
-             AND NOT EXISTS (
-                 SELECT 1 FROM pir_spent_notes WHERE note_id = :note_id
-             )",
-            named_params! { ":note_id": canonical_note_id },
-        )?;
-    }
-
-    conn.execute(
-        "UPDATE pir_provisional_notes SET discovered_by_scanner = 1 WHERE position = :position",
-        named_params! { ":position": pos_i64 },
+    let rows = conn.execute(
+        "UPDATE pir_notes
+         SET canonical_note_id = :canonical_note_id,
+             discovered_by_scanner = 1
+         WHERE position = :position
+           AND canonical_note_id IS NULL",
+        named_params! {
+            ":canonical_note_id": canonical_note_id,
+            ":position": pos_i64,
+        },
     )?;
 
-    Ok(true)
+    Ok(rows > 0)
 }
 
 #[cfg(test)]
@@ -208,7 +216,6 @@ mod tests {
         insert_pir_provisional_note(
             conn,
             1, // account_id
-            1, // spent_note_id
             value,
             position,
             &[0u8; 11],
@@ -233,7 +240,6 @@ mod tests {
         insert_pir_provisional_note(
             conn,
             1,
-            1,
             value,
             position,
             &[0u8; 11],
@@ -257,7 +263,7 @@ mod tests {
         let count: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pir_provisional_notes",
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id IS NULL",
                 [],
                 |r| r.get(0),
             )
@@ -271,7 +277,7 @@ mod tests {
         let id1 = insert_test_provisional(db.conn(), 1000, 50_000);
         let id2 = insert_pir_provisional_note(
             db.conn(),
-            1, 1, 50_000, 1000,
+            1, 50_000, 1000,
             &[0u8; 11], &[0u8; 32], &[0u8; 32],
             &[1u8; 32],
             &[0u8; 32], 3_200_000,
@@ -283,7 +289,7 @@ mod tests {
         let count: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pir_provisional_notes",
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id IS NULL",
                 [],
                 |r| r.get(0),
             )
@@ -299,20 +305,21 @@ mod tests {
         let has_witness: bool = db
             .conn()
             .query_row(
-                "SELECT has_pir_witness FROM pir_provisional_notes WHERE id = ?1",
+                "SELECT witness_siblings IS NOT NULL FROM pir_notes WHERE id = ?1",
                 [id],
                 |r| r.get(0),
             )
             .unwrap();
         assert!(!has_witness);
 
-        let updated = mark_provisional_note_witnessed(db.conn(), id).unwrap();
+        let siblings = [[0x10u8; 32]; 32];
+        let updated = mark_provisional_note_witnessed(db.conn(), id, &siblings, 100, &[0xFF; 32]).unwrap();
         assert!(updated);
 
         let has_witness: bool = db
             .conn()
             .query_row(
-                "SELECT has_pir_witness FROM pir_provisional_notes WHERE id = ?1",
+                "SELECT witness_siblings IS NOT NULL FROM pir_notes WHERE id = ?1",
                 [id],
                 |r| r.get(0),
             )
@@ -323,7 +330,8 @@ mod tests {
     #[test]
     fn mark_witnessed_nonexistent() {
         let db = PirTestDb::new();
-        let updated = mark_provisional_note_witnessed(db.conn(), 9999).unwrap();
+        let siblings = [[0x10u8; 32]; 32];
+        let updated = mark_provisional_note_witnessed(db.conn(), 9999, &siblings, 100, &[0xFF; 32]).unwrap();
         assert!(!updated);
     }
 
@@ -357,7 +365,7 @@ mod tests {
 
         db.conn()
             .execute(
-                "UPDATE pir_provisional_notes SET discovered_by_scanner = 1 WHERE position = 1000",
+                "UPDATE pir_notes SET discovered_by_scanner = 1 WHERE position = 1000",
                 [],
             )
             .unwrap();
@@ -376,7 +384,7 @@ mod tests {
         let (checked, spent): (bool, bool) = db
             .conn()
             .query_row(
-                "SELECT pir_checked, is_spent FROM pir_provisional_notes WHERE id = ?1",
+                "SELECT pir_checked, is_spent FROM pir_notes WHERE id = ?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -395,7 +403,7 @@ mod tests {
         let (checked, spent): (bool, bool) = db
             .conn()
             .query_row(
-                "SELECT pir_checked, is_spent FROM pir_provisional_notes WHERE id = ?1",
+                "SELECT pir_checked, is_spent FROM pir_notes WHERE id = ?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -404,74 +412,55 @@ mod tests {
         assert!(spent);
     }
 
+    fn insert_canonical_note(conn: &Connection, id: i64, position: i64, value: i64) {
+        crate::wallet::pir_witness::testing::insert_test_note_with_position(
+            conn,
+            id,
+            value,
+            Some(&[id as u8; 32]),
+            Some(position),
+        );
+    }
+
     #[test]
     fn reconcile_marks_discovered_by_scanner() {
         let db = PirTestDb::new();
         insert_test_provisional(db.conn(), 1000, 50_000);
+        insert_canonical_note(db.conn(), 42, 1000, 50_000);
 
         let reconciled = reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
         assert!(reconciled);
 
-        let dbs: bool = db
+        let (dbs, canonical): (bool, Option<i64>) = db
             .conn()
             .query_row(
-                "SELECT discovered_by_scanner FROM pir_provisional_notes WHERE position = 1000",
+                "SELECT discovered_by_scanner, canonical_note_id FROM pir_notes WHERE position = 1000",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert!(dbs);
+        assert_eq!(canonical, Some(42));
     }
 
     #[test]
-    fn reconcile_propagates_spent_to_pir_spent_notes() {
+    fn reconcile_spent_note_visible_in_spent_clause() {
         let db = PirTestDb::new();
         let id = insert_test_provisional(db.conn(), 1000, 50_000);
         mark_provisional_pir_result(db.conn(), id, true).unwrap();
 
-        // Insert a canonical note to satisfy the FK
-        db.conn()
-            .execute(
-                "INSERT INTO orchard_received_notes
-                    (id, tx, action_index, account_id, diversifier, value, rho, rseed,
-                     commitment_tree_position, recipient_key_scope)
-                 VALUES (42, 100, 0, 1, X'0000000000000000000000', 50000,
-                         X'0000000000000000000000000000000000000000000000000000000000000000',
-                         X'0000000000000000000000000000000000000000000000000000000000000000',
-                         1000, 0)",
-                [],
-            )
-            .unwrap();
-
+        insert_canonical_note(db.conn(), 42, 1000, 50_000);
         reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
 
-        let pir_spent_count: i64 = db
+        let count: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pir_spent_notes WHERE note_id = 42",
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 42 AND is_spent = 1",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(pir_spent_count, 1);
-    }
-
-    #[test]
-    fn reconcile_no_propagation_when_not_spent() {
-        let db = PirTestDb::new();
-        insert_test_provisional(db.conn(), 1000, 50_000);
-
-        reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
-
-        let pir_spent_count: i64 = db
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM pir_spent_notes",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(pir_spent_count, 0);
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -490,7 +479,7 @@ mod tests {
         let (depth, parent): (i64, Option<i64>) = db
             .conn()
             .query_row(
-                "SELECT depth, parent_provisional_id FROM pir_provisional_notes WHERE id = ?1",
+                "SELECT depth, parent_id FROM pir_notes WHERE id = ?1",
                 [c],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -500,39 +489,50 @@ mod tests {
     }
 
     #[test]
+    fn spent_note_id_resolves_via_parent_chain() {
+        let db = PirTestDb::new();
+        insert_canonical_note(db.conn(), 42, 5000, 100_000);
+        crate::wallet::pir::insert_pir_spent_note(db.conn(), 42).unwrap();
+
+        let parent_pir_id: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM pir_notes WHERE canonical_note_id = 42",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let b = insert_test_provisional_with_depth(db.conn(), 6000, 70_000, 1, Some(parent_pir_id));
+        let _c = insert_test_provisional_with_depth(db.conn(), 7000, 40_000, 2, Some(b));
+
+        let notes = get_provisional_notes_for_pir_check(db.conn()).unwrap();
+        assert_eq!(notes.len(), 2);
+        for note in &notes {
+            assert_eq!(note.spent_note_id, 42, "depth-{} should resolve to canonical note 42", note.depth);
+        }
+    }
+
+    #[test]
     fn reconcile_mid_chain_preserves_descendants() {
         let db = PirTestDb::new();
         let b = insert_test_provisional_with_depth(db.conn(), 1000, 70_000, 1, None);
         mark_provisional_pir_result(db.conn(), b, true).unwrap();
         let _c = insert_test_provisional_with_depth(db.conn(), 2000, 40_000, 2, Some(b));
 
-        db.conn()
-            .execute(
-                "INSERT INTO orchard_received_notes
-                    (id, tx, action_index, account_id, diversifier, value, rho, rseed,
-                     commitment_tree_position, recipient_key_scope)
-                 VALUES (42, 100, 0, 1, X'0000000000000000000000', 70000,
-                         X'0000000000000000000000000000000000000000000000000000000000000000',
-                         X'0000000000000000000000000000000000000000000000000000000000000000',
-                         1000, 0)",
-                [],
-            )
-            .unwrap();
-
+        insert_canonical_note(db.conn(), 42, 1000, 70_000);
         reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
 
-        // B is reconciled, C remains untouched
         let total: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pir_provisional_notes WHERE discovered_by_scanner = 0",
+                "SELECT COUNT(*) FROM pir_notes WHERE discovered_by_scanner = 0",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(total, 1); // only C
 
-        // C is still a valid leaf
         let notes = get_provisional_notes_for_pir_check(db.conn()).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].value, 40_000);
@@ -545,10 +545,9 @@ mod tests {
 
         mark_provisional_pir_result(db.conn(), id, true).unwrap();
 
-        // Calling again with false must not revert is_spent
         db.conn()
             .execute(
-                "UPDATE pir_provisional_notes SET pir_checked = 0 WHERE id = ?1",
+                "UPDATE pir_notes SET pir_checked = 0 WHERE id = ?1",
                 [id],
             )
             .unwrap();
@@ -557,7 +556,7 @@ mod tests {
         let spent: bool = db
             .conn()
             .query_row(
-                "SELECT is_spent FROM pir_provisional_notes WHERE id = ?1",
+                "SELECT is_spent FROM pir_notes WHERE id = ?1",
                 [id],
                 |r| r.get(0),
             )
@@ -575,18 +574,19 @@ mod tests {
     fn reconcile_idempotent() {
         let db = PirTestDb::new();
         insert_test_provisional(db.conn(), 1000, 50_000);
+        insert_canonical_note(db.conn(), 42, 1000, 50_000);
 
         let r1 = reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
         assert!(r1);
 
-        // Second call is a no-op (already discovered_by_scanner=1, SELECT still finds the row)
+        // Second call: canonical_note_id is already set, so the WHERE clause excludes it
         let r2 = reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
-        assert!(r2);
+        assert!(!r2);
 
         let count: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pir_provisional_notes WHERE discovered_by_scanner = 1",
+                "SELECT COUNT(*) FROM pir_notes WHERE discovered_by_scanner = 1",
                 [],
                 |r| r.get(0),
             )
@@ -595,44 +595,16 @@ mod tests {
     }
 
     #[test]
-    fn get_notes_for_pir_check_returns_spent_note_id_and_depth() {
-        let db = PirTestDb::new();
-        insert_pir_provisional_note(
-            db.conn(),
-            1,
-            42, // spent_note_id
-            50_000,
-            1000,
-            &[0u8; 11],
-            &[0u8; 32],
-            &[0u8; 32],
-            &[1u8; 32],
-            &[0u8; 32],
-            3_200_000,
-            3,    // depth
-            None,
-        )
-        .unwrap();
-
-        let notes = get_provisional_notes_for_pir_check(db.conn()).unwrap();
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].spent_note_id, 42);
-        assert_eq!(notes[0].depth, 3);
-    }
-
-    #[test]
     fn balance_excludes_spent_and_scanner_reconciled() {
         let db = PirTestDb::new();
-        // A -> B (spent) -> C (leaf)
         let b = insert_test_provisional_with_depth(db.conn(), 1000, 70_000, 1, None);
         mark_provisional_pir_result(db.conn(), b, true).unwrap();
         let _c = insert_test_provisional_with_depth(db.conn(), 2000, 40_000, 2, Some(b));
 
-        // B is mid-chain spent, C is the leaf. Balance should only count C.
         let balance: i64 = db
             .conn()
             .query_row(
-                "SELECT COALESCE(SUM(value), 0) FROM pir_provisional_notes
+                "SELECT COALESCE(SUM(value), 0) FROM pir_notes
                  WHERE is_spent = 0 AND discovered_by_scanner = 0",
                 [],
                 |r| r.get(0),
@@ -640,27 +612,13 @@ mod tests {
             .unwrap();
         assert_eq!(balance, 40_000);
 
-        // Now scanner reconciles B (creates canonical B)
-        db.conn()
-            .execute(
-                "INSERT INTO orchard_received_notes
-                    (id, tx, action_index, account_id, diversifier, value, rho, rseed,
-                     commitment_tree_position, recipient_key_scope)
-                 VALUES (42, 100, 0, 1, X'0000000000000000000000', 70000,
-                         X'0000000000000000000000000000000000000000000000000000000000000000',
-                         X'0000000000000000000000000000000000000000000000000000000000000000',
-                         1000, 0)",
-                [],
-            )
-            .unwrap();
+        insert_canonical_note(db.conn(), 42, 1000, 70_000);
         reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
 
-        // After reconciliation, B is discovered_by_scanner=1 and canonical B is
-        // in pir_spent_notes. Only provisional C (leaf) contributes.
         let balance_after: i64 = db
             .conn()
             .query_row(
-                "SELECT COALESCE(SUM(value), 0) FROM pir_provisional_notes
+                "SELECT COALESCE(SUM(value), 0) FROM pir_notes
                  WHERE is_spent = 0 AND discovered_by_scanner = 0",
                 [],
                 |r| r.get(0),
@@ -668,15 +626,14 @@ mod tests {
             .unwrap();
         assert_eq!(balance_after, 40_000);
 
-        // Canonical B should be in pir_spent_notes (prevents double-counting)
-        let canonical_b_pir_spent: i64 = db
+        let canonical_b_spent: i64 = db
             .conn()
             .query_row(
-                "SELECT COUNT(*) FROM pir_spent_notes WHERE note_id = 42",
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 42 AND is_spent = 1",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(canonical_b_pir_spent, 1);
+        assert_eq!(canonical_b_spent, 1);
     }
 }

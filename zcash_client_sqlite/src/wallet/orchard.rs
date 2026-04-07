@@ -371,9 +371,9 @@ pub(crate) fn put_received_note<
         .map_err(SqliteClientError::from)?;
 
     // Reconcile: if a provisional PIR note exists at the same tree position,
-    // mark it as scanner-discovered rather than deleting it so its descendants
-    // in the recursive chain remain valid. If the provisional was PIR-spent,
-    // propagate that status to pir_spent_notes for the canonical note.
+    // set canonical_note_id and mark it as scanner-discovered so its descendants
+    // remain valid. The is_spent flag on the same row is picked up by
+    // spent_notes_clause via canonical_note_id.
     #[cfg(feature = "spendability-pir")]
     if let Some(position) = output.note_commitment_tree_position() {
         super::pir_provisional::reconcile_provisional_for_position(
@@ -1717,11 +1717,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies that `truncate_to_height` clears the `pir_witness_data` table to
-    /// avoid stale authentication paths after a reorg.
+    /// Verifies that `truncate_to_height` clears PIR witness data from `pir_notes`
+    /// to avoid stale authentication paths after a reorg.
     #[cfg(feature = "spendability-pir")]
     #[test]
-    fn truncate_to_height_clears_pir_witness_data() {
+    fn truncate_to_height_clears_pir_notes() {
         use zcash_client_backend::data_api::{
             WalletCommitmentTrees,
             testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},

@@ -119,12 +119,16 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
         "#,
         tx_unexpired_condition("stx")
     );
-    // PIR rows are unconditional (no tx_unexpired_condition) because they reflect
-    // confirmed on-chain nullifier state, not pending transactions. Stale PIR rows
-    // are cleared by truncate_to_height on reorg/rescan.
+    // For Orchard, also exclude notes that PIR has identified as spent but
+    // the scanner hasn't confirmed yet. These rows are unconditional (no
+    // tx_unexpired_condition) because they reflect on-chain nullifier state,
+    // not pending transactions. Stale rows are cleared on reorg/rescan.
     #[cfg(feature = "spendability-pir")]
     if table_prefix == "orchard" {
-        return format!("{base} UNION SELECT note_id FROM pir_spent_notes");
+        return format!(
+            "{base} UNION SELECT canonical_note_id FROM pir_notes \
+             WHERE canonical_note_id IS NOT NULL AND is_spent = 1"
+        );
     }
     base
 }
@@ -137,7 +141,9 @@ fn shard_scanned_condition(protocol: ShieldedProtocol) -> &'static str {
     #[cfg(feature = "spendability-pir")]
     if matches!(protocol, ShieldedProtocol::Orchard) {
         return "scan_state.max_priority <= :scanned_priority \
-                OR EXISTS (SELECT 1 FROM pir_witness_data pw WHERE pw.note_id = rn.id)";
+                OR EXISTS (SELECT 1 FROM pir_notes pn \
+                           WHERE pn.canonical_note_id = rn.id \
+                           AND pn.witness_siblings IS NOT NULL)";
     }
     let _ = protocol;
     "scan_state.max_priority <= :scanned_priority"
@@ -405,13 +411,9 @@ where
     #[cfg(not(feature = "spendability-pir"))]
     let pir_witness_available = false;
 
-    let pir_witness_join = if pir_witness_available {
-        "LEFT OUTER JOIN pir_witness_data pw ON pw.note_id = rn.id"
-    } else {
-        ""
-    };
+    let pir_witness_join = "";
     let pir_witness_col = if pir_witness_available {
-        ", CASE WHEN pw.note_id IS NOT NULL THEN 1 ELSE 0 END AS has_pir_witness"
+        ", EXISTS(SELECT 1 FROM pir_notes pw WHERE pw.canonical_note_id = rn.id AND pw.witness_siblings IS NOT NULL) AS has_pir_witness"
     } else {
         ""
     };

@@ -589,7 +589,6 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     pub fn insert_pir_provisional_note(
         &self,
         account_id: i64,
-        spent_note_id: i64,
         value: u64,
         position: u64,
         diversifier: &[u8; 11],
@@ -604,7 +603,6 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         wallet::pir_provisional::insert_pir_provisional_note(
             self.conn.borrow(),
             account_id,
-            spent_note_id,
             value,
             position,
             diversifier,
@@ -618,12 +616,22 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         )
     }
 
-    /// Marks a provisional note as witnessed after a PIR witness is obtained.
+    /// Sets witness data on a provisional note after a PIR witness is obtained,
+    /// making it eligible for balance and coin selection.
     pub fn mark_provisional_note_witnessed(
         &self,
         note_id: i64,
+        siblings: &[[u8; 32]; 32],
+        anchor_height: u64,
+        anchor_root: &[u8; 32],
     ) -> Result<bool, SqliteClientError> {
-        wallet::pir_provisional::mark_provisional_note_witnessed(self.conn.borrow(), note_id)
+        wallet::pir_provisional::mark_provisional_note_witnessed(
+            self.conn.borrow(),
+            note_id,
+            siblings,
+            anchor_height,
+            anchor_root,
+        )
     }
 
     /// Returns provisional notes whose nullifiers haven't been PIR-checked.

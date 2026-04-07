@@ -1346,17 +1346,56 @@ UNION
     JOIN addresses a ON a.id = tro.address_id
     JOIN transactions t ON t.id_tx = tro.transaction_id";
 
-pub(super) const TABLE_PIR_SPENT_NOTES: &str = "CREATE TABLE pir_spent_notes (
-    note_id INTEGER NOT NULL PRIMARY KEY
-        REFERENCES orchard_received_notes ( id ) ON DELETE CASCADE
-)";
-
-pub(super) const TABLE_PIR_WITNESS_DATA: &str = "CREATE TABLE pir_witness_data (
-    note_id INTEGER NOT NULL PRIMARY KEY
+/// Unified PIR note lifecycle table. Tracks both canonical notes (linked to
+/// [`TABLE_ORCHARD_RECEIVED_NOTES`] via `canonical_note_id`) and provisional notes
+/// (discovered via trial decryption ahead of the scanner, `canonical_note_id` is NULL).
+///
+/// ### Columns
+/// - `canonical_note_id`: foreign key to `orchard_received_notes(id)`; set when the scanner
+///   has caught up and created the canonical row. NULL for provisional-only notes.
+/// - `account_id`: the account that owns this note.
+/// - `position`: the note's leaf index in the Orchard commitment tree (unique across all notes).
+/// - `value`: the note value in zatoshis.
+/// - `diversifier`: the 11-byte diversifier used to construct the note (provisional only).
+/// - `rseed`: the note randomness seed (provisional only).
+/// - `rho`: the nullifier derivation input (provisional only).
+/// - `cmx`: the extracted note commitment (provisional only).
+/// - `nullifier`: the note's nullifier, used for PIR spend-checking.
+/// - `is_spent`: set to 1 when PIR detects the note's nullifier on-chain. Monotonic.
+/// - `spend_height`: the block height at which the spend was detected.
+/// - `witness_siblings`: 1024-byte Merkle authentication path (32 siblings × 32 bytes),
+///   obtained via witness PIR. NULL until a witness is fetched.
+/// - `witness_anchor_height`: the block height of the anchor the witness was computed against.
+/// - `witness_anchor_root`: the 32-byte tree root hash at `witness_anchor_height`.
+/// - `depth`: hop count in the recursive change-discovery chain (0 = canonical origin,
+///   1 = direct change note, 2+ = deeper recursion).
+/// - `parent_id`: self-referential FK linking a change note to the note it was derived from.
+/// - `pir_checked`: set to 1 after this note's nullifier has been checked via PIR.
+/// - `discovered_by_scanner`: set to 1 when the canonical scanner reaches this note's
+///   position and reconciles it (along with setting `canonical_note_id`).
+pub(super) const TABLE_PIR_NOTES: &str = "CREATE TABLE pir_notes (
+    id INTEGER PRIMARY KEY,
+    canonical_note_id INTEGER UNIQUE
         REFERENCES orchard_received_notes ( id ) ON DELETE CASCADE,
-    siblings BLOB NOT NULL CHECK ( length ( siblings ) = 1024 ),
-    anchor_height INTEGER NOT NULL,
-    anchor_root BLOB NOT NULL CHECK ( length ( anchor_root ) = 32 )
+    account_id INTEGER NOT NULL REFERENCES accounts ( id ),
+    position INTEGER NOT NULL UNIQUE,
+    value INTEGER NOT NULL,
+    diversifier BLOB,
+    rseed BLOB,
+    rho BLOB,
+    cmx BLOB,
+    nullifier BLOB UNIQUE,
+    is_spent INTEGER NOT NULL DEFAULT 0,
+    spend_height INTEGER,
+    witness_siblings BLOB
+        CHECK ( witness_siblings IS NULL OR length ( witness_siblings ) = 1024 ),
+    witness_anchor_height INTEGER,
+    witness_anchor_root BLOB
+        CHECK ( witness_anchor_root IS NULL OR length ( witness_anchor_root ) = 32 ),
+    depth INTEGER NOT NULL DEFAULT 0,
+    parent_id INTEGER REFERENCES pir_notes ( id ),
+    pir_checked INTEGER NOT NULL DEFAULT 0,
+    discovered_by_scanner INTEGER NOT NULL DEFAULT 0
 )";
 
 pub(super) const VIEW_ADDRESS_FIRST_USE: &str = "

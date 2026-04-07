@@ -2179,13 +2179,9 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         #[cfg(not(feature = "spendability-pir"))]
         let pir_witness_available = false;
 
-        let pir_witness_join = if pir_witness_available {
-            "LEFT OUTER JOIN pir_witness_data pw ON pw.note_id = rn.id"
-        } else {
-            ""
-        };
+        let pir_witness_join = "";
         let pir_witness_col = if pir_witness_available {
-            ", CASE WHEN pw.note_id IS NOT NULL THEN 1 ELSE 0 END AS has_pir_witness"
+            ", EXISTS(SELECT 1 FROM pir_notes pw WHERE pw.canonical_note_id = rn.id AND pw.witness_siblings IS NOT NULL) AS has_pir_witness"
         } else {
             ""
         };
@@ -2348,10 +2344,13 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         #[cfg(feature = "spendability-pir")]
         {
             let mut stmt = tx.prepare_cached(
-                "SELECT accounts.uuid, ppn.value, ppn.has_pir_witness
-                 FROM pir_provisional_notes ppn
-                 INNER JOIN accounts ON accounts.id = ppn.account_id
-                 WHERE ppn.is_spent = 0 AND ppn.discovered_by_scanner = 0",
+                "SELECT accounts.uuid, pn.value,
+                        CASE WHEN pn.witness_siblings IS NOT NULL THEN 1 ELSE 0 END AS has_pir_witness
+                 FROM pir_notes pn
+                 INNER JOIN accounts ON accounts.id = pn.account_id
+                 WHERE pn.canonical_note_id IS NULL
+                   AND pn.is_spent = 0
+                   AND pn.discovered_by_scanner = 0",
             )?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
@@ -3400,22 +3399,10 @@ pub(crate) fn truncate_to_height<P: consensus::Parameters>(
         named_params![":height": u32::from(truncation_height)],
     )?;
 
-    // Clear all PIR spent-note entries unconditionally. After a reorg the on-chain
-    // nullifier set may have changed, so stale PIR exclusions must not persist.
-    // The table is created unconditionally (migration is not feature-gated), so this
-    // DELETE is valid in all builds — for non-PIR builds it is a harmless no-op on
-    // an always-empty table.
-    conn.execute("DELETE FROM pir_spent_notes", [])?;
-
-    // Clear PIR witness data — the authentication paths are bound to a specific
-    // anchor height that may no longer be valid after a reorg. Same unconditional
-    // pattern as pir_spent_notes.
-    conn.execute("DELETE FROM pir_witness_data", [])?;
-
-    // Clear PIR provisional notes — these are ahead-of-scan hints derived from
-    // block data that may no longer be valid. The scanner will re-discover
+    // Clear all PIR state unconditionally. After a reorg the on-chain nullifier set
+    // and authentication paths may have changed. The scanner will re-discover
     // legitimate notes during rescan, and PIR will re-detect spends.
-    conn.execute("DELETE FROM pir_provisional_notes", [])?;
+    conn.execute("DELETE FROM pir_notes", [])?;
 
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
     // affected block records from the database.

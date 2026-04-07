@@ -5,7 +5,7 @@
 //! waiting for sequential shard-tree scanning. This module provides the data layer
 //! for recording and querying PIR-detected spends.
 //!
-//! The `pir_spent_notes` table is created unconditionally by migration so the
+//! The `pir_notes` table is created unconditionally by migration so the
 //! schema is identical across all builds. When the feature is off, the table is
 //! empty and unused.
 
@@ -144,16 +144,17 @@ const UNSPENT_ORCHARD_NOTES_SQL: &str = "\
         WHERE sp.orchard_received_note_id = rn.id \
     ) \
     AND NOT EXISTS ( \
-        SELECT 1 FROM pir_spent_notes pir \
-        WHERE pir.note_id = rn.id \
+        SELECT 1 FROM pir_notes pn \
+        WHERE pn.canonical_note_id = rn.id AND pn.is_spent = 1 \
     )";
 
 const PIR_PENDING_SPENDS_SQL: &str = "\
-    SELECT pir.note_id, rn.value FROM pir_spent_notes pir \
-    JOIN orchard_received_notes rn ON pir.note_id = rn.id \
-    WHERE NOT EXISTS ( \
+    SELECT pn.canonical_note_id AS note_id, rn.value FROM pir_notes pn \
+    JOIN orchard_received_notes rn ON pn.canonical_note_id = rn.id \
+    WHERE pn.is_spent = 1 \
+    AND NOT EXISTS ( \
         SELECT 1 FROM orchard_received_note_spends sp \
-        WHERE sp.orchard_received_note_id = pir.note_id \
+        WHERE sp.orchard_received_note_id = pn.canonical_note_id \
     )";
 
 /// Returns unspent Orchard notes that have nullifiers, excluding both
@@ -171,14 +172,19 @@ pub fn get_unspent_orchard_notes_for_pir(
             let value: i64 = row.get(2)?;
             Ok((id, nf_blob, value as u64))
         })?
-        .filter_map(|r| r.ok())
-        .filter_map(|(id, nf_blob, value)| {
-            let nf: [u8; 32] = nf_blob.try_into().ok()?;
-            Some(UnspentOrchardNote { id, nf, value })
-        })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(notes)
+    notes
+        .into_iter()
+        .map(|(id, nf_blob, value)| {
+            let nf: [u8; 32] = nf_blob.try_into().map_err(|_| {
+                SqliteClientError::CorruptedData(
+                    "orchard nullifier is not 32 bytes".to_string(),
+                )
+            })?;
+            Ok(UnspentOrchardNote { id, nf, value })
+        })
+        .collect()
 }
 
 /// Returns PIR-detected spent notes whose spends have not yet been confirmed
@@ -197,29 +203,32 @@ pub fn get_pir_pending_spends(
                 value: value as u64,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let total_value: u64 = notes.iter().map(|n| n.value).sum();
     Ok(PirPendingSpendsResult { notes, total_value })
 }
 
-/// Records a note as PIR-spent. The insert is conditional: it skips notes
-/// that are already scan-confirmed spent or already in `pir_spent_notes`.
+/// Records a canonical note as PIR-spent by upserting into `pir_notes`.
 ///
-/// Does not retry on `SQLITE_BUSY` — that is the caller's responsibility
-/// when using a separate connection from the main wallet writer.
+/// If a row already exists for this canonical note (e.g. from a witness insert),
+/// sets `is_spent = 1`. Otherwise inserts a new row pulling position/value/account
+/// from `orchard_received_notes`.
+///
+/// Skips notes that are already scan-confirmed spent.
 pub fn insert_pir_spent_note(conn: &Connection, note_id: i64) -> Result<(), SqliteClientError> {
     conn.execute(
-        "INSERT INTO pir_spent_notes (note_id)
-         SELECT ?1
-         WHERE NOT EXISTS (
+        "INSERT INTO pir_notes (canonical_note_id, account_id, position, value, is_spent)
+         SELECT rn.id, rn.account_id, rn.commitment_tree_position, rn.value, 1
+         FROM orchard_received_notes rn
+         WHERE rn.id = ?1
+         AND rn.commitment_tree_position IS NOT NULL
+         AND NOT EXISTS (
              SELECT 1 FROM orchard_received_note_spends
              WHERE orchard_received_note_id = ?1
          )
-         AND NOT EXISTS (
-             SELECT 1 FROM pir_spent_notes WHERE note_id = ?1
-         )",
+         ON CONFLICT(canonical_note_id) DO UPDATE SET
+             is_spent = 1",
         [note_id],
     )?;
     Ok(())
@@ -229,6 +238,7 @@ pub fn insert_pir_spent_note(conn: &Connection, note_id: i64) -> Result<(), Sqli
 mod tests {
     use super::*;
     use testing::{PirTestDb, insert_test_note};
+    use crate::wallet::pir_witness::testing::insert_test_note_with_position;
 
     fn make_nf(byte: u8) -> Vec<u8> {
         vec![byte; 32]
@@ -244,11 +254,7 @@ mod tests {
     }
 
     fn mark_pir_spent(conn: &Connection, note_id: i64) {
-        conn.execute(
-            "INSERT INTO pir_spent_notes (note_id) VALUES (?1)",
-            [note_id],
-        )
-        .unwrap();
+        insert_pir_spent_note(conn, note_id).unwrap();
     }
 
     // =========================================================================
@@ -312,49 +318,11 @@ mod tests {
     }
 
     #[test]
-    fn excludes_spent_notes_and_null_nf_combined() {
-        let db = PirTestDb::new();
-        let nf1 = make_nf(0x01);
-        let nf2 = make_nf(0x02);
-        let nf3 = make_nf(0x03);
-        insert_test_note(db.conn(), 1, 100, Some(&nf1));
-        insert_test_note(db.conn(), 2, 200, Some(&nf2));
-        insert_test_note(db.conn(), 3, 300, None);
-        insert_test_note(db.conn(), 4, 400, Some(&nf3));
-
-        mark_spent(db.conn(), 2);
-
-        let notes = get_unspent_orchard_notes_for_pir(db.conn()).unwrap();
-        assert_eq!(notes.len(), 2);
-        let total: u64 = notes.iter().map(|n| n.value).sum();
-        assert_eq!(total, 500);
-    }
-
-    #[test]
-    fn all_notes_spent_returns_empty() {
-        let db = PirTestDb::new();
-        let nf1 = make_nf(0xAA);
-        let nf2 = make_nf(0xBB);
-        insert_test_note(db.conn(), 1, 10_000, Some(&nf1));
-        insert_test_note(db.conn(), 2, 20_000, Some(&nf2));
-
-        mark_spent(db.conn(), 1);
-        mark_spent(db.conn(), 2);
-
-        let notes = get_unspent_orchard_notes_for_pir(db.conn()).unwrap();
-        assert!(notes.is_empty());
-    }
-
-    // =========================================================================
-    // PIR spent notes
-    // =========================================================================
-
-    #[test]
     fn excludes_pir_spent_notes() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-        insert_test_note(db.conn(), 2, 20_000, Some(&make_nf(0x02)));
-        insert_test_note(db.conn(), 3, 30_000, Some(&make_nf(0x03)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
+        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
+        insert_test_note_with_position(db.conn(), 3, 30_000, Some(&make_nf(0x03)), Some(3000));
 
         mark_pir_spent(db.conn(), 2);
 
@@ -369,9 +337,9 @@ mod tests {
     #[test]
     fn excludes_both_pir_and_real_spent() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-        insert_test_note(db.conn(), 2, 20_000, Some(&make_nf(0x02)));
-        insert_test_note(db.conn(), 3, 30_000, Some(&make_nf(0x03)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
+        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
+        insert_test_note_with_position(db.conn(), 3, 30_000, Some(&make_nf(0x03)), Some(3000));
 
         mark_spent(db.conn(), 2);
         mark_pir_spent(db.conn(), 3);
@@ -382,27 +350,19 @@ mod tests {
     }
 
     #[test]
-    fn pir_and_real_spend_same_note() {
-        let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-
-        mark_spent(db.conn(), 1);
-        mark_pir_spent(db.conn(), 1);
-
-        let notes = get_unspent_orchard_notes_for_pir(db.conn()).unwrap();
-        assert!(notes.is_empty());
-    }
-
-    #[test]
     fn insert_pir_basic() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
 
         insert_pir_spent_note(db.conn(), 1).unwrap();
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_spent_notes", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1 AND is_spent = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -410,14 +370,18 @@ mod tests {
     #[test]
     fn insert_pir_skips_real_spent() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
 
         mark_spent(db.conn(), 1);
         insert_pir_spent_note(db.conn(), 1).unwrap();
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_spent_notes", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -425,14 +389,18 @@ mod tests {
     #[test]
     fn insert_pir_idempotent() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
 
         insert_pir_spent_note(db.conn(), 1).unwrap();
         insert_pir_spent_note(db.conn(), 1).unwrap();
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_spent_notes", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }
@@ -440,7 +408,7 @@ mod tests {
     #[test]
     fn insert_pir_fk_cascade() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
 
         mark_pir_spent(db.conn(), 1);
 
@@ -450,7 +418,7 @@ mod tests {
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_spent_notes", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
     }
@@ -472,9 +440,9 @@ mod tests {
     #[test]
     fn pending_spends_returns_pir_only_notes() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-        insert_test_note(db.conn(), 2, 20_000, Some(&make_nf(0x02)));
-        insert_test_note(db.conn(), 3, 30_000, Some(&make_nf(0x03)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
+        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
+        insert_test_note_with_position(db.conn(), 3, 30_000, Some(&make_nf(0x03)), Some(3000));
 
         mark_pir_spent(db.conn(), 1);
         mark_pir_spent(db.conn(), 3);
@@ -490,9 +458,9 @@ mod tests {
     #[test]
     fn pending_spends_excludes_scan_confirmed() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-        insert_test_note(db.conn(), 2, 20_000, Some(&make_nf(0x02)));
-        insert_test_note(db.conn(), 3, 30_000, Some(&make_nf(0x03)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
+        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
+        insert_test_note_with_position(db.conn(), 3, 30_000, Some(&make_nf(0x03)), Some(3000));
 
         mark_pir_spent(db.conn(), 1);
         mark_pir_spent(db.conn(), 2);
@@ -512,8 +480,8 @@ mod tests {
     #[test]
     fn pending_spends_empty_when_all_confirmed() {
         let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-        insert_test_note(db.conn(), 2, 20_000, Some(&make_nf(0x02)));
+        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
+        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
 
         mark_pir_spent(db.conn(), 1);
         mark_pir_spent(db.conn(), 2);

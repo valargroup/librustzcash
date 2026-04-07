@@ -26,10 +26,7 @@ mod initial_setup;
 mod nullifier_map;
 mod orchard_received_notes;
 mod orchard_shardtree;
-mod pir_provisional_notes;
-mod pir_provisional_notes_recursive;
-mod pir_spent_notes;
-mod pir_witness_data;
+mod pir_notes;
 mod received_notes_nullable_nf;
 mod receiving_key_scopes;
 mod sapling_memo_consistency;
@@ -135,13 +132,7 @@ pub(super) fn all_migrations<
     //                      \                       \               /                             /        /
     //                       `------------------- account_delete_cascade ---------------------------------'
     //                                                      |
-    //                                               pir_spent_notes
-    //                                                      |
-    //                                               pir_witness_data
-    //                                                      |
-    //                                            pir_provisional_notes
-    //                                                      |
-    //                                         pir_provisional_notes_recursive
+    //                                                  pir_notes
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -227,10 +218,7 @@ pub(super) fn all_migrations<
         Box::new(v_received_output_spends_account::Migration),
         Box::new(add_transaction_trust_marker::Migration),
         Box::new(account_delete_cascade::Migration),
-        Box::new(pir_spent_notes::Migration),
-        Box::new(pir_witness_data::Migration),
-        Box::new(pir_provisional_notes::Migration),
-        Box::new(pir_provisional_notes_recursive::Migration),
+        Box::new(pir_notes::Migration),
     ]
 }
 
@@ -371,10 +359,10 @@ pub const V_0_18_5: &[Uuid] = &[
 pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 
 /// Leaf migrations in the 0.19.6 release.
-pub const V_0_19_6: &[Uuid] = &[pir_witness_data::MIGRATION_ID];
+pub const V_0_19_6: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[pir_provisional_notes_recursive::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[pir_notes::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,

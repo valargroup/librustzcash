@@ -5,9 +5,9 @@
 //! to be spent before the wallet finishes scanning. This module provides the data layer
 //! for storing and querying PIR-obtained witnesses.
 //!
-//! The `pir_witness_data` table is created unconditionally by migration so the
-//! schema is identical across all builds. When the feature is off, the table is
-//! empty and unused.
+//! Witness data is stored in the `pir_notes` table alongside spent-state and provisional
+//! note data. For canonical notes the witness columns are filled via upsert; for
+//! provisional notes they are set directly.
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -42,75 +42,6 @@ impl PirWitnessValidation {
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing {
     use rusqlite::Connection;
-
-    #[cfg(test)]
-    fn migrate_and_setup(path: impl AsRef<std::path::Path>) -> Connection {
-        use secrecy::SecretVec;
-        use zcash_protocol::consensus::Network;
-
-        use crate::{WalletDb, wallet::init::WalletMigrator};
-        let mut db = WalletDb::for_path(
-            path.as_ref(),
-            Network::TestNetwork,
-            crate::util::SystemClock,
-            rand_core::OsRng,
-        )
-        .unwrap();
-        WalletMigrator::new()
-            .with_seed(SecretVec::new(vec![0xab; 32]))
-            .init_or_migrate(&mut db)
-            .unwrap();
-        drop(db);
-
-        let conn = Connection::open(path.as_ref()).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute_batch(
-            "INSERT INTO accounts (
-                 uuid, account_kind, uivk, birthday_height, has_spend_key
-             ) VALUES (
-                 X'00000000000000000000000000000001', 1,
-                 'test-uivk-for-pir-witness', 1, 1
-             );
-             INSERT INTO transactions (id_tx, txid, min_observed_height)
-             VALUES (
-                 100,
-                 X'0000000000000000000000000000000000000000000000000000000000000001',
-                 1
-             );",
-        )
-        .unwrap();
-
-        conn
-    }
-
-    #[cfg(test)]
-    pub struct PirWitnessTestDb {
-        conn: Connection,
-        _data_file: tempfile::NamedTempFile,
-    }
-
-    #[cfg(test)]
-    impl Default for PirWitnessTestDb {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    #[cfg(test)]
-    impl PirWitnessTestDb {
-        pub fn new() -> Self {
-            let data_file = tempfile::NamedTempFile::new().unwrap();
-            let conn = migrate_and_setup(data_file.path());
-            Self {
-                conn,
-                _data_file: data_file,
-            }
-        }
-
-        pub fn conn(&self) -> &Connection {
-            &self.conn
-        }
-    }
 
     pub fn insert_test_note(conn: &Connection, id: i64, value: i64, nf: Option<&[u8]>) {
         insert_test_note_with_position(conn, id, value, nf, None);
@@ -174,23 +105,24 @@ const NOTES_NEEDING_WITNESS_SQL: &str = "\
         WHERE sp.orchard_received_note_id = rn.id \
     ) \
     AND NOT EXISTS ( \
-        SELECT 1 FROM pir_spent_notes pir \
-        WHERE pir.note_id = rn.id \
+        SELECT 1 FROM pir_notes pn \
+        WHERE pn.canonical_note_id = rn.id AND pn.is_spent = 1 \
     ) \
     AND NOT EXISTS ( \
-        SELECT 1 FROM pir_witness_data pw \
-        WHERE pw.note_id = rn.id \
+        SELECT 1 FROM pir_notes pn \
+        WHERE pn.canonical_note_id = rn.id AND pn.witness_siblings IS NOT NULL \
     ) \
     AND (scan_state.max_priority IS NULL \
          OR scan_state.max_priority > ?1)";
 
 const WITNESSED_NOTES_SQL: &str = "\
-    SELECT pw.note_id, rn.value, pw.anchor_height \
-    FROM pir_witness_data pw \
-    JOIN orchard_received_notes rn ON pw.note_id = rn.id \
-    WHERE NOT EXISTS ( \
+    SELECT pn.canonical_note_id AS note_id, rn.value, pn.witness_anchor_height AS anchor_height \
+    FROM pir_notes pn \
+    JOIN orchard_received_notes rn ON pn.canonical_note_id = rn.id \
+    WHERE pn.witness_siblings IS NOT NULL \
+    AND NOT EXISTS ( \
         SELECT 1 FROM orchard_received_note_spends sp \
-        WHERE sp.orchard_received_note_id = pw.note_id \
+        WHERE sp.orchard_received_note_id = pn.canonical_note_id \
     )";
 
 /// Returns Orchard notes that need a PIR witness: they have a tree position,
@@ -216,8 +148,14 @@ pub fn get_notes_needing_pir_witness(
     Ok(notes)
 }
 
-/// Stores a PIR-obtained witness for a note. Existing rows are refreshed only
-/// when the incoming snapshot is at least as new as the stored anchor height.
+/// Stores a PIR-obtained witness for a canonical note by upserting into `pir_notes`.
+///
+/// If a row already exists for this canonical note (e.g. from a spent-note insert),
+/// the witness columns are updated. Otherwise a new row is inserted pulling
+/// position/value/account from `orchard_received_notes`.
+///
+/// Existing witnesses are refreshed only when the incoming snapshot is at least
+/// as new as the stored anchor height.
 pub fn insert_pir_witness(
     conn: &Connection,
     note_id: i64,
@@ -227,13 +165,18 @@ pub fn insert_pir_witness(
 ) -> Result<(), SqliteClientError> {
     let siblings_blob: Vec<u8> = siblings.iter().flat_map(|s| s.iter()).copied().collect();
     conn.execute(
-        "INSERT INTO pir_witness_data (note_id, siblings, anchor_height, anchor_root)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(note_id) DO UPDATE SET
-             siblings = excluded.siblings,
-             anchor_height = excluded.anchor_height,
-             anchor_root = excluded.anchor_root
-         WHERE excluded.anchor_height >= pir_witness_data.anchor_height",
+        "INSERT INTO pir_notes (canonical_note_id, account_id, position, value,
+                                witness_siblings, witness_anchor_height, witness_anchor_root)
+         SELECT rn.id, rn.account_id, rn.commitment_tree_position, rn.value,
+                ?2, ?3, ?4
+         FROM orchard_received_notes rn
+         WHERE rn.id = ?1
+         AND rn.commitment_tree_position IS NOT NULL
+         ON CONFLICT(canonical_note_id) DO UPDATE SET
+             witness_siblings = excluded.witness_siblings,
+             witness_anchor_height = excluded.witness_anchor_height,
+             witness_anchor_root = excluded.witness_anchor_root
+         WHERE excluded.witness_anchor_height >= IFNULL(pir_notes.witness_anchor_height, 0)",
         params![
             note_id,
             siblings_blob,
@@ -244,29 +187,29 @@ pub fn insert_pir_witness(
     Ok(())
 }
 
-/// Retrieves a stored PIR witness for a specific note.
+/// Retrieves a stored PIR witness for a specific canonical note.
 pub fn get_pir_witness(
     conn: &Connection,
     note_id: i64,
 ) -> Result<Option<PirWitnessRow>, SqliteClientError> {
-    let mut stmt = conn.prepare(
-        "SELECT note_id, siblings, anchor_height, anchor_root \
-         FROM pir_witness_data WHERE note_id = ?1",
-    )?;
-
-    let result = stmt
-        .query_row([note_id], |row| {
-            let note_id: i64 = row.get(0)?;
-            let siblings_blob: Vec<u8> = row.get(1)?;
-            let anchor_height: i64 = row.get(2)?;
-            let anchor_root_blob: Vec<u8> = row.get(3)?;
-            Ok((
-                note_id,
-                siblings_blob,
-                anchor_height as u64,
-                anchor_root_blob,
-            ))
-        })
+    let result = conn
+        .query_row(
+            "SELECT canonical_note_id, witness_siblings, witness_anchor_height, witness_anchor_root \
+             FROM pir_notes WHERE canonical_note_id = ?1 AND witness_siblings IS NOT NULL",
+            [note_id],
+            |row| {
+                let note_id: i64 = row.get(0)?;
+                let siblings_blob: Vec<u8> = row.get(1)?;
+                let anchor_height: i64 = row.get(2)?;
+                let anchor_root_blob: Vec<u8> = row.get(3)?;
+                Ok((
+                    note_id,
+                    siblings_blob,
+                    anchor_height as u64,
+                    anchor_root_blob,
+                ))
+            },
+        )
         .optional()?;
 
     match result {
@@ -275,7 +218,7 @@ pub fn get_pir_witness(
             let siblings = parse_siblings(&siblings_blob)?;
             let anchor_root: [u8; 32] = anchor_root_blob.try_into().map_err(|_| {
                 SqliteClientError::CorruptedData(
-                    "pir_witness_data anchor_root is not 32 bytes".to_string(),
+                    "pir_notes witness_anchor_root is not 32 bytes".to_string(),
                 )
             })?;
             Ok(Some(PirWitnessRow {
@@ -310,10 +253,10 @@ pub fn get_pir_witnessed_notes(
     Ok(notes)
 }
 
-/// Checks whether a PIR witness exists for the given note.
+/// Checks whether a PIR witness exists for the given canonical note.
 pub fn has_pir_witness(conn: &Connection, note_id: i64) -> Result<bool, SqliteClientError> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pir_witness_data WHERE note_id = ?1",
+        "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = ?1 AND witness_siblings IS NOT NULL",
         [note_id],
         |row| row.get(0),
     )?;
@@ -329,9 +272,9 @@ pub fn has_pir_witness(conn: &Connection, note_id: i64) -> Result<bool, SqliteCl
 /// would return: 32 authentication path siblings ordered leaf-to-root, with the position
 /// encoding the left/right direction at each level.
 ///
-/// The caller is responsible for using `pir_witness.anchor_height` and
-/// `pir_witness.anchor_root` to set the transaction's Orchard anchor — the PIR anchor
-/// may differ from the proposal's computed anchor.
+/// The caller is responsible for using the returned anchor height and root to set the
+/// transaction's Orchard anchor — the PIR anchor may differ from the proposal's computed
+/// anchor.
 #[cfg(feature = "orchard")]
 pub fn get_pir_merkle_path(
     conn: &Connection,
@@ -348,7 +291,7 @@ pub fn get_pir_merkle_path(
                 .map(|bytes| {
                     Option::from(MerkleHashOrchard::from_bytes(bytes)).ok_or_else(|| {
                         SqliteClientError::CorruptedData(
-                            "invalid MerkleHashOrchard in pir_witness_data".to_string(),
+                            "invalid MerkleHashOrchard in pir_notes".to_string(),
                         )
                     })
                 })
@@ -374,8 +317,9 @@ pub fn get_pir_merkle_path_by_position(conn: &Connection, position: Position) ->
     let note_id: Option<i64> = conn
         .query_row(
             "SELECT rn.id FROM orchard_received_notes rn \
-             INNER JOIN pir_witness_data pw ON pw.note_id = rn.id \
-             WHERE rn.commitment_tree_position = ?1",
+             INNER JOIN pir_notes pn ON pn.canonical_note_id = rn.id \
+             WHERE rn.commitment_tree_position = ?1 \
+             AND pn.witness_siblings IS NOT NULL",
             [u64::from(position) as i64],
             |row| row.get(0),
         )
@@ -387,6 +331,16 @@ pub fn get_pir_merkle_path_by_position(conn: &Connection, position: Position) ->
     }
 }
 
+/// Validates a PIR-obtained Merkle witness against the note's commitment.
+///
+/// Reconstructs the Orchard `MerklePath` from the supplied siblings and computes
+/// the root from the note's extracted commitment (`cmx`). Returns a
+/// [`PirWitnessValidation`] containing both the provided and computed roots so
+/// the caller can check whether they match.
+///
+/// This is used for server-trust verification: the PIR server supplies (siblings,
+/// anchor_root), and we independently compute the root from the note + siblings to
+/// confirm the path is authentic.
 #[cfg(feature = "orchard")]
 pub fn validate_orchard_witness<P: consensus::Parameters>(
     conn: &Connection,
@@ -445,6 +399,10 @@ pub fn validate_orchard_witness<P: consensus::Parameters>(
     })
 }
 
+/// Loads an Orchard `ReceivedNote` from the database for witness validation.
+///
+/// The note must have a UFVK, recipient key scope, and commitment tree position.
+/// Returns a `CorruptedData` error if the note cannot be found or reconstructed.
 #[cfg(feature = "orchard")]
 fn get_orchard_received_note<P: consensus::Parameters>(
     conn: &Connection,
@@ -490,10 +448,11 @@ fn get_orchard_received_note<P: consensus::Parameters>(
     }
 }
 
+/// Parses a 1024-byte blob into 32 Merkle siblings (32 bytes each).
 fn parse_siblings(blob: &[u8]) -> Result<[[u8; 32]; 32], SqliteClientError> {
     if blob.len() != 1024 {
         return Err(SqliteClientError::CorruptedData(format!(
-            "pir_witness_data siblings blob is {} bytes, expected 1024",
+            "pir_notes witness_siblings blob is {} bytes, expected 1024",
             blob.len()
         )));
     }
@@ -507,7 +466,8 @@ fn parse_siblings(blob: &[u8]) -> Result<[[u8; 32]; 32], SqliteClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testing::{PirWitnessTestDb, insert_test_note, insert_test_note_with_position};
+    use crate::wallet::pir::testing::PirTestDb;
+    use testing::{insert_test_note, insert_test_note_with_position};
 
     #[cfg(feature = "orchard")]
     macro_rules! real_orchard_witness_fixture {
@@ -599,11 +559,7 @@ mod tests {
     }
 
     fn mark_pir_spent(conn: &Connection, note_id: i64) {
-        conn.execute(
-            "INSERT INTO pir_spent_notes (note_id) VALUES (?1)",
-            [note_id],
-        )
-        .unwrap();
+        super::super::pir::insert_pir_spent_note(conn, note_id).unwrap();
     }
 
     // =========================================================================
@@ -612,14 +568,14 @@ mod tests {
 
     #[test]
     fn empty_table_returns_no_notes() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         let notes = get_notes_needing_pir_witness(db.conn()).unwrap();
         assert!(notes.is_empty());
     }
 
     #[test]
     fn returns_notes_with_position_and_unscanned_shard() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
 
@@ -632,7 +588,7 @@ mod tests {
 
     #[test]
     fn excludes_notes_without_position() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note(db.conn(), 2, 75_000, Some(&make_nf(0xBB)));
 
@@ -643,7 +599,7 @@ mod tests {
 
     #[test]
     fn excludes_notes_without_nullifier() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, None, Some(2000));
 
@@ -654,7 +610,7 @@ mod tests {
 
     #[test]
     fn excludes_spent_notes() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
         mark_spent(db.conn(), 2);
@@ -666,7 +622,7 @@ mod tests {
 
     #[test]
     fn excludes_pir_spent_notes() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
         mark_pir_spent(db.conn(), 2);
@@ -678,7 +634,7 @@ mod tests {
 
     #[test]
     fn excludes_notes_already_witnessed() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
         insert_pir_witness(db.conn(), 2, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
@@ -694,21 +650,25 @@ mod tests {
 
     #[test]
     fn insert_basic() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_witness_data", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1 AND witness_siblings IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }
 
     #[test]
     fn insert_replaces_existing_witness() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
@@ -716,7 +676,11 @@ mod tests {
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_witness_data", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
 
@@ -727,7 +691,7 @@ mod tests {
 
     #[test]
     fn insert_does_not_replace_newer_witness_with_older_snapshot() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
         let newer_siblings = make_siblings(0x20);
@@ -748,14 +712,14 @@ mod tests {
 
     #[test]
     fn get_witness_returns_none_when_absent() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         let result = get_pir_witness(db.conn(), 999).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn get_witness_returns_stored_data() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
         let siblings = make_siblings(0x10);
@@ -775,7 +739,7 @@ mod tests {
 
     #[test]
     fn witnessed_notes_empty_when_no_witnesses() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
         let notes = get_pir_witnessed_notes(db.conn()).unwrap();
@@ -784,7 +748,7 @@ mod tests {
 
     #[test]
     fn witnessed_notes_returns_unspent_with_witness() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
@@ -797,7 +761,7 @@ mod tests {
 
     #[test]
     fn witnessed_notes_excludes_spent() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
@@ -815,13 +779,13 @@ mod tests {
 
     #[test]
     fn has_witness_false_when_absent() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         assert!(!has_pir_witness(db.conn(), 999).unwrap());
     }
 
     #[test]
     fn has_witness_true_when_present() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
         assert!(has_pir_witness(db.conn(), 1).unwrap());
@@ -836,7 +800,7 @@ mod tests {
     fn merkle_path_by_position_returns_none_without_witness() {
         use incrementalmerkletree::Position;
 
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         let result = get_pir_merkle_path_by_position(db.conn(), Position::from(1000u64)).unwrap();
         assert!(result.is_none());
@@ -847,7 +811,7 @@ mod tests {
     fn merkle_path_by_position_returns_path_with_witness() {
         use incrementalmerkletree::Position;
 
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
         let siblings = make_siblings(0x10);
@@ -868,7 +832,7 @@ mod tests {
     fn merkle_path_by_position_no_match_for_wrong_position() {
         use incrementalmerkletree::Position;
 
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 200, &make_root(0xFF)).unwrap();
 
@@ -929,7 +893,7 @@ mod tests {
 
     #[test]
     fn fk_cascade_on_note_delete() {
-        let db = PirWitnessTestDb::new();
+        let db = PirTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
         insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
 
@@ -939,7 +903,7 @@ mod tests {
 
         let count: i64 = db
             .conn()
-            .query_row("SELECT COUNT(*) FROM pir_witness_data", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM pir_notes WHERE canonical_note_id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
     }
