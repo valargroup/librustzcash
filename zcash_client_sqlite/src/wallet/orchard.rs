@@ -818,6 +818,314 @@ pub(crate) mod tests {
         assert_eq!(result.unwrap().len(), 1);
     }
 
+    /// Verifies that a server-produced witness for the wallet's actual note
+    /// commitment is rejected if tampered before insert, but succeeds end-to-end
+    /// when inserted honestly and later consumed by the PIR fallback path.
+    #[cfg(feature = "spendability-pir")]
+    #[test]
+    fn pir_witness_server_round_trip_inserts_and_spends_real_note() {
+        use std::convert::Infallible;
+
+        use commitment_tree_db::CommitmentTreeDb;
+        use incrementalmerkletree::{Hashable, Level};
+        use orchard::{note::ExtractedNoteCommitment, tree::MerkleHashOrchard};
+        use zcash_client_backend::{
+            data_api::{
+                Account as _, WalletCommitmentTrees,
+                testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+                wallet::{ConfirmationsPolicy, input_selection::GreedyInputSelector},
+            },
+            fees::{DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy},
+            wallet::OvkPolicy,
+        };
+        use zcash_primitives::block::BlockHash;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::Payment;
+
+        use crate::{
+            testing::{BlockCache, db::TestDbFactory},
+            wallet::{commitment_tree, pir_witness},
+        };
+
+        const TREE_DEPTH: usize = 32;
+        const SUBSHARD_HEIGHT: u8 = 8;
+        const SHARD_HEIGHT: u8 = 16;
+
+        fn hash_combine(level: u8, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+            let left = MerkleHashOrchard::from_bytes(left).unwrap();
+            let right = MerkleHashOrchard::from_bytes(right).unwrap();
+            <MerkleHashOrchard as Hashable>::combine(Level::from(level), &left, &right).to_bytes()
+        }
+
+        fn empty_root(level: u8) -> [u8; 32] {
+            <MerkleHashOrchard as Hashable>::empty_root(Level::from(level)).to_bytes()
+        }
+
+        fn extract_siblings(
+            nodes: &[[u8; 32]],
+            index: usize,
+            base_level: u8,
+            siblings: &mut [[u8; 32]; TREE_DEPTH],
+        ) {
+            let num_levels = nodes.len().trailing_zeros() as usize;
+            let mut current_nodes = nodes.to_vec();
+            let mut idx = index;
+
+            for level_offset in 0..num_levels {
+                let tree_level = base_level as usize + level_offset;
+                let sibling_idx = idx ^ 1;
+                siblings[tree_level] = if sibling_idx < current_nodes.len() {
+                    current_nodes[sibling_idx]
+                } else {
+                    empty_root(tree_level as u8)
+                };
+
+                let mut next = Vec::with_capacity(current_nodes.len() / 2);
+                for pair in current_nodes.chunks(2) {
+                    let left = pair[0];
+                    let right = if pair.len() > 1 {
+                        pair[1]
+                    } else {
+                        empty_root(tree_level as u8)
+                    };
+                    next.push(hash_combine(tree_level as u8, &left, &right));
+                }
+                current_nodes = next;
+                idx /= 2;
+            }
+        }
+
+        fn compute_root_from_path(
+            position: u64,
+            leaf: &[u8; 32],
+            siblings: &[[u8; 32]; TREE_DEPTH],
+        ) -> [u8; 32] {
+            let mut current = *leaf;
+            let mut pos = position;
+
+            for (level, sibling) in siblings.iter().enumerate() {
+                let (left, right) = if pos & 1 == 0 {
+                    (&current, sibling)
+                } else {
+                    (sibling, &current)
+                };
+                current = hash_combine(level as u8, left, right);
+                pos >>= 1;
+            }
+
+            current
+        }
+
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(60_000);
+        let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+
+        let (note_id, note_position): (i64, i64) = st
+            .wallet()
+            .conn()
+            .query_row(
+                "SELECT id, commitment_tree_position FROM orchard_received_notes LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        let position = incrementalmerkletree::Position::from(note_position as u64);
+        let (siblings_bytes, anchor_root_bytes) = st
+            .wallet_mut()
+            .with_orchard_tree_mut::<_, _, shardtree::error::ShardTreeError<commitment_tree::Error>>(
+                |orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h)?
+                        .expect("root exists at scanned height");
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(position, &h)?
+                        .expect("witness exists for scanned note");
+
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+
+                    Ok((siblings, root.to_bytes()))
+                },
+            )
+            .unwrap();
+
+        let anchor_height = u32::from(h) as u64;
+        let initial_validation = st
+            .wallet()
+            .db()
+            .validate_pir_orchard_witness(
+                note_id,
+                &siblings_bytes,
+                anchor_height,
+                &anchor_root_bytes,
+            )
+            .unwrap();
+        assert!(
+            initial_validation.witness_root_matches_anchor(),
+            "wallet's own checkpoint witness should validate before the server round-trip"
+        );
+
+        let received_note = st
+            .wallet()
+            .conn()
+            .query_row_and_then(
+                "SELECT
+                     rn.id,
+                     t.txid,
+                     rn.action_index,
+                     rn.diversifier,
+                     rn.value,
+                     rn.rho,
+                     rn.rseed,
+                     rn.commitment_tree_position,
+                     accounts.ufvk,
+                     rn.recipient_key_scope,
+                     t.mined_height,
+                     NULL AS max_shielding_input_height
+                 FROM orchard_received_notes rn
+                 INNER JOIN accounts ON accounts.id = rn.account_id
+                 INNER JOIN transactions t ON t.id_tx = rn.transaction_id
+                 WHERE rn.id = ?1",
+                [note_id],
+                |row| super::to_received_note(st.network(), row),
+            )
+            .unwrap()
+            .expect("stored note should be reconstructible");
+        let note_commitment: ExtractedNoteCommitment = received_note.note().commitment().into();
+
+        let mut server_leaves =
+            vec![MerkleHashOrchard::empty_leaf().to_bytes(); note_position as usize];
+        server_leaves.push(MerkleHashOrchard::from_cmx(&note_commitment).to_bytes());
+
+        let mut server_tree = CommitmentTreeDb::new();
+        server_tree.append_commitments(anchor_height, [0xAA; 32], &server_leaves);
+        let expected_server_root = server_tree.tree_root();
+        let (_, broadcast) = server_tree.build_pir_db_and_broadcast(anchor_height);
+
+        let server_position = note_position as u64;
+        let shard_idx = (server_position >> SHARD_HEIGHT) as u32;
+        let subshard_idx = ((server_position >> SUBSHARD_HEIGHT) & 0xFF) as u8;
+        let leaf_idx = (server_position & 0xFF) as usize;
+
+        let leaves = server_tree.subshard_leaves(shard_idx, subshard_idx);
+        let mut server_siblings = [[0u8; 32]; TREE_DEPTH];
+        extract_siblings(&leaves, leaf_idx, 0, &mut server_siblings);
+
+        let shard_offset = (shard_idx - broadcast.window_start_shard) as usize;
+        let ss_roots = &broadcast.subshard_roots[shard_offset].roots;
+        extract_siblings(
+            ss_roots,
+            subshard_idx as usize,
+            SUBSHARD_HEIGHT,
+            &mut server_siblings,
+        );
+
+        let total_cap_slots = 1usize << SHARD_HEIGHT;
+        let mut padded_cap = broadcast.cap.shard_roots.clone();
+        padded_cap.resize(total_cap_slots, empty_root(SHARD_HEIGHT));
+        extract_siblings(
+            &padded_cap,
+            shard_idx as usize,
+            SHARD_HEIGHT,
+            &mut server_siblings,
+        );
+
+        let server_anchor_root =
+            compute_root_from_path(server_position, &leaves[leaf_idx], &server_siblings);
+        let server_anchor_height = broadcast.anchor_height;
+
+        assert_eq!(server_anchor_height, anchor_height);
+        assert_eq!(server_anchor_root, expected_server_root);
+
+        let mut tampered_siblings = server_siblings;
+        tampered_siblings.swap(0, 1);
+        let tampered_validation = st
+            .wallet()
+            .db()
+            .validate_pir_orchard_witness(
+                note_id,
+                &tampered_siblings,
+                server_anchor_height,
+                &server_anchor_root,
+            )
+            .unwrap();
+        assert!(
+            !tampered_validation.witness_root_matches_anchor(),
+            "tampered server witness should fail pre-insert validation"
+        );
+        assert!(
+            !pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap(),
+            "failed validation must not persist a PIR witness row"
+        );
+
+        st.wallet()
+            .db()
+            .insert_pir_witness(
+                note_id,
+                &server_siblings,
+                server_anchor_height,
+                &server_anchor_root,
+            )
+            .unwrap();
+
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "DELETE FROM orchard_tree_checkpoint_marks_removed;
+                 DELETE FROM orchard_tree_checkpoints;",
+            )
+            .unwrap();
+
+        let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+        let to = OrchardPoolTester::sk_default_address(&to_extsk);
+        let request = zip321::TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10_000),
+        )])
+        .unwrap();
+
+        let change_strategy = SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            OrchardPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+
+        let result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+
+        assert!(
+            result.is_ok(),
+            "honest server witness should support PIR fallback spending: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
     /// When no PIR witness is stored for a note, transaction creation should fail
     /// rather than silently produce an invalid spend.
     #[cfg(feature = "spendability-pir")]
@@ -1041,9 +1349,10 @@ pub(crate) mod tests {
             &proposal,
         );
 
+        let err = result.expect_err("Should fail when PIR witnesses have incompatible anchors");
         assert!(
-            result.is_err(),
-            "Should fail when PIR witnesses have different anchor roots"
+            format!("{err}").contains("incompatible PIR witness anchors"),
+            "unexpected error: {err}"
         );
     }
 

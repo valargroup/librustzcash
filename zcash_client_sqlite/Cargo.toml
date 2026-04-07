@@ -92,17 +92,24 @@ rand.workspace = true
 [dev-dependencies]
 ambassador.workspace = true
 assert_matches.workspace = true
+axum = "0.7"
 bls12_381.workspace = true
+commitment-tree-db = { path = "../../spendability-pir/witness/commitment-tree-db" }
 incrementalmerkletree = { workspace = true, features = ["test-dependencies"] }
 incrementalmerkletree-testing.workspace = true
 pasta_curves.workspace = true
+pir-types = { path = "../../spendability-pir/shared/pir-types" }
 shardtree = { workspace = true, features = ["legacy-api", "test-dependencies"] }
 orchard = { workspace = true, features = ["test-dependencies"] }
 proptest.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
 secp256k1 = { workspace = true, features = ["rand"] }
+serde_json.workspace = true
 tempfile = "3.5.0"
+tokio = { workspace = true, features = ["full"] }
+witness-server = { path = "../../spendability-pir/witness/witness-server" }
 zcash_keys = { workspace = true, features = ["test-dependencies"] }
 zcash_note_encryption.workspace = true
 zcash_proofs = { workspace = true, features = ["bundled-prover"] }

@@ -16,12 +16,28 @@ use crate::error::SqliteClientError;
 #[cfg(feature = "orchard")]
 use {
     incrementalmerkletree::{MerklePath, Position},
-    orchard::tree::MerkleHashOrchard,
+    orchard::{note::ExtractedNoteCommitment, tree::MerkleHashOrchard},
+    zcash_client_backend::wallet::ReceivedNote,
+    zcash_protocol::consensus,
 };
 
 #[cfg(feature = "orchard")]
 type PirWitnessResult =
     Result<Option<(MerklePath<MerkleHashOrchard, 32>, u64, [u8; 32])>, SqliteClientError>;
+
+#[cfg(feature = "orchard")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PirWitnessValidation {
+    pub provided_anchor_root: [u8; 32],
+    pub computed_root: [u8; 32],
+}
+
+#[cfg(feature = "orchard")]
+impl PirWitnessValidation {
+    pub fn witness_root_matches_anchor(&self) -> bool {
+        self.computed_root == self.provided_anchor_root
+    }
+}
 
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing {
@@ -371,6 +387,109 @@ pub fn get_pir_merkle_path_by_position(conn: &Connection, position: Position) ->
     }
 }
 
+#[cfg(feature = "orchard")]
+pub fn validate_orchard_witness<P: consensus::Parameters>(
+    conn: &Connection,
+    params: &P,
+    note_id: i64,
+    siblings: &[[u8; 32]; 32],
+    anchor_height: u64,
+    anchor_root: &[u8; 32],
+) -> Result<PirWitnessValidation, SqliteClientError> {
+    let received_note = get_orchard_received_note(conn, params, note_id)?;
+    let txid = hex::encode(received_note.txid().as_ref());
+    let action_index = received_note.output_index();
+    let position = received_note.note_commitment_tree_position();
+    let value = received_note.note().value().inner();
+    let mined_height = received_note.mined_height().map(u32::from);
+
+    let path: Vec<MerkleHashOrchard> = siblings
+        .iter()
+        .map(|bytes| {
+            Option::from(MerkleHashOrchard::from_bytes(bytes)).ok_or_else(|| {
+                SqliteClientError::CorruptedData(
+                    "invalid MerkleHashOrchard in PIR witness validation input".to_string(),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let merkle_path: MerklePath<MerkleHashOrchard, 32> = MerklePath::from_parts(path, position)
+        .map_err(|_| {
+            SqliteClientError::CorruptedData(
+                "failed to construct MerklePath from PIR witness validation input".to_string(),
+            )
+        })?;
+    let note = received_note.note();
+    let ecmx: ExtractedNoteCommitment = note.commitment().into();
+    let cmx = MerkleHashOrchard::from_cmx(&ecmx);
+    let computed_root = merkle_path.root(cmx).to_bytes();
+    let witness_root_matches_anchor = computed_root == *anchor_root;
+
+    if !witness_root_matches_anchor {
+        tracing::warn!(
+            note_id,
+            txid = %txid,
+            action_index,
+            position = u64::from(position),
+            value,
+            mined_height,
+            anchor_height,
+            "wallet PIR witness validation root mismatch",
+        );
+    }
+
+    Ok(PirWitnessValidation {
+        provided_anchor_root: *anchor_root,
+        computed_root,
+    })
+}
+
+#[cfg(feature = "orchard")]
+fn get_orchard_received_note<P: consensus::Parameters>(
+    conn: &Connection,
+    params: &P,
+    note_id: i64,
+) -> Result<ReceivedNote<crate::ReceivedNoteId, orchard::note::Note>, SqliteClientError> {
+    let result = conn.query_row_and_then(
+        "SELECT
+             rn.id,
+             t.txid,
+             rn.action_index,
+             rn.diversifier,
+             rn.value,
+             rn.rho,
+             rn.rseed,
+             rn.commitment_tree_position,
+             accounts.ufvk,
+             rn.recipient_key_scope,
+             t.mined_height,
+             NULL AS max_shielding_input_height
+         FROM orchard_received_notes rn
+         INNER JOIN accounts ON accounts.id = rn.account_id
+         INNER JOIN transactions t ON t.id_tx = rn.transaction_id
+         WHERE rn.id = ?1
+         AND accounts.ufvk IS NOT NULL
+         AND rn.recipient_key_scope IS NOT NULL
+         AND rn.commitment_tree_position IS NOT NULL",
+        [note_id],
+        |row| super::orchard::to_received_note(params, row),
+    );
+
+    match result {
+        Ok(Some(note)) => Ok(note),
+        Ok(None) => Err(SqliteClientError::CorruptedData(format!(
+            "failed to reconstruct Orchard note {note_id} for PIR witness validation"
+        ))),
+        Err(SqliteClientError::DbError(rusqlite::Error::QueryReturnedNoRows)) => {
+            Err(SqliteClientError::CorruptedData(format!(
+                "Orchard note {note_id} not found for PIR witness validation"
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn parse_siblings(blob: &[u8]) -> Result<[[u8; 32]; 32], SqliteClientError> {
     if blob.len() != 1024 {
         return Err(SqliteClientError::CorruptedData(format!(
@@ -389,6 +508,70 @@ fn parse_siblings(blob: &[u8]) -> Result<[[u8; 32]; 32], SqliteClientError> {
 mod tests {
     use super::*;
     use testing::{PirWitnessTestDb, insert_test_note, insert_test_note_with_position};
+
+    #[cfg(feature = "orchard")]
+    macro_rules! real_orchard_witness_fixture {
+        () => {{
+            use zcash_client_backend::data_api::WalletCommitmentTrees;
+            use zcash_client_backend::data_api::testing::{
+                AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+            };
+            use zcash_primitives::block::BlockHash;
+            use zcash_protocol::value::Zatoshis;
+
+            use crate::{
+                testing::{BlockCache, db::TestDbFactory},
+                wallet::commitment_tree,
+            };
+
+            let mut st = TestBuilder::new()
+                .with_data_store_factory(TestDbFactory::default())
+                .with_block_cache(BlockCache::new())
+                .with_account_from_sapling_activation(BlockHash([0; 32]))
+                .build();
+
+            let dfvk = OrchardPoolTester::test_account_fvk(&st);
+            let value = Zatoshis::const_from_u64(60_000);
+            let (h, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h, 1);
+
+            let (note_id, note_position): (i64, i64) = st
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT id, commitment_tree_position FROM orchard_received_notes LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+
+            let position = incrementalmerkletree::Position::from(note_position as u64);
+            let (siblings, anchor_root) = st
+                .wallet_mut()
+                .with_orchard_tree_mut::<
+                    _,
+                    _,
+                    shardtree::error::ShardTreeError<commitment_tree::Error>,
+                >(|orchard_tree| {
+                    let root = orchard_tree
+                        .root_at_checkpoint_id(&h)?
+                        .expect("root exists at scanned height");
+                    let merkle_path = orchard_tree
+                        .witness_at_checkpoint_id_caching(position, &h)?
+                        .expect("witness exists for scanned note");
+
+                    let mut siblings = [[0u8; 32]; 32];
+                    for (i, elem) in merkle_path.path_elems().iter().enumerate() {
+                        siblings[i] = elem.to_bytes();
+                    }
+
+                    Ok((siblings, root.to_bytes()))
+                })
+                .unwrap();
+
+            (st, note_id, note_position, siblings, anchor_root, u32::from(h) as u64)
+        }};
+    }
 
     fn make_nf(byte: u8) -> Vec<u8> {
         vec![byte; 32]
@@ -528,22 +711,8 @@ mod tests {
         let db = PirWitnessTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
-        insert_pir_witness(
-            db.conn(),
-            1,
-            &make_siblings(0x10),
-            100,
-            &make_root(0xFF),
-        )
-        .unwrap();
-        insert_pir_witness(
-            db.conn(),
-            1,
-            &make_siblings(0x20),
-            200,
-            &make_root(0xEE),
-        )
-        .unwrap();
+        insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
+        insert_pir_witness(db.conn(), 1, &make_siblings(0x20), 200, &make_root(0xEE)).unwrap();
 
         let count: i64 = db
             .conn()
@@ -705,6 +874,53 @@ mod tests {
 
         let result = get_pir_merkle_path_by_position(db.conn(), Position::from(9999u64)).unwrap();
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn validate_orchard_witness_accepts_real_merkle_path() {
+        let (st, note_id, _note_position, siblings, anchor_root, anchor_height) =
+            real_orchard_witness_fixture!();
+
+        let validation = validate_orchard_witness(
+            st.wallet().conn(),
+            st.network(),
+            note_id,
+            &siblings,
+            anchor_height,
+            &anchor_root,
+        )
+        .expect("real Orchard witness should validate");
+
+        assert_eq!(validation.provided_anchor_root, anchor_root);
+        assert_eq!(validation.computed_root, anchor_root);
+        assert!(
+            validation.witness_root_matches_anchor(),
+            "real Orchard witness should hash back to the provided anchor"
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn validate_orchard_witness_rejects_tampered_real_merkle_path() {
+        let (st, note_id, _note_position, mut siblings, anchor_root, anchor_height) =
+            real_orchard_witness_fixture!();
+
+        siblings.swap(0, 1);
+        let validation = validate_orchard_witness(
+            st.wallet().conn(),
+            st.network(),
+            note_id,
+            &siblings,
+            anchor_height,
+            &anchor_root,
+        )
+        .expect("tampered Orchard witness should still produce a validation result");
+
+        assert!(
+            !validation.witness_root_matches_anchor(),
+            "tampered siblings should fail the note commitment -> anchor recomputation"
+        );
     }
 
     // =========================================================================

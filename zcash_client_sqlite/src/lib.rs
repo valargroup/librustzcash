@@ -469,9 +469,42 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         wallet::pir_witness::get_notes_needing_pir_witness(self.conn.borrow())
     }
 
+    #[cfg(feature = "orchard")]
+    /// Returns Orchard notes referenced by a proposal that can be refreshed via
+    /// witness PIR.
+    pub fn get_pir_witness_notes_for_proposal(
+        &self,
+        proposal: &zcash_client_backend::proposal::Proposal<
+            zcash_client_backend::fees::StandardFeeRule,
+            ReceivedNoteId,
+        >,
+    ) -> Vec<wallet::pir_witness::NoteNeedingWitness> {
+        let mut out = Vec::new();
+        for step in proposal.steps() {
+            if let Some(inputs) = step.shielded_inputs() {
+                for selected in inputs.notes() {
+                    if let Note::Orchard(note) = selected.note() {
+                        let ReceivedNoteId(protocol, note_id) = *selected.internal_note_id();
+                        if protocol != ShieldedProtocol::Orchard {
+                            continue;
+                        }
+
+                        out.push(wallet::pir_witness::NoteNeedingWitness {
+                            id: note_id,
+                            position: u64::from(selected.note_commitment_tree_position()),
+                            value: note.value().inner(),
+                        });
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
     /// Stores a PIR-obtained Merkle authentication path for a note. The siblings
-    /// are ordered leaf-to-root. The insert is idempotent: duplicate calls for the
-    /// same `note_id` are silently ignored.
+    /// are ordered leaf-to-root. Existing rows are refreshed when a newer anchor
+    /// is fetched for the same `note_id`.
     pub fn insert_pir_witness(
         &self,
         note_id: i64,
@@ -481,6 +514,29 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<(), SqliteClientError> {
         wallet::pir_witness::insert_pir_witness(
             self.conn.borrow(),
+            note_id,
+            siblings,
+            anchor_height,
+            anchor_root,
+        )
+    }
+
+    #[cfg(feature = "orchard")]
+    /// Validates an incoming PIR Orchard witness against the wallet's stored note
+    /// before persisting it.
+    pub fn validate_pir_orchard_witness(
+        &self,
+        note_id: i64,
+        siblings: &[[u8; 32]; 32],
+        anchor_height: u64,
+        anchor_root: &[u8; 32],
+    ) -> Result<wallet::pir_witness::PirWitnessValidation, SqliteClientError>
+    where
+        P: consensus::Parameters,
+    {
+        wallet::pir_witness::validate_orchard_witness(
+            self.conn.borrow(),
+            &self.params,
             note_id,
             siblings,
             anchor_height,
