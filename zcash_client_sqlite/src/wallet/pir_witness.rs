@@ -200,8 +200,8 @@ pub fn get_notes_needing_pir_witness(
     Ok(notes)
 }
 
-/// Stores a PIR-obtained witness for a note. The insert is conditional: it skips
-/// notes that already have a witness.
+/// Stores a PIR-obtained witness for a note. Existing rows are refreshed only
+/// when the incoming snapshot is at least as new as the stored anchor height.
 pub fn insert_pir_witness(
     conn: &Connection,
     note_id: i64,
@@ -212,10 +212,12 @@ pub fn insert_pir_witness(
     let siblings_blob: Vec<u8> = siblings.iter().flat_map(|s| s.iter()).copied().collect();
     conn.execute(
         "INSERT INTO pir_witness_data (note_id, siblings, anchor_height, anchor_root)
-         SELECT ?1, ?2, ?3, ?4
-         WHERE NOT EXISTS (
-             SELECT 1 FROM pir_witness_data WHERE note_id = ?1
-         )",
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(note_id) DO UPDATE SET
+             siblings = excluded.siblings,
+             anchor_height = excluded.anchor_height,
+             anchor_root = excluded.anchor_root
+         WHERE excluded.anchor_height >= pir_witness_data.anchor_height",
         params![
             note_id,
             siblings_blob,
@@ -522,18 +524,53 @@ mod tests {
     }
 
     #[test]
-    fn insert_idempotent() {
+    fn insert_replaces_existing_witness() {
         let db = PirWitnessTestDb::new();
         insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
 
-        insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
-        insert_pir_witness(db.conn(), 1, &make_siblings(0x20), 200, &make_root(0xEE)).unwrap();
+        insert_pir_witness(
+            db.conn(),
+            1,
+            &make_siblings(0x10),
+            100,
+            &make_root(0xFF),
+        )
+        .unwrap();
+        insert_pir_witness(
+            db.conn(),
+            1,
+            &make_siblings(0x20),
+            200,
+            &make_root(0xEE),
+        )
+        .unwrap();
 
         let count: i64 = db
             .conn()
             .query_row("SELECT COUNT(*) FROM pir_witness_data", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+
+        let row = get_pir_witness(db.conn(), 1).unwrap().unwrap();
+        assert_eq!(row.anchor_height, 200);
+        assert_eq!(row.anchor_root, make_root(0xEE));
+    }
+
+    #[test]
+    fn insert_does_not_replace_newer_witness_with_older_snapshot() {
+        let db = PirWitnessTestDb::new();
+        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
+
+        let newer_siblings = make_siblings(0x20);
+        let newer_root = make_root(0xEE);
+        insert_pir_witness(db.conn(), 1, &newer_siblings, 200, &newer_root).unwrap();
+
+        insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
+
+        let row = get_pir_witness(db.conn(), 1).unwrap().unwrap();
+        assert_eq!(row.siblings, newer_siblings);
+        assert_eq!(row.anchor_height, 200);
+        assert_eq!(row.anchor_root, newer_root);
     }
 
     // =========================================================================
