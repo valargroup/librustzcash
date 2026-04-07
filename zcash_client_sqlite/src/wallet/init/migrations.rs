@@ -26,6 +26,7 @@ mod initial_setup;
 mod nullifier_map;
 mod orchard_received_notes;
 mod orchard_shardtree;
+mod pir_provisional_notes;
 mod pir_spent_notes;
 mod pir_witness_data;
 mod received_notes_nullable_nf;
@@ -136,6 +137,8 @@ pub(super) fn all_migrations<
     //                                               pir_spent_notes
     //                                                      |
     //                                               pir_witness_data
+    //                                                      |
+    //                                            pir_provisional_notes
     //
     let rng = Rc::new(Mutex::new(rng));
     vec![
@@ -223,6 +226,7 @@ pub(super) fn all_migrations<
         Box::new(account_delete_cascade::Migration),
         Box::new(pir_spent_notes::Migration),
         Box::new(pir_witness_data::Migration),
+        Box::new(pir_provisional_notes::Migration),
     ]
 }
 
@@ -366,7 +370,7 @@ pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 pub const V_0_19_6: &[Uuid] = &[pir_witness_data::MIGRATION_ID];
 
 /// Leaf migrations as of the current repository state.
-pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[pir_witness_data::MIGRATION_ID];
+pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[pir_provisional_notes::MIGRATION_ID];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(
     conn: &rusqlite::Connection,

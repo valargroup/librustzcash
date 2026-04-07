@@ -370,6 +370,16 @@ pub(crate) fn put_received_note<
         .query_row(sql_args, |row| row.get::<_, i64>(0))
         .map_err(SqliteClientError::from)?;
 
+    // Reconcile: if a provisional PIR note exists at the same tree position,
+    // delete it — canonical data from the scanner supersedes the provisional hint.
+    #[cfg(feature = "spendability-pir")]
+    if let Some(position) = output.note_commitment_tree_position() {
+        let _ = super::pir_provisional::delete_provisional_for_position(
+            conn,
+            u64::from(position),
+        );
+    }
+
     if let Some(spent_in) = spent_in {
         conn.execute(
             "INSERT INTO orchard_received_note_spends (orchard_received_note_id, transaction_id)

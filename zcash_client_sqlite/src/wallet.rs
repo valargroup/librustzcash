@@ -164,6 +164,8 @@ pub(crate) mod orchard;
 #[cfg(feature = "spendability-pir")]
 pub mod pir;
 #[cfg(feature = "spendability-pir")]
+pub mod pir_provisional;
+#[cfg(feature = "spendability-pir")]
 pub mod pir_witness;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
@@ -2338,6 +2340,42 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             },
         )?;
         drop(orchard_trace);
+
+        // Supplement Orchard balance with PIR provisional notes (change notes
+        // discovered via trial decryption that aren't yet in the canonical scan).
+        #[cfg(feature = "spendability-pir")]
+        {
+            let mut stmt = tx.prepare_cached(
+                "SELECT accounts.uuid, ppn.value, ppn.has_pir_witness
+                 FROM pir_provisional_notes ppn
+                 INNER JOIN accounts ON accounts.id = ppn.account_id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let account = AccountUuid(row.get::<_, Uuid>("uuid")?);
+                let value_raw = row.get::<_, i64>("value")?;
+                let value = Zatoshis::from_nonnegative_i64(value_raw).map_err(|_| {
+                    SqliteClientError::CorruptedData(format!(
+                        "Negative provisional note value: {value_raw}"
+                    ))
+                })?;
+                let has_witness = row.get::<_, bool>("has_pir_witness")?;
+
+                if let Some(balances) = account_balances.get_mut(&account) {
+                    let zero = Zatoshis::ZERO;
+                    let (spendable, pending) = if has_witness {
+                        (value, zero)
+                    } else {
+                        (zero, value)
+                    };
+                    balances.with_orchard_balance_mut::<_, SqliteClientError>(|bal| {
+                        bal.add_spendable_value(spendable)?;
+                        bal.add_pending_spendable_value(pending)?;
+                        Ok(())
+                    })?;
+                }
+            }
+        }
     }
 
     let sapling_trace = tracing::info_span!("sapling_balances").entered();
@@ -3370,6 +3408,11 @@ pub(crate) fn truncate_to_height<P: consensus::Parameters>(
     // anchor height that may no longer be valid after a reorg. Same unconditional
     // pattern as pir_spent_notes.
     conn.execute("DELETE FROM pir_witness_data", [])?;
+
+    // Clear PIR provisional notes — these are ahead-of-scan hints derived from
+    // block data that may no longer be valid. The scanner will re-discover
+    // legitimate notes during rescan, and PIR will re-detect spends.
+    conn.execute("DELETE FROM pir_provisional_notes", [])?;
 
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
     // affected block records from the database.

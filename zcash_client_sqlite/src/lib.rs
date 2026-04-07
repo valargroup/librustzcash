@@ -560,6 +560,52 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<Vec<wallet::pir_witness::PirWitnessedNote>, SqliteClientError> {
         wallet::pir_witness::get_pir_witnessed_notes(self.conn.borrow())
     }
+
+    /// Inserts a provisional change note discovered via PIR trial decryption.
+    /// Resolves the account UUID to an internal row ID and stores the note.
+    /// Returns the row ID of the inserted (or existing) row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_pir_provisional_note(
+        &self,
+        account_uuid: AccountUuid,
+        spent_note_id: i64,
+        value: u64,
+        position: u64,
+        diversifier: &[u8; 11],
+        rseed: &[u8; 32],
+        rho: &[u8; 32],
+        nullifier: &[u8; 32],
+        cmx: &[u8; 32],
+        spend_height: u32,
+    ) -> Result<i64, SqliteClientError> {
+        let conn = self.conn.borrow();
+        let account_id: i64 = conn.query_row(
+            "SELECT id FROM accounts WHERE uuid = :uuid",
+            rusqlite::named_params! { ":uuid": account_uuid.expose_uuid().as_bytes().as_slice() },
+            |row| row.get(0),
+        )?;
+        wallet::pir_provisional::insert_pir_provisional_note(
+            conn,
+            account_id,
+            spent_note_id,
+            value,
+            position,
+            diversifier,
+            rseed,
+            rho,
+            nullifier,
+            cmx,
+            spend_height,
+        )
+    }
+
+    /// Marks a provisional note as witnessed after a PIR witness is obtained.
+    pub fn mark_provisional_note_witnessed(
+        &self,
+        note_id: i64,
+    ) -> Result<bool, SqliteClientError> {
+        wallet::pir_provisional::mark_provisional_note_witnessed(self.conn.borrow(), note_id)
+    }
 }
 
 #[cfg(feature = "transparent-inputs")]
