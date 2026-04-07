@@ -598,6 +598,8 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         nullifier: &[u8; 32],
         cmx: &[u8; 32],
         spend_height: u32,
+        depth: u32,
+        parent_provisional_id: Option<i64>,
     ) -> Result<i64, SqliteClientError> {
         wallet::pir_provisional::insert_pir_provisional_note(
             self.conn.borrow(),
@@ -611,6 +613,8 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             nullifier,
             cmx,
             spend_height,
+            depth,
+            parent_provisional_id,
         )
     }
 
@@ -620,6 +624,26 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         note_id: i64,
     ) -> Result<bool, SqliteClientError> {
         wallet::pir_provisional::mark_provisional_note_witnessed(self.conn.borrow(), note_id)
+    }
+
+    /// Returns provisional notes whose nullifiers haven't been PIR-checked.
+    pub fn get_provisional_notes_for_pir_check(
+        &self,
+    ) -> Result<Vec<wallet::pir_provisional::ProvisionalNoteForPIR>, SqliteClientError> {
+        wallet::pir_provisional::get_provisional_notes_for_pir_check(self.conn.borrow())
+    }
+
+    /// Updates a provisional note after PIR nullifier check.
+    pub fn mark_provisional_pir_result(
+        &self,
+        note_id: i64,
+        is_spent: bool,
+    ) -> Result<(), SqliteClientError> {
+        wallet::pir_provisional::mark_provisional_pir_result(
+            self.conn.borrow(),
+            note_id,
+            is_spent,
+        )
     }
 }
 

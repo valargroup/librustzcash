@@ -371,13 +371,16 @@ pub(crate) fn put_received_note<
         .map_err(SqliteClientError::from)?;
 
     // Reconcile: if a provisional PIR note exists at the same tree position,
-    // delete it — canonical data from the scanner supersedes the provisional hint.
+    // mark it as scanner-discovered rather than deleting it so its descendants
+    // in the recursive chain remain valid. If the provisional was PIR-spent,
+    // propagate that status to pir_spent_notes for the canonical note.
     #[cfg(feature = "spendability-pir")]
     if let Some(position) = output.note_commitment_tree_position() {
-        let _ = super::pir_provisional::delete_provisional_for_position(
+        super::pir_provisional::reconcile_provisional_for_position(
             conn,
             u64::from(position),
-        );
+            received_note_id,
+        )?;
     }
 
     if let Some(spent_in) = spent_in {

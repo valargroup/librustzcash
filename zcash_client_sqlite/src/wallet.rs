@@ -2343,12 +2343,15 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
 
         // Supplement Orchard balance with PIR provisional notes (change notes
         // discovered via trial decryption that aren't yet in the canonical scan).
+        // Only active leaf nodes count: exclude mid-chain spent notes and notes
+        // already reconciled by the scanner.
         #[cfg(feature = "spendability-pir")]
         {
             let mut stmt = tx.prepare_cached(
                 "SELECT accounts.uuid, ppn.value, ppn.has_pir_witness
                  FROM pir_provisional_notes ppn
-                 INNER JOIN accounts ON accounts.id = ppn.account_id",
+                 INNER JOIN accounts ON accounts.id = ppn.account_id
+                 WHERE ppn.is_spent = 0 AND ppn.discovered_by_scanner = 0",
             )?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
