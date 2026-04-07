@@ -13,22 +13,6 @@ use rusqlite::{Connection, named_params};
 
 use crate::error::SqliteClientError;
 
-/// A provisional note discovered via PIR trial decryption.
-pub struct ProvisionalNote {
-    pub id: i64,
-    pub account_id: i64,
-    pub spent_note_id: i64,
-    pub value: u64,
-    pub position: u64,
-    pub diversifier: [u8; 11],
-    pub rseed: [u8; 32],
-    pub rho: [u8; 32],
-    pub nullifier: [u8; 32],
-    pub cmx: [u8; 32],
-    pub spend_height: u32,
-    pub has_pir_witness: bool,
-}
-
 /// Inserts a provisional note discovered via PIR trial decryption.
 ///
 /// Uses `INSERT OR IGNORE` so that duplicate positions are silently skipped
