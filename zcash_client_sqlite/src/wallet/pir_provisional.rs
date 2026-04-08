@@ -16,6 +16,13 @@ use rusqlite::{Connection, named_params};
 
 use crate::error::SqliteClientError;
 
+/// A provisional note that needs a PIR witness before it can be spent.
+pub struct ProvisionalNoteNeedingWitness {
+    pub id: i64,
+    pub position: u64,
+    pub value: u64,
+}
+
 /// A provisional note ready for nullifier PIR checking.
 pub struct ProvisionalNoteForPIR {
     pub id: i64,
@@ -205,6 +212,36 @@ pub fn reconcile_provisional_for_position(
     )?;
 
     Ok(rows > 0)
+}
+
+/// Returns provisional notes that have a tree position but lack a witness.
+///
+/// These are active change notes discovered via PIR trial decryption that
+/// haven't been reconciled by the scanner and aren't yet spendable because
+/// `witness_siblings` is NULL. The caller fetches witnesses from the PIR
+/// server and stores them via [`mark_provisional_note_witnessed`].
+pub fn get_provisional_notes_needing_witness(
+    conn: &Connection,
+) -> Result<Vec<ProvisionalNoteNeedingWitness>, SqliteClientError> {
+    let mut stmt = conn.prepare(
+        "SELECT pn.id, pn.position, pn.value
+         FROM pir_notes pn
+         WHERE pn.canonical_note_id IS NULL
+           AND pn.is_spent = 0
+           AND pn.discovered_by_scanner = 0
+           AND pn.position IS NOT NULL
+           AND pn.witness_siblings IS NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ProvisionalNoteNeedingWitness {
+            id: row.get("id")?,
+            position: row.get::<_, i64>("position").map(|v| v as u64)?,
+            value: row.get::<_, i64>("value").map(|v| v as u64)?,
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(SqliteClientError::from)
 }
 
 #[cfg(test)]
@@ -635,5 +672,68 @@ mod tests {
             )
             .unwrap();
         assert_eq!(canonical_b_spent, 1);
+    }
+
+    // =========================================================================
+    // Provisional notes needing witness
+    // =========================================================================
+
+    #[test]
+    fn needing_witness_returns_unwitnessed_provisionals() {
+        let db = PirTestDb::new();
+        insert_test_provisional(db.conn(), 1000, 50_000);
+        insert_test_provisional(db.conn(), 2000, 75_000);
+
+        let notes = get_provisional_notes_needing_witness(db.conn()).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].position, 1000);
+        assert_eq!(notes[0].value, 50_000);
+        assert_eq!(notes[1].position, 2000);
+        assert_eq!(notes[1].value, 75_000);
+    }
+
+    #[test]
+    fn needing_witness_excludes_witnessed() {
+        let db = PirTestDb::new();
+        let id = insert_test_provisional(db.conn(), 1000, 50_000);
+        insert_test_provisional(db.conn(), 2000, 75_000);
+
+        let siblings = [[0x10u8; 32]; 32];
+        mark_provisional_note_witnessed(db.conn(), id, &siblings, 100, &[0xFF; 32]).unwrap();
+
+        let notes = get_provisional_notes_needing_witness(db.conn()).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].position, 2000);
+    }
+
+    #[test]
+    fn needing_witness_excludes_spent() {
+        let db = PirTestDb::new();
+        let id = insert_test_provisional(db.conn(), 1000, 50_000);
+        insert_test_provisional(db.conn(), 2000, 75_000);
+
+        mark_provisional_pir_result(db.conn(), id, true).unwrap();
+
+        let notes = get_provisional_notes_needing_witness(db.conn()).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].position, 2000);
+    }
+
+    #[test]
+    fn needing_witness_excludes_scanner_reconciled() {
+        let db = PirTestDb::new();
+        insert_test_provisional(db.conn(), 1000, 50_000);
+        insert_canonical_note(db.conn(), 42, 1000, 50_000);
+        reconcile_provisional_for_position(db.conn(), 1000, 42).unwrap();
+
+        let notes = get_provisional_notes_needing_witness(db.conn()).unwrap();
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn needing_witness_empty_table() {
+        let db = PirTestDb::new();
+        let notes = get_provisional_notes_needing_witness(db.conn()).unwrap();
+        assert!(notes.is_empty());
     }
 }

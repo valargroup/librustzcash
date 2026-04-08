@@ -634,6 +634,14 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         )
     }
 
+    /// Returns provisional notes that have a tree position but lack a PIR witness.
+    pub fn get_provisional_notes_needing_witness(
+        &self,
+    ) -> Result<Vec<wallet::pir_provisional::ProvisionalNoteNeedingWitness>, SqliteClientError>
+    {
+        wallet::pir_provisional::get_provisional_notes_needing_witness(self.conn.borrow())
+    }
+
     /// Returns provisional notes whose nullifiers haven't been PIR-checked.
     pub fn get_provisional_notes_for_pir_check(
         &self,
