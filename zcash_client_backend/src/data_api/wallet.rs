@@ -1089,10 +1089,16 @@ where
                 |inputs| {
                     wallet_db.with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(
                         |orchard_tree| {
-                            let anchor = orchard_tree
+                            let anchor_hash = orchard_tree
                                 .root_at_checkpoint_id(&inputs.anchor_height())?
-                                .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
-                                .into();
+                                .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?;
+                            let anchor: orchard::Anchor = anchor_hash.into();
+
+                            tracing::debug!(
+                                anchor_height = ?inputs.anchor_height(),
+                                selected_note_count = inputs.notes().len(),
+                                "building Orchard inputs from ShardTree witnesses",
+                            );
 
                             let orchard_inputs = inputs
                                 .notes()
@@ -1108,6 +1114,36 @@ where
                                             witness.ok_or(ShardTreeError::Query(
                                                 QueryError::CheckpointPruned,
                                             ))
+                                        })
+                                        .and_then(|merkle_path| {
+                                            // `witness_at_checkpoint_id_caching` is a cache-backed
+                                            // lookup. Under concurrent scanning it can occasionally
+                                            // hand back a path for the right note but the wrong
+                                            // checkpoint. Recompute the root from the note's cmx and
+                                            // reject anything that doesn't land on this proposal's
+                                            // anchor.
+                                            validate_shardtree_orchard_witness::<
+                                                <DbT as WalletCommitmentTrees>::Error,
+                                            >(
+                                                note,
+                                                merkle_path,
+                                                anchor,
+                                            )
+                                            .map_err(|err| {
+                                                // Treat an anchor mismatch the same as a missing
+                                                // checkpoint so the caller takes the existing PIR
+                                                // witness fallback instead of building with an
+                                                // inconsistent Orchard witness.
+                                                tracing::warn!(
+                                                    position = ?selected.note_commitment_tree_position(),
+                                                    anchor_height = ?inputs.anchor_height(),
+                                                    value = note.value().inner(),
+                                                    "Orchard ShardTree witness root \
+                                                     does not match anchor, \
+                                                     falling back to PIR witnesses",
+                                                );
+                                                err
+                                            })
                                         })
                                         .map(|merkle_path| Some((note, merkle_path)))
                                         .map_err(Error::from)
@@ -1128,6 +1164,16 @@ where
     #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     let (orchard_anchor, orchard_inputs) = match orchard_tree_result {
         Ok(result) => result,
+        // These failures mean we could not produce a trustworthy Orchard witness
+        // from the local ShardTree for this proposal's anchor:
+        // - `Query(_)` covers missing checkpoints and the stale-cache guard above,
+        //   which intentionally maps an anchor mismatch into a recoverable query
+        //   failure.
+        // - `AnchorNotFound(_)` means the local tree cannot provide the requested
+        //   checkpoint root at all.
+        //
+        // In either case, retry by loading PIR-stored witnesses for the selected
+        // Orchard notes instead of aborting transaction construction.
         Err(Error::CommitmentTree(ShardTreeError::Query(_)))
         | Err(Error::Proposal(ProposalError::AnchorNotFound(_))) => {
             if let Some(inputs) = proposal_step.shielded_inputs() {
@@ -1591,13 +1637,13 @@ where
     use crate::wallet::Note;
 
     let mut pir_anchor: Option<orchard::Anchor> = None;
+    let mut pir_anchor_height: Option<u64> = None;
     let mut orchard_inputs = vec![];
-
     for selected in inputs.notes().iter() {
         if let Note::Orchard(note) = selected.note() {
             let position = selected.note_commitment_tree_position();
 
-            let (merkle_path, _anchor_height, anchor_root) = wallet_db
+            let (merkle_path, anchor_height, anchor_root) = wallet_db
                 .get_pir_orchard_merkle_path(position)
                 .map_err(|e| Error::CommitmentTree(ShardTreeError::Storage(e)))?
                 .ok_or(Error::CommitmentTree(ShardTreeError::Query(
@@ -1610,17 +1656,50 @@ where
                         Error::CommitmentTree(ShardTreeError::Query(QueryError::CheckpointPruned))
                     })?;
             let anchor: orchard::Anchor = root_hash.into();
+            let ecmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+            let cmx = orchard::tree::MerkleHashOrchard::from_cmx(&ecmx);
+            let witness_root: orchard::Anchor = merkle_path.root(cmx).into();
+
+            if witness_root != anchor {
+                tracing::warn!(
+                    position = ?position,
+                    value = note.value().inner(),
+                    anchor_height,
+                    anchor_root = %hex::encode(anchor_root),
+                    "PIR witness root does not match stored anchor before add_orchard_spend",
+                );
+                return Err(Error::Proposal(ProposalError::PIRWitnessAnchorMismatch));
+            }
+
+            match &pir_anchor_height {
+                None => pir_anchor_height = Some(anchor_height),
+                Some(existing) if *existing == anchor_height => {}
+                Some(existing) => {
+                    tracing::warn!(
+                        position = ?position,
+                        value = note.value().inner(),
+                        first_anchor_height = existing,
+                        anchor_height,
+                        "selected Orchard notes span multiple PIR witness anchor heights",
+                    );
+                    return Err(Error::Proposal(ProposalError::PIRWitnessAnchorMismatch));
+                }
+            }
 
             match &pir_anchor {
                 None => pir_anchor = Some(anchor),
                 Some(existing) if *existing == anchor => {}
                 Some(_) => {
-                    return Err(Error::Proposal(ProposalError::AnchorNotFound(
-                        inputs.anchor_height(),
-                    )));
+                    tracing::warn!(
+                        position = ?position,
+                        value = note.value().inner(),
+                        anchor_height,
+                        anchor_root = %hex::encode(anchor_root),
+                        "selected Orchard notes span multiple PIR witness anchors",
+                    );
+                    return Err(Error::Proposal(ProposalError::PIRWitnessAnchorMismatch));
                 }
             }
-
             orchard_inputs.push((note, merkle_path));
         }
     }
@@ -1629,6 +1708,26 @@ where
         pir_anchor.or(Some(orchard::Anchor::empty_tree())),
         orchard_inputs,
     ))
+}
+
+#[cfg(feature = "orchard")]
+fn validate_shardtree_orchard_witness<CommitmentTreeErrT>(
+    note: &orchard::note::Note,
+    merkle_path: incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>,
+    expected_anchor: orchard::Anchor,
+) -> Result<
+    incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>,
+    ShardTreeError<CommitmentTreeErrT>,
+> {
+    let ecmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+    let cmx = orchard::tree::MerkleHashOrchard::from_cmx(&ecmx);
+    let witness_root: orchard::Anchor = merkle_path.root(cmx).into();
+
+    if witness_root == expected_anchor {
+        Ok(merkle_path)
+    } else {
+        Err(ShardTreeError::Query(QueryError::CheckpointPruned))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2605,4 +2704,58 @@ where
         OvkPolicy::Sender,
         &proposal,
     )
+}
+
+#[cfg(all(test, feature = "orchard"))]
+mod tests {
+    use incrementalmerkletree::{Hashable, Level, MerklePath, Position};
+    use orchard::{
+        keys::{FullViewingKey, SpendingKey},
+        note::{RandomSeed, Rho},
+        tree::MerkleHashOrchard,
+        value::NoteValue,
+    };
+    use shardtree::error::{QueryError, ShardTreeError};
+
+    use super::validate_shardtree_orchard_witness;
+
+    #[test]
+    fn shardtree_orchard_witness_validation_rejects_anchor_mismatch() {
+        let sk = SpendingKey::from_zip32_seed(&[7; 32], 0, zip32::AccountId::ZERO).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let recipient = fvk.address_at(0u32, zip32::Scope::External);
+        let rho = Rho::from_bytes(&[3; 32]).into_option().unwrap();
+        let rseed = RandomSeed::from_bytes([9; 32], &rho)
+            .into_option()
+            .unwrap();
+        let note = orchard::Note::from_parts(recipient, NoteValue::from_raw(50_000), rho, rseed)
+            .into_option()
+            .unwrap();
+
+        // Build a deterministic synthetic witness. The helper only cares that the
+        // path and the note commitment agree on the resulting root.
+        let path = (0..32)
+            .map(|level| MerkleHashOrchard::empty_root(Level::from(level)))
+            .collect::<Vec<_>>();
+        let merkle_path = MerklePath::from_parts(path, Position::from(0)).unwrap();
+
+        let ecmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+        let cmx = MerkleHashOrchard::from_cmx(&ecmx);
+        let expected_anchor: orchard::Anchor = merkle_path.root(cmx).into();
+
+        // A witness that resolves back to the proposal anchor should be accepted.
+        validate_shardtree_orchard_witness::<()>(&note, merkle_path.clone(), expected_anchor)
+            .expect("matching Orchard witness should validate");
+
+        // A different anchor must be reported as `CheckpointPruned` so the caller
+        // takes the existing PIR fallback path instead of using a stale witness.
+        let bad_anchor = orchard::Anchor::empty_tree();
+        assert_ne!(expected_anchor, bad_anchor);
+        let err = validate_shardtree_orchard_witness::<()>(&note, merkle_path, bad_anchor)
+            .expect_err("mismatched Orchard anchor should be rejected");
+        assert!(matches!(
+            err,
+            ShardTreeError::Query(QueryError::CheckpointPruned)
+        ));
+    }
 }

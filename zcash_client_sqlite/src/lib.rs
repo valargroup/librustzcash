@@ -453,25 +453,84 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         wallet::pir::insert_pir_spent_note(self.conn.borrow(), note_id)
     }
 
-    /// Returns information about notes that are pending in unconfirmed transactions,
-    /// for display in the wallet UI.
-    pub fn get_pir_pending_spends(
+    /// Returns the `pir_notes.id` for a canonical note, if a row exists.
+    pub fn get_pir_note_id_for_canonical(
         &self,
-    ) -> Result<wallet::pir::PirPendingSpendsResult, SqliteClientError> {
-        wallet::pir::get_pir_pending_spends(self.conn.borrow())
+        canonical_note_id: i64,
+    ) -> Result<Option<i64>, SqliteClientError> {
+        wallet::pir::get_pir_note_id_for_canonical(self.conn.borrow(), canonical_note_id)
+    }
+
+    /// Sets spending transaction metadata on a pir_notes row after change discovery.
+    pub fn set_pir_spending_tx_metadata(
+        &self,
+        pir_note_id: i64,
+        tx_hash: &[u8; 32],
+        block_time: u32,
+        fee: Option<u64>,
+        spend_height: Option<u32>,
+    ) -> Result<(), SqliteClientError> {
+        wallet::pir::set_pir_spending_tx_metadata(
+            self.conn.borrow(),
+            pir_note_id,
+            tx_hash,
+            block_time,
+            fee,
+            spend_height,
+        )
+    }
+
+    /// Returns PIR-derived transaction entries for the activity view.
+    pub fn get_pir_activity_entries(
+        &self,
+    ) -> Result<Vec<wallet::pir::PirActivityEntry>, SqliteClientError> {
+        wallet::pir::get_pir_activity_entries(self.conn.borrow())
     }
 
     /// Returns Orchard notes that need a PIR witness: they have a commitment tree
     /// position, are unspent, and their shard is not fully scanned.
     pub fn get_notes_needing_pir_witness(
         &self,
-    ) -> Result<Vec<wallet::pir_witness::NoteNeedingWitness>, SqliteClientError> {
-        wallet::pir_witness::get_notes_needing_pir_witness(self.conn.borrow())
+    ) -> Result<Vec<wallet::pir::NoteNeedingWitness>, SqliteClientError> {
+        wallet::pir::get_notes_needing_pir_witness(self.conn.borrow())
+    }
+
+    #[cfg(feature = "orchard")]
+    /// Returns Orchard notes referenced by a proposal that can be refreshed via
+    /// witness PIR.
+    pub fn get_pir_witness_notes_for_proposal(
+        &self,
+        proposal: &zcash_client_backend::proposal::Proposal<
+            zcash_client_backend::fees::StandardFeeRule,
+            ReceivedNoteId,
+        >,
+    ) -> Vec<wallet::pir::NoteNeedingWitness> {
+        let mut out = Vec::new();
+        for step in proposal.steps() {
+            if let Some(inputs) = step.shielded_inputs() {
+                for selected in inputs.notes() {
+                    if let Note::Orchard(note) = selected.note() {
+                        let ReceivedNoteId(protocol, note_id) = *selected.internal_note_id();
+                        if protocol != ShieldedProtocol::Orchard {
+                            continue;
+                        }
+
+                        out.push(wallet::pir::NoteNeedingWitness {
+                            id: note_id,
+                            position: u64::from(selected.note_commitment_tree_position()),
+                            value: note.value().inner(),
+                        });
+                    }
+                }
+            }
+        }
+
+        out
     }
 
     /// Stores a PIR-obtained Merkle authentication path for a note. The siblings
-    /// are ordered leaf-to-root. The insert is idempotent: duplicate calls for the
-    /// same `note_id` are silently ignored.
+    /// are ordered leaf-to-root. Existing rows are refreshed when a newer anchor
+    /// is fetched for the same `note_id`.
     pub fn insert_pir_witness(
         &self,
         note_id: i64,
@@ -479,8 +538,31 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         anchor_height: u64,
         anchor_root: &[u8; 32],
     ) -> Result<(), SqliteClientError> {
-        wallet::pir_witness::insert_pir_witness(
+        wallet::pir::insert_pir_witness(
             self.conn.borrow(),
+            note_id,
+            siblings,
+            anchor_height,
+            anchor_root,
+        )
+    }
+
+    #[cfg(feature = "orchard")]
+    /// Validates an incoming PIR Orchard witness against the wallet's stored note
+    /// before persisting it.
+    pub fn validate_pir_orchard_witness(
+        &self,
+        note_id: i64,
+        siblings: &[[u8; 32]; 32],
+        anchor_height: u64,
+        anchor_root: &[u8; 32],
+    ) -> Result<wallet::pir::PirWitnessValidation, SqliteClientError>
+    where
+        P: consensus::Parameters,
+    {
+        wallet::pir::validate_orchard_witness(
+            self.conn.borrow(),
+            &self.params,
             note_id,
             siblings,
             anchor_height,
@@ -493,16 +575,117 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     pub fn get_pir_witness(
         &self,
         note_id: i64,
-    ) -> Result<Option<wallet::pir_witness::PirWitnessRow>, SqliteClientError> {
-        wallet::pir_witness::get_pir_witness(self.conn.borrow(), note_id)
+    ) -> Result<Option<wallet::pir::PirWitnessRow>, SqliteClientError> {
+        wallet::pir::get_pir_witness(self.conn.borrow(), note_id)
     }
 
     /// Returns all notes that have PIR witnesses and are still unspent. Useful for
     /// displaying PIR-spendable balance in the wallet UI.
     pub fn get_pir_witnessed_notes(
         &self,
-    ) -> Result<Vec<wallet::pir_witness::PirWitnessedNote>, SqliteClientError> {
-        wallet::pir_witness::get_pir_witnessed_notes(self.conn.borrow())
+    ) -> Result<Vec<wallet::pir::PirWitnessedNote>, SqliteClientError> {
+        wallet::pir::get_pir_witnessed_notes(self.conn.borrow())
+    }
+
+    /// Returns the internal account row ID and account UUID for an Orchard note.
+    /// Used by the FFI layer to look up FVK context for change discovery.
+    pub fn get_account_for_orchard_note(
+        &self,
+        note_id: i64,
+    ) -> Result<(i64, AccountUuid), SqliteClientError> {
+        let conn = self.conn.borrow();
+        conn.query_row(
+            "SELECT rn.account_id, a.uuid
+             FROM orchard_received_notes rn
+             INNER JOIN accounts a ON a.id = rn.account_id
+             WHERE rn.id = ?1",
+            [note_id],
+            |row| {
+                let account_id: i64 = row.get(0)?;
+                let uuid: uuid::Uuid = row.get(1)?;
+                Ok((account_id, AccountUuid(uuid)))
+            },
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// Inserts a provisional change note discovered via PIR trial decryption.
+    /// Returns the row ID of the inserted (or existing) row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_pir_provisional_note(
+        &self,
+        account_id: i64,
+        value: u64,
+        position: u64,
+        diversifier: &[u8; 11],
+        rseed: &[u8; 32],
+        rho: &[u8; 32],
+        nullifier: &[u8; 32],
+        cmx: &[u8; 32],
+        spend_height: u32,
+        depth: u32,
+        parent_provisional_id: Option<i64>,
+    ) -> Result<i64, SqliteClientError> {
+        wallet::pir::insert_pir_provisional_note(
+            self.conn.borrow(),
+            account_id,
+            value,
+            position,
+            diversifier,
+            rseed,
+            rho,
+            nullifier,
+            cmx,
+            spend_height,
+            depth,
+            parent_provisional_id,
+        )
+    }
+
+    /// Sets witness data on a provisional note after a PIR witness is obtained,
+    /// making it eligible for balance and coin selection.
+    pub fn mark_provisional_note_witnessed(
+        &self,
+        note_id: i64,
+        siblings: &[[u8; 32]; 32],
+        anchor_height: u64,
+        anchor_root: &[u8; 32],
+    ) -> Result<bool, SqliteClientError> {
+        wallet::pir::mark_provisional_note_witnessed(
+            self.conn.borrow(),
+            note_id,
+            siblings,
+            anchor_height,
+            anchor_root,
+        )
+    }
+
+    /// Returns provisional notes that have a tree position but lack a PIR witness.
+    pub fn get_provisional_notes_needing_witness(
+        &self,
+    ) -> Result<Vec<wallet::pir::ProvisionalNoteNeedingWitness>, SqliteClientError>
+    {
+        wallet::pir::get_provisional_notes_needing_witness(self.conn.borrow())
+    }
+
+    /// Returns provisional notes whose nullifiers haven't been PIR-checked.
+    pub fn get_provisional_notes_for_pir_check(
+        &self,
+    ) -> Result<Vec<wallet::pir::ProvisionalNoteForPIR>, SqliteClientError> {
+        wallet::pir::get_provisional_notes_for_pir_check(self.conn.borrow())
+    }
+
+    /// Updates a provisional note after PIR nullifier check.
+    pub fn mark_provisional_pir_result(
+        &self,
+        note_id: i64,
+        is_spent: bool,
+    ) -> Result<(), SqliteClientError> {
+        wallet::pir::mark_provisional_pir_result(
+            self.conn.borrow(),
+            note_id,
+            is_spent,
+        )
     }
 }
 
@@ -2321,7 +2504,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL, R> Wallet
         &self,
         position: incrementalmerkletree::Position,
     ) -> Result<Option<data_api::PirOrchardWitness>, Self::Error> {
-        wallet::pir_witness::get_pir_merkle_path_by_position(self.conn.borrow(), position).map_err(
+        wallet::pir::get_pir_merkle_path_by_position(self.conn.borrow(), position).map_err(
             |e| match e {
                 SqliteClientError::DbError(e) => commitment_tree::Error::Query(e),
                 other => commitment_tree::Error::Query(rusqlite::Error::ToSqlConversionFailure(
@@ -2398,7 +2581,7 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
         &self,
         position: incrementalmerkletree::Position,
     ) -> Result<Option<data_api::PirOrchardWitness>, Self::Error> {
-        wallet::pir_witness::get_pir_merkle_path_by_position(self.conn.0, position).map_err(|e| {
+        wallet::pir::get_pir_merkle_path_by_position(self.conn.0, position).map_err(|e| {
             match e {
                 SqliteClientError::DbError(e) => commitment_tree::Error::Query(e),
                 other => commitment_tree::Error::Query(rusqlite::Error::ToSqlConversionFailure(
