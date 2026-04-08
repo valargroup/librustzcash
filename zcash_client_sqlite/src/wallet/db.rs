@@ -1373,6 +1373,10 @@ UNION
 /// - `pir_checked`: set to 1 after this note's nullifier has been checked via PIR.
 /// - `discovered_by_scanner`: set to 1 when the canonical scanner reaches this note's
 ///   position and reconciles it (along with setting `canonical_note_id`).
+/// - `spending_tx_hash`: 32-byte txid of the transaction that spent this note, captured
+///   from the CompactTx during change discovery.
+/// - `spending_block_time`: Unix timestamp of the block containing the spending tx.
+/// - `spending_fee`: fee paid by the spending tx in zatoshis (nullable; not always available).
 pub(super) const TABLE_PIR_NOTES: &str = "CREATE TABLE pir_notes (
     id INTEGER PRIMARY KEY,
     canonical_note_id INTEGER UNIQUE
@@ -1395,7 +1399,11 @@ pub(super) const TABLE_PIR_NOTES: &str = "CREATE TABLE pir_notes (
     depth INTEGER NOT NULL DEFAULT 0,
     parent_id INTEGER REFERENCES pir_notes ( id ),
     pir_checked INTEGER NOT NULL DEFAULT 0,
-    discovered_by_scanner INTEGER NOT NULL DEFAULT 0
+    discovered_by_scanner INTEGER NOT NULL DEFAULT 0,
+    spending_tx_hash BLOB
+        CHECK ( spending_tx_hash IS NULL OR length ( spending_tx_hash ) = 32 ),
+    spending_block_time INTEGER,
+    spending_fee INTEGER
 )";
 
 pub(super) const VIEW_ADDRESS_FIRST_USE: &str = "

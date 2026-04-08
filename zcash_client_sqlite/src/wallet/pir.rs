@@ -169,19 +169,6 @@ pub struct UnspentOrchardNote {
     pub value: u64,
 }
 
-/// A PIR-detected spend not yet confirmed by the block scanner.
-pub struct PirPendingSpend {
-    pub note_id: i64,
-    pub value: u64,
-}
-
-/// Aggregate result from [`get_pir_pending_spends`]: the individual notes and
-/// their summed value.
-pub struct PirPendingSpendsResult {
-    pub notes: Vec<PirPendingSpend>,
-    pub total_value: u64,
-}
-
 /// An Orchard note whose shard is not fully scanned and that lacks a PIR witness.
 pub struct NoteNeedingWitness {
     pub id: i64,
@@ -242,6 +229,25 @@ pub struct ProvisionalNoteForPIR {
     pub depth: u32,
 }
 
+/// A PIR-derived transaction entry for the activity view.
+///
+/// Aggregates co-spent canonical notes by `spending_tx_hash` and computes
+/// the net spend as `gross_value - change_value`.
+pub struct PirActivityEntry {
+    pub tx_hash: [u8; 32],
+    pub block_time: u32,
+    pub fee: Option<u64>,
+    pub height: u32,
+    pub gross_value: u64,
+    pub change_value: u64,
+}
+
+impl PirActivityEntry {
+    pub fn net_value(&self) -> u64 {
+        self.gross_value.saturating_sub(self.change_value)
+    }
+}
+
 // =========================================================================
 // Spend tracking
 // =========================================================================
@@ -256,15 +262,6 @@ const UNSPENT_ORCHARD_NOTES_SQL: &str = "\
     AND NOT EXISTS ( \
         SELECT 1 FROM pir_notes pn \
         WHERE pn.canonical_note_id = rn.id AND pn.is_spent = 1 \
-    )";
-
-const PIR_PENDING_SPENDS_SQL: &str = "\
-    SELECT pn.canonical_note_id AS note_id, rn.value FROM pir_notes pn \
-    JOIN orchard_received_notes rn ON pn.canonical_note_id = rn.id \
-    WHERE pn.is_spent = 1 \
-    AND NOT EXISTS ( \
-        SELECT 1 FROM orchard_received_note_spends sp \
-        WHERE sp.orchard_received_note_id = pn.canonical_note_id \
     )";
 
 /// Returns unspent Orchard notes that have nullifiers, excluding both
@@ -297,28 +294,6 @@ pub fn get_unspent_orchard_notes_for_pir(
         .collect()
 }
 
-/// Returns PIR-detected spent notes whose spends have not yet been confirmed
-/// by the block scanner.
-pub fn get_pir_pending_spends(
-    conn: &Connection,
-) -> Result<PirPendingSpendsResult, SqliteClientError> {
-    let mut stmt = conn.prepare(PIR_PENDING_SPENDS_SQL)?;
-
-    let notes: Vec<PirPendingSpend> = stmt
-        .query_map([], |row| {
-            let note_id: i64 = row.get(0)?;
-            let value: i64 = row.get(1)?;
-            Ok(PirPendingSpend {
-                note_id,
-                value: value as u64,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let total_value: u64 = notes.iter().map(|n| n.value).sum();
-    Ok(PirPendingSpendsResult { notes, total_value })
-}
-
 /// Records a canonical note as PIR-spent by upserting into `pir_notes`.
 ///
 /// If a row already exists for this canonical note (e.g. from a witness insert),
@@ -342,6 +317,133 @@ pub fn insert_pir_spent_note(conn: &Connection, note_id: i64) -> Result<(), Sqli
         [note_id],
     )?;
     Ok(())
+}
+
+// =========================================================================
+// Activity entries (PIR-derived transaction data for the UI)
+// =========================================================================
+
+/// Returns the `pir_notes.id` for a given canonical note ID, if one exists.
+pub fn get_pir_note_id_for_canonical(
+    conn: &Connection,
+    canonical_note_id: i64,
+) -> Result<Option<i64>, SqliteClientError> {
+    let id = conn
+        .query_row(
+            "SELECT id FROM pir_notes WHERE canonical_note_id = ?1",
+            [canonical_note_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(id)
+}
+
+/// Sets spending transaction metadata on a `pir_notes` row after change discovery.
+pub fn set_pir_spending_tx_metadata(
+    conn: &Connection,
+    pir_note_id: i64,
+    tx_hash: &[u8; 32],
+    block_time: u32,
+    fee: Option<u64>,
+    spend_height: Option<u32>,
+) -> Result<(), SqliteClientError> {
+    conn.execute(
+        "UPDATE pir_notes
+         SET spending_tx_hash = :tx_hash,
+             spending_block_time = :block_time,
+             spending_fee = :fee,
+             spend_height = COALESCE(:spend_height, spend_height)
+         WHERE id = :id",
+        named_params! {
+            ":id": pir_note_id,
+            ":tx_hash": &tx_hash[..],
+            ":block_time": block_time,
+            ":fee": fee.map(|f| f as i64),
+            ":spend_height": spend_height,
+        },
+    )?;
+    Ok(())
+}
+
+const PIR_ACTIVITY_ENTRIES_SQL: &str = "\
+    WITH RECURSIVE pending_roots AS ( \
+        SELECT pn.id, pn.spending_tx_hash, pn.spending_block_time, pn.spending_fee, \
+               pn.spend_height, rn.value AS gross_value \
+        FROM pir_notes pn \
+        JOIN orchard_received_notes rn ON pn.canonical_note_id = rn.id \
+        WHERE pn.is_spent = 1 \
+          AND pn.spending_tx_hash IS NOT NULL \
+          AND NOT EXISTS ( \
+              SELECT 1 FROM orchard_received_note_spends sp \
+              WHERE sp.orchard_received_note_id = pn.canonical_note_id \
+          ) \
+    ), \
+    tree(node_id, tx_hash) AS ( \
+        SELECT id, spending_tx_hash FROM pending_roots \
+        UNION ALL \
+        SELECT child.id, tree.tx_hash \
+        FROM pir_notes child \
+        JOIN tree ON child.parent_id = tree.node_id \
+    ) \
+    SELECT \
+        pr.spending_tx_hash AS tx_hash, \
+        MAX(pr.spending_block_time) AS block_time, \
+        MAX(pr.spending_fee) AS fee, \
+        MAX(pr.spend_height) AS height, \
+        SUM(pr.gross_value) AS gross_value, \
+        COALESCE(( \
+            SELECT SUM(leaf.value) \
+            FROM tree t \
+            JOIN pir_notes leaf ON leaf.id = t.node_id \
+            WHERE t.tx_hash = pr.spending_tx_hash \
+              AND leaf.is_spent = 0 \
+              AND leaf.canonical_note_id IS NULL \
+              AND leaf.id NOT IN (SELECT id FROM pending_roots) \
+        ), 0) AS change_value \
+    FROM pending_roots pr \
+    GROUP BY pr.spending_tx_hash";
+
+/// Returns PIR-derived transaction entries for the activity view.
+///
+/// Each entry represents a spending transaction detected via PIR that the
+/// scanner has not yet confirmed. Co-spent canonical notes are grouped by
+/// `spending_tx_hash`. The `change_value` is the sum of unspent descendant
+/// provisional leaves, giving `net_value = gross_value - change_value`.
+pub fn get_pir_activity_entries(
+    conn: &Connection,
+) -> Result<Vec<PirActivityEntry>, SqliteClientError> {
+    let mut stmt = conn.prepare(PIR_ACTIVITY_ENTRIES_SQL)?;
+
+    let entries = stmt
+        .query_map([], |row| {
+            let tx_hash_blob: Vec<u8> = row.get("tx_hash")?;
+            let block_time: i64 = row.get("block_time")?;
+            let fee: Option<i64> = row.get("fee")?;
+            let height: i64 = row.get("height")?;
+            let gross_value: i64 = row.get("gross_value")?;
+            let change_value: i64 = row.get("change_value")?;
+            Ok((tx_hash_blob, block_time, fee, height, gross_value, change_value))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    entries
+        .into_iter()
+        .map(|(tx_hash_blob, block_time, fee, height, gross_value, change_value)| {
+            let tx_hash: [u8; 32] = tx_hash_blob.try_into().map_err(|_| {
+                SqliteClientError::CorruptedData(
+                    "pir_notes spending_tx_hash is not 32 bytes".to_string(),
+                )
+            })?;
+            Ok(PirActivityEntry {
+                tx_hash,
+                block_time: block_time as u32,
+                fee: fee.map(|f| f as u64),
+                height: height as u32,
+                gross_value: gross_value as u64,
+                change_value: change_value as u64,
+            })
+        })
+        .collect()
 }
 
 // =========================================================================
@@ -1265,76 +1367,6 @@ mod tests {
     }
 
     // =====================================================================
-    // Spend tracking — pending spends
-    // =====================================================================
-
-    #[test]
-    fn pending_spends_empty_when_no_pir_notes() {
-        let db = PirTestDb::new();
-        insert_test_note(db.conn(), 1, 10_000, Some(&make_nf(0x01)));
-
-        let result = get_pir_pending_spends(db.conn()).unwrap();
-        assert!(result.notes.is_empty());
-        assert_eq!(result.total_value, 0);
-    }
-
-    #[test]
-    fn pending_spends_returns_pir_only_notes() {
-        let db = PirTestDb::new();
-        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
-        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
-        insert_test_note_with_position(db.conn(), 3, 30_000, Some(&make_nf(0x03)), Some(3000));
-
-        mark_pir_spent(db.conn(), 1);
-        mark_pir_spent(db.conn(), 3);
-
-        let result = get_pir_pending_spends(db.conn()).unwrap();
-        assert_eq!(result.notes.len(), 2);
-        assert_eq!(result.total_value, 40_000);
-        let ids: Vec<i64> = result.notes.iter().map(|n| n.note_id).collect();
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&3));
-    }
-
-    #[test]
-    fn pending_spends_excludes_scan_confirmed() {
-        let db = PirTestDb::new();
-        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
-        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
-        insert_test_note_with_position(db.conn(), 3, 30_000, Some(&make_nf(0x03)), Some(3000));
-
-        mark_pir_spent(db.conn(), 1);
-        mark_pir_spent(db.conn(), 2);
-        mark_pir_spent(db.conn(), 3);
-
-        mark_spent(db.conn(), 2);
-
-        let result = get_pir_pending_spends(db.conn()).unwrap();
-        assert_eq!(result.notes.len(), 2);
-        assert_eq!(result.total_value, 40_000);
-        let ids: Vec<i64> = result.notes.iter().map(|n| n.note_id).collect();
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&3));
-        assert!(!ids.contains(&2));
-    }
-
-    #[test]
-    fn pending_spends_empty_when_all_confirmed() {
-        let db = PirTestDb::new();
-        insert_test_note_with_position(db.conn(), 1, 10_000, Some(&make_nf(0x01)), Some(1000));
-        insert_test_note_with_position(db.conn(), 2, 20_000, Some(&make_nf(0x02)), Some(2000));
-
-        mark_pir_spent(db.conn(), 1);
-        mark_pir_spent(db.conn(), 2);
-        mark_spent(db.conn(), 1);
-        mark_spent(db.conn(), 2);
-
-        let result = get_pir_pending_spends(db.conn()).unwrap();
-        assert!(result.notes.is_empty());
-        assert_eq!(result.total_value, 0);
-    }
-
-    // =====================================================================
     // Witness — notes needing witness
     // =====================================================================
 
@@ -2125,5 +2157,232 @@ mod tests {
             )
             .unwrap();
         assert_eq!(canonical_b_spent, 1);
+    }
+
+    // =====================================================================
+    // Activity entries
+    // =====================================================================
+
+    fn make_tx_hash(byte: u8) -> [u8; 32] {
+        [byte; 32]
+    }
+
+    fn setup_spent_with_change(
+        conn: &Connection,
+        note_id: i64,
+        note_value: i64,
+        position: i64,
+        change_position: u64,
+        change_value: u64,
+        tx_hash: &[u8; 32],
+    ) -> i64 {
+        insert_test_note_with_position(conn, note_id, note_value, Some(&[note_id as u8; 32]), Some(position));
+        insert_pir_spent_note(conn, note_id).unwrap();
+
+        let pir_id: i64 = conn
+            .query_row(
+                "SELECT id FROM pir_notes WHERE canonical_note_id = ?1",
+                [note_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        set_pir_spending_tx_metadata(conn, pir_id, tx_hash, 1700000000, Some(10_000), Some(3_200_000)).unwrap();
+
+        insert_pir_provisional_note(
+            conn, 1, change_value, change_position,
+            &[0u8; 11], &[0u8; 32], &[0u8; 32],
+            &[change_position as u8; 32], &[0u8; 32],
+            3_200_000, 1, Some(pir_id),
+        ).unwrap();
+
+        pir_id
+    }
+
+    #[test]
+    fn activity_empty_when_no_spends() {
+        let db = PirTestDb::new();
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn activity_single_spend_with_change() {
+        let db = PirTestDb::new();
+        let tx_hash = make_tx_hash(0xAA);
+        setup_spent_with_change(db.conn(), 1, 100_000, 1000, 2000, 70_000, &tx_hash);
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tx_hash, tx_hash);
+        assert_eq!(entries[0].gross_value, 100_000);
+        assert_eq!(entries[0].change_value, 70_000);
+        assert_eq!(entries[0].net_value(), 30_000);
+        assert_eq!(entries[0].fee, Some(10_000));
+        assert_eq!(entries[0].block_time, 1700000000);
+    }
+
+    #[test]
+    fn activity_no_change_shows_full_amount() {
+        let db = PirTestDb::new();
+        let tx_hash = make_tx_hash(0xBB);
+        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0x01)), Some(1000));
+        insert_pir_spent_note(db.conn(), 1).unwrap();
+        let pir_id: i64 = db.conn()
+            .query_row("SELECT id FROM pir_notes WHERE canonical_note_id = 1", [], |r| r.get(0))
+            .unwrap();
+        set_pir_spending_tx_metadata(db.conn(), pir_id, &tx_hash, 1700000000, None, Some(3_200_000)).unwrap();
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].gross_value, 50_000);
+        assert_eq!(entries[0].change_value, 0);
+        assert_eq!(entries[0].net_value(), 50_000);
+        assert!(entries[0].fee.is_none());
+    }
+
+    #[test]
+    fn activity_multi_hop_chain() {
+        let db = PirTestDb::new();
+        let tx_hash_a = make_tx_hash(0xAA);
+        let pir_a = setup_spent_with_change(db.conn(), 1, 100_000, 1000, 2000, 70_000, &tx_hash_a);
+
+        let change_b_id: i64 = db.conn()
+            .query_row("SELECT id FROM pir_notes WHERE parent_id = ?1", [pir_a], |r| r.get(0))
+            .unwrap();
+        mark_provisional_pir_result(db.conn(), change_b_id, true).unwrap();
+
+        let tx_hash_b = make_tx_hash(0xBB);
+        set_pir_spending_tx_metadata(db.conn(), change_b_id, &tx_hash_b, 1700001000, Some(10_000), Some(3_200_001)).unwrap();
+        insert_pir_provisional_note(
+            db.conn(), 1, 50_000, 3000,
+            &[0u8; 11], &[0u8; 32], &[0u8; 32],
+            &[3u8; 32], &[0u8; 32],
+            3_200_001, 2, Some(change_b_id),
+        ).unwrap();
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tx_hash, tx_hash_a);
+        assert_eq!(entries[0].gross_value, 100_000);
+        assert_eq!(entries[0].change_value, 50_000);
+        assert_eq!(entries[0].net_value(), 50_000);
+    }
+
+    #[test]
+    fn activity_co_spent_notes_same_tx() {
+        let db = PirTestDb::new();
+        let tx_hash = make_tx_hash(0xCC);
+
+        insert_test_note_with_position(db.conn(), 1, 60_000, Some(&make_nf(0x01)), Some(1000));
+        insert_test_note_with_position(db.conn(), 2, 40_000, Some(&make_nf(0x02)), Some(1001));
+        insert_pir_spent_note(db.conn(), 1).unwrap();
+        insert_pir_spent_note(db.conn(), 2).unwrap();
+
+        let pir1: i64 = db.conn()
+            .query_row("SELECT id FROM pir_notes WHERE canonical_note_id = 1", [], |r| r.get(0))
+            .unwrap();
+        let pir2: i64 = db.conn()
+            .query_row("SELECT id FROM pir_notes WHERE canonical_note_id = 2", [], |r| r.get(0))
+            .unwrap();
+
+        set_pir_spending_tx_metadata(db.conn(), pir1, &tx_hash, 1700000000, Some(10_000), Some(3_200_000)).unwrap();
+        set_pir_spending_tx_metadata(db.conn(), pir2, &tx_hash, 1700000000, Some(10_000), Some(3_200_000)).unwrap();
+
+        insert_pir_provisional_note(
+            db.conn(), 1, 80_000, 2000,
+            &[0u8; 11], &[0u8; 32], &[0u8; 32],
+            &[2u8; 32], &[0u8; 32],
+            3_200_000, 1, Some(pir1),
+        ).unwrap();
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].gross_value, 100_000);
+        assert_eq!(entries[0].change_value, 80_000);
+        assert_eq!(entries[0].net_value(), 20_000);
+    }
+
+    #[test]
+    fn activity_scanner_confirmation_removes_entry() {
+        let db = PirTestDb::new();
+        let tx_hash = make_tx_hash(0xDD);
+        setup_spent_with_change(db.conn(), 1, 100_000, 1000, 2000, 70_000, &tx_hash);
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert_eq!(entries.len(), 1);
+
+        mark_spent(db.conn(), 1);
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn activity_excludes_entries_without_tx_metadata() {
+        let db = PirTestDb::new();
+        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0x01)), Some(1000));
+        insert_pir_spent_note(db.conn(), 1).unwrap();
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn set_tx_metadata_basic() {
+        let db = PirTestDb::new();
+        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0x01)), Some(1000));
+        insert_pir_spent_note(db.conn(), 1).unwrap();
+
+        let pir_id = get_pir_note_id_for_canonical(db.conn(), 1).unwrap().unwrap();
+        let tx_hash = make_tx_hash(0xEE);
+        set_pir_spending_tx_metadata(db.conn(), pir_id, &tx_hash, 1700000000, Some(10_000), Some(3_200_000)).unwrap();
+
+        let (stored_hash, stored_time, stored_fee): (Vec<u8>, i64, Option<i64>) = db.conn()
+            .query_row(
+                "SELECT spending_tx_hash, spending_block_time, spending_fee FROM pir_notes WHERE id = ?1",
+                [pir_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_hash, tx_hash.to_vec());
+        assert_eq!(stored_time, 1700000000);
+        assert_eq!(stored_fee, Some(10_000));
+    }
+
+    #[test]
+    fn get_pir_note_id_for_canonical_basic() {
+        let db = PirTestDb::new();
+        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0x01)), Some(1000));
+        insert_pir_spent_note(db.conn(), 1).unwrap();
+
+        let id = get_pir_note_id_for_canonical(db.conn(), 1).unwrap();
+        assert!(id.is_some());
+
+        let id_none = get_pir_note_id_for_canonical(db.conn(), 999).unwrap();
+        assert!(id_none.is_none());
+    }
+
+    #[test]
+    fn activity_multi_hop_intermediate_without_tx_metadata() {
+        let db = PirTestDb::new();
+        let tx_hash_a = make_tx_hash(0xAA);
+        let pir_a = setup_spent_with_change(db.conn(), 1, 100_000, 1000, 2000, 70_000, &tx_hash_a);
+
+        let change_b_id: i64 = db.conn()
+            .query_row("SELECT id FROM pir_notes WHERE parent_id = ?1", [pir_a], |r| r.get(0))
+            .unwrap();
+        // Mark B as spent via PIR but don't set spending_tx_hash yet
+        // (simulates nullifier detected but change discovery not yet run)
+        mark_provisional_pir_result(db.conn(), change_b_id, true).unwrap();
+
+        let entries = get_pir_activity_entries(db.conn()).unwrap();
+        // A should still appear; its change_value should be 0 because B is spent
+        // (no unspent leaves in the subtree — B is spent and has no children)
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].tx_hash, tx_hash_a);
+        assert_eq!(entries[0].gross_value, 100_000);
+        assert_eq!(entries[0].change_value, 0);
+        assert_eq!(entries[0].net_value(), 100_000);
     }
 }

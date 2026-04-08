@@ -65,7 +65,11 @@ impl RusqliteMigration for Migration {
                 depth INTEGER NOT NULL DEFAULT 0,
                 parent_id INTEGER REFERENCES pir_notes(id),
                 pir_checked INTEGER NOT NULL DEFAULT 0,
-                discovered_by_scanner INTEGER NOT NULL DEFAULT 0
+                discovered_by_scanner INTEGER NOT NULL DEFAULT 0,
+                spending_tx_hash BLOB
+                    CHECK(spending_tx_hash IS NULL OR length(spending_tx_hash) = 32),
+                spending_block_time INTEGER,
+                spending_fee INTEGER
             )",
         )?;
 

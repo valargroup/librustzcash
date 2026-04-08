@@ -453,12 +453,38 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         wallet::pir::insert_pir_spent_note(self.conn.borrow(), note_id)
     }
 
-    /// Returns information about notes that are pending in unconfirmed transactions,
-    /// for display in the wallet UI.
-    pub fn get_pir_pending_spends(
+    /// Returns the `pir_notes.id` for a canonical note, if a row exists.
+    pub fn get_pir_note_id_for_canonical(
         &self,
-    ) -> Result<wallet::pir::PirPendingSpendsResult, SqliteClientError> {
-        wallet::pir::get_pir_pending_spends(self.conn.borrow())
+        canonical_note_id: i64,
+    ) -> Result<Option<i64>, SqliteClientError> {
+        wallet::pir::get_pir_note_id_for_canonical(self.conn.borrow(), canonical_note_id)
+    }
+
+    /// Sets spending transaction metadata on a pir_notes row after change discovery.
+    pub fn set_pir_spending_tx_metadata(
+        &self,
+        pir_note_id: i64,
+        tx_hash: &[u8; 32],
+        block_time: u32,
+        fee: Option<u64>,
+        spend_height: Option<u32>,
+    ) -> Result<(), SqliteClientError> {
+        wallet::pir::set_pir_spending_tx_metadata(
+            self.conn.borrow(),
+            pir_note_id,
+            tx_hash,
+            block_time,
+            fee,
+            spend_height,
+        )
+    }
+
+    /// Returns PIR-derived transaction entries for the activity view.
+    pub fn get_pir_activity_entries(
+        &self,
+    ) -> Result<Vec<wallet::pir::PirActivityEntry>, SqliteClientError> {
+        wallet::pir::get_pir_activity_entries(self.conn.borrow())
     }
 
     /// Returns Orchard notes that need a PIR witness: they have a commitment tree
