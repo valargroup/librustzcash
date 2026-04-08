@@ -376,7 +376,7 @@ pub(crate) fn put_received_note<
     // spent_notes_clause via canonical_note_id.
     #[cfg(feature = "spendability-pir")]
     if let Some(position) = output.note_commitment_tree_position() {
-        super::pir_provisional::reconcile_provisional_for_position(
+        super::pir::reconcile_provisional_for_position(
             conn,
             u64::from(position),
             received_note_id,
@@ -708,7 +708,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         let mut st = TestBuilder::new()
@@ -766,7 +766,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // Store as PIR witness (simulates what the PIR client would do).
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             note_id,
             &siblings_bytes,
@@ -775,7 +775,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        assert!(pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap());
+        assert!(pir::has_pir_witness(st.wallet().conn(), note_id).unwrap());
 
         // Remove ShardTree checkpoints so the tree path in build_proposed_transaction
         // returns Err, triggering the PIR fallback in pir_orchard_witness_fallback.
@@ -857,7 +857,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         const TREE_DEPTH: usize = 32;
@@ -1078,7 +1078,7 @@ pub(crate) mod tests {
             "tampered server witness should fail pre-insert validation"
         );
         assert!(
-            !pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap(),
+            !pir::has_pir_witness(st.wallet().conn(), note_id).unwrap(),
             "failed validation must not persist a PIR witness row"
         );
 
@@ -1241,7 +1241,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         let mut st = TestBuilder::new()
@@ -1299,7 +1299,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // Note 1: real anchor root
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             notes[0].0,
             &siblings_bytes,
@@ -1311,7 +1311,7 @@ pub(crate) mod tests {
         // Note 2: deliberately different anchor root
         let mut bad_root = anchor_root_bytes;
         bad_root[0] ^= 0xFF;
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             notes[1].0,
             &siblings_bytes,
@@ -1391,7 +1391,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         let mut st = TestBuilder::new()
@@ -1438,7 +1438,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             note_id,
             &siblings_bytes,
@@ -1535,7 +1535,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         let mut st = TestBuilder::new()
@@ -1588,7 +1588,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             note_id,
             &siblings_bytes,
@@ -1627,7 +1627,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         let mut st = TestBuilder::new()
@@ -1677,7 +1677,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             first_note_id,
             &siblings_bytes,
@@ -1731,7 +1731,7 @@ pub(crate) mod tests {
 
         use crate::{
             testing::{BlockCache, db::TestDbFactory},
-            wallet::{commitment_tree, pir_witness},
+            wallet::{commitment_tree, pir},
         };
 
         let mut st = TestBuilder::new()
@@ -1778,7 +1778,7 @@ pub(crate) mod tests {
             )
             .unwrap();
 
-        pir_witness::insert_pir_witness(
+        pir::insert_pir_witness(
             st.wallet().conn(),
             note_id,
             &siblings_bytes,
@@ -1787,13 +1787,13 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        assert!(pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap());
+        assert!(pir::has_pir_witness(st.wallet().conn(), note_id).unwrap());
 
         // Truncate to the first block, rewinding past the second.
         st.truncate_to_height(h1);
 
         assert!(
-            !pir_witness::has_pir_witness(st.wallet().conn(), note_id).unwrap(),
+            !pir::has_pir_witness(st.wallet().conn(), note_id).unwrap(),
             "PIR witness data should be cleared after truncate_to_height"
         );
     }

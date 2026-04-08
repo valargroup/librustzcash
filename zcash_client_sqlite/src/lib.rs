@@ -465,8 +465,8 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// position, are unspent, and their shard is not fully scanned.
     pub fn get_notes_needing_pir_witness(
         &self,
-    ) -> Result<Vec<wallet::pir_witness::NoteNeedingWitness>, SqliteClientError> {
-        wallet::pir_witness::get_notes_needing_pir_witness(self.conn.borrow())
+    ) -> Result<Vec<wallet::pir::NoteNeedingWitness>, SqliteClientError> {
+        wallet::pir::get_notes_needing_pir_witness(self.conn.borrow())
     }
 
     #[cfg(feature = "orchard")]
@@ -478,7 +478,7 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
             zcash_client_backend::fees::StandardFeeRule,
             ReceivedNoteId,
         >,
-    ) -> Vec<wallet::pir_witness::NoteNeedingWitness> {
+    ) -> Vec<wallet::pir::NoteNeedingWitness> {
         let mut out = Vec::new();
         for step in proposal.steps() {
             if let Some(inputs) = step.shielded_inputs() {
@@ -489,7 +489,7 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
                             continue;
                         }
 
-                        out.push(wallet::pir_witness::NoteNeedingWitness {
+                        out.push(wallet::pir::NoteNeedingWitness {
                             id: note_id,
                             position: u64::from(selected.note_commitment_tree_position()),
                             value: note.value().inner(),
@@ -512,7 +512,7 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         anchor_height: u64,
         anchor_root: &[u8; 32],
     ) -> Result<(), SqliteClientError> {
-        wallet::pir_witness::insert_pir_witness(
+        wallet::pir::insert_pir_witness(
             self.conn.borrow(),
             note_id,
             siblings,
@@ -530,11 +530,11 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         siblings: &[[u8; 32]; 32],
         anchor_height: u64,
         anchor_root: &[u8; 32],
-    ) -> Result<wallet::pir_witness::PirWitnessValidation, SqliteClientError>
+    ) -> Result<wallet::pir::PirWitnessValidation, SqliteClientError>
     where
         P: consensus::Parameters,
     {
-        wallet::pir_witness::validate_orchard_witness(
+        wallet::pir::validate_orchard_witness(
             self.conn.borrow(),
             &self.params,
             note_id,
@@ -549,16 +549,16 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     pub fn get_pir_witness(
         &self,
         note_id: i64,
-    ) -> Result<Option<wallet::pir_witness::PirWitnessRow>, SqliteClientError> {
-        wallet::pir_witness::get_pir_witness(self.conn.borrow(), note_id)
+    ) -> Result<Option<wallet::pir::PirWitnessRow>, SqliteClientError> {
+        wallet::pir::get_pir_witness(self.conn.borrow(), note_id)
     }
 
     /// Returns all notes that have PIR witnesses and are still unspent. Useful for
     /// displaying PIR-spendable balance in the wallet UI.
     pub fn get_pir_witnessed_notes(
         &self,
-    ) -> Result<Vec<wallet::pir_witness::PirWitnessedNote>, SqliteClientError> {
-        wallet::pir_witness::get_pir_witnessed_notes(self.conn.borrow())
+    ) -> Result<Vec<wallet::pir::PirWitnessedNote>, SqliteClientError> {
+        wallet::pir::get_pir_witnessed_notes(self.conn.borrow())
     }
 
     /// Returns the internal account row ID and account UUID for an Orchard note.
@@ -600,7 +600,7 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         depth: u32,
         parent_provisional_id: Option<i64>,
     ) -> Result<i64, SqliteClientError> {
-        wallet::pir_provisional::insert_pir_provisional_note(
+        wallet::pir::insert_pir_provisional_note(
             self.conn.borrow(),
             account_id,
             value,
@@ -625,7 +625,7 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         anchor_height: u64,
         anchor_root: &[u8; 32],
     ) -> Result<bool, SqliteClientError> {
-        wallet::pir_provisional::mark_provisional_note_witnessed(
+        wallet::pir::mark_provisional_note_witnessed(
             self.conn.borrow(),
             note_id,
             siblings,
@@ -637,16 +637,16 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     /// Returns provisional notes that have a tree position but lack a PIR witness.
     pub fn get_provisional_notes_needing_witness(
         &self,
-    ) -> Result<Vec<wallet::pir_provisional::ProvisionalNoteNeedingWitness>, SqliteClientError>
+    ) -> Result<Vec<wallet::pir::ProvisionalNoteNeedingWitness>, SqliteClientError>
     {
-        wallet::pir_provisional::get_provisional_notes_needing_witness(self.conn.borrow())
+        wallet::pir::get_provisional_notes_needing_witness(self.conn.borrow())
     }
 
     /// Returns provisional notes whose nullifiers haven't been PIR-checked.
     pub fn get_provisional_notes_for_pir_check(
         &self,
-    ) -> Result<Vec<wallet::pir_provisional::ProvisionalNoteForPIR>, SqliteClientError> {
-        wallet::pir_provisional::get_provisional_notes_for_pir_check(self.conn.borrow())
+    ) -> Result<Vec<wallet::pir::ProvisionalNoteForPIR>, SqliteClientError> {
+        wallet::pir::get_provisional_notes_for_pir_check(self.conn.borrow())
     }
 
     /// Updates a provisional note after PIR nullifier check.
@@ -655,7 +655,7 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
         note_id: i64,
         is_spent: bool,
     ) -> Result<(), SqliteClientError> {
-        wallet::pir_provisional::mark_provisional_pir_result(
+        wallet::pir::mark_provisional_pir_result(
             self.conn.borrow(),
             note_id,
             is_spent,
@@ -2478,7 +2478,7 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL, R> Wallet
         &self,
         position: incrementalmerkletree::Position,
     ) -> Result<Option<data_api::PirOrchardWitness>, Self::Error> {
-        wallet::pir_witness::get_pir_merkle_path_by_position(self.conn.borrow(), position).map_err(
+        wallet::pir::get_pir_merkle_path_by_position(self.conn.borrow(), position).map_err(
             |e| match e {
                 SqliteClientError::DbError(e) => commitment_tree::Error::Query(e),
                 other => commitment_tree::Error::Query(rusqlite::Error::ToSqlConversionFailure(
@@ -2555,7 +2555,7 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
         &self,
         position: incrementalmerkletree::Position,
     ) -> Result<Option<data_api::PirOrchardWitness>, Self::Error> {
-        wallet::pir_witness::get_pir_merkle_path_by_position(self.conn.0, position).map_err(|e| {
+        wallet::pir::get_pir_merkle_path_by_position(self.conn.0, position).map_err(|e| {
             match e {
                 SqliteClientError::DbError(e) => commitment_tree::Error::Query(e),
                 other => commitment_tree::Error::Query(rusqlite::Error::ToSqlConversionFailure(

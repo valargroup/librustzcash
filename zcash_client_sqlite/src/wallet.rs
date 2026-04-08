@@ -163,10 +163,6 @@ pub mod init;
 pub(crate) mod orchard;
 #[cfg(feature = "spendability-pir")]
 pub mod pir;
-#[cfg(feature = "spendability-pir")]
-pub mod pir_provisional;
-#[cfg(feature = "spendability-pir")]
-pub mod pir_witness;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
 #[cfg(feature = "transparent-inputs")]
