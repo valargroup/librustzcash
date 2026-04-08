@@ -49,7 +49,7 @@ use {crate::data_api::ORCHARD_SHARD_HEIGHT, shardtree::store::Checkpoint};
 /// The maximum number of blocks the wallet is allowed to rewind. This is
 /// consistent with the bound in zcashd, and allows block data deeper than
 /// this delta from the chain tip to be pruned.
-pub(crate) const PRUNING_DEPTH: u32 = 100;
+pub const PRUNING_DEPTH: u32 = 100;
 
 #[derive(Debug)]
 struct TransparentSentOutput<AccountId> {
@@ -459,10 +459,17 @@ where
         }
     }
 
-    // Prune the nullifier map of entries we no longer need.
-    wallet_db
-        .prune_tracked_nullifiers(PRUNING_DEPTH)
-        .map_err(PutBlocksError::Storage)?;
+    // NOTE: Nullifier-map pruning is intentionally NOT performed here. Under the
+    // External-only batch scanning optimization, Internal-scope change notes are
+    // discovered only during post-scan transaction enhancement, and
+    // `detect_*_spend` consults the nullifier map to link those late-discovered
+    // notes to their spending transactions. Pruning here — before enhancement
+    // has a chance to run — would cascade-delete those locator entries (see
+    // ON DELETE CASCADE on the `nullifier_map` foreign key in `db.rs`) and cause
+    // the wallet to report an inflated balance. The sync orchestrator
+    // (`zcash_client_backend::sync::run` via `WalletWrite::prune_tracked_nullifiers`)
+    // is now responsible for invoking pruning after it has drained the
+    // transaction-data request queue for the scanned range.
 
     // We will have a start position and a last scanned height in all cases where
     // `blocks` is non-empty.
@@ -732,7 +739,13 @@ where
         tx_ref,
         funding_account,
         d_tx.sapling_outputs(),
-        |_, _| Ok(None),
+        |wallet_db, output| {
+            Ok(output
+                .nullifier()
+                .map(|nf| wallet_db.detect_sapling_spend(&nf))
+                .transpose()?
+                .flatten())
+        },
         |wallet_db, output, tx_ref, spent_in| {
             wallet_db.put_received_sapling_note(output, tx_ref, d_tx.mined_height(), spent_in)
         },
@@ -749,7 +762,13 @@ where
         tx_ref,
         funding_account,
         d_tx.orchard_outputs(),
-        |_, _| Ok(None),
+        |wallet_db, output| {
+            Ok(output
+                .nullifier()
+                .map(|nf| wallet_db.detect_orchard_spend(&nf))
+                .transpose()?
+                .flatten())
+        },
         |wallet_db, output, tx_ref, spent_in| {
             wallet_db.put_received_orchard_note(output, tx_ref, d_tx.mined_height(), spent_in)
         },

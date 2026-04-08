@@ -1457,6 +1457,33 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
         })
     }
 
+    fn notify_wallet_note_positions(
+        &mut self,
+        block_range: std::ops::Range<BlockHeight>,
+        wallet_note_positions: &[(ShieldedProtocol, incrementalmerkletree::Position)],
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wallet::scanning::scan_complete(
+                wdb.conn.0,
+                &wdb.params,
+                block_range,
+                wallet_note_positions,
+            )
+        })
+    }
+
+    fn prune_tracked_nullifiers(&mut self, pruning_depth: u32) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            if let Some(meta) = wallet::block_fully_scanned(wdb.conn.0, &wdb.params)? {
+                wallet::prune_nullifier_map(
+                    wdb.conn.0,
+                    meta.block_height().saturating_sub(pruning_depth),
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     fn set_tx_trust(&mut self, txid: TxId, trusted: bool) -> Result<(), Self::Error> {
         self.transactionally(|wdb| wallet::set_tx_trust(wdb.conn.0, txid, trusted))
     }

@@ -27,6 +27,25 @@ workspace.
 - `zcash_client_sqlite::AccountRef` is now public.
 - Implement standalone P2SH address import support
   - `impl zcash_client_backend::data_api::WalletWrite::import_standalone_transparent_script()`
+- `impl WalletWrite::notify_wallet_note_positions for WalletDb`, which marks
+  note commitment tree positions for notes discovered during transaction
+  enhancement, so that those notes become spendable.
+- `impl WalletWrite::prune_tracked_nullifiers for WalletDb`, which prunes
+  `nullifier_map` and cascades its locator entries. This is now called from
+  the `sync` module's orchestration loop AFTER transaction enhancement has
+  had a chance to consult the map; `put_blocks` no longer prunes internally.
+- A new migration (`v_transactions_filter_intermediate_state`) updates the
+  `v_transactions` view to hide transactions whose DB state is transiently
+  inconsistent during sync. Two failure modes are filtered out: a wallet
+  spend that scanning has recorded but whose matching change output has not
+  yet been recovered via enhancement (detected as `raw IS NULL AND
+  spent_note_count > 0`), and a transaction whose own enhancement has stored
+  change notes but whose wallet-side spend cascade has not yet been applied
+  (detected as `change_note_count > 0 AND spent_note_count = 0`). Downstream
+  consumers querying `v_transactions` directly may observe transiently fewer
+  rows during sync than they did previously.
+- `sync` feature flag for integration testing of the sync module's
+  enhancement logic.
 
 ### Changed
 - Migrated to `orchard 0.12`, `sapling-crypto 0.6`.
@@ -35,6 +54,23 @@ workspace.
   `zcash_client_sqlite::error::StandaloneImportConflict`
 - P2SH UTXOs returned by `get_spendable_transparent_outputs` now include a
   precomputed input size for accurate ZIP 317 fee estimation.
+- The `tx_retrieval_queue` query used by `transaction_data_requests` now orders
+  results by `(mined_height, tx_index, txid)` so that enhancement processes
+  transactions in chain order. This is load-bearing for the change-note cascade
+  discovery that runs during enhancement: when tx A spends a change note created
+  in tx B, processing B first ensures B's change note is already stored by the
+  time A's `mark_notes_spent` runs. The `txid` tiebreaker keeps ordering stable
+  under the request-set equality check in `sync::service_transaction_data_requests`.
+- `queue_tx_retrieval` now emits `Enhancement` (not `GetStatus`) for mined
+  transactions that already have `raw` populated. This is needed because
+  transactions recorded via `put_tx_meta` during scanning need to go through
+  `decrypt_and_store_transaction` to recover Internal-scope change outputs and
+  OVK metadata — a `GetStatus` alone would not do that work.
+- The transparent `transaction_data_requests` query no longer excludes
+  ephemeral-scope addresses. This is required for ZIP 320 shielding flows:
+  funds parked on a single-use ephemeral taddr must still generate a
+  spend-detection lookup after the parking transaction mines, so the later
+  spend can be discovered.
 
 ### Removed
 - `zcash_client_sqlite::GapLimits` use `zcash_keys::keys::transparent::GapLimits` instead.

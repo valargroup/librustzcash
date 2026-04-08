@@ -624,6 +624,7 @@ pub(crate) fn reserve_next_n_addresses<P: consensus::Parameters>(
     Ok(addresses_to_reserve
         .into_iter()
         .map(|(id, addr, meta)| {
+            #[allow(irrefutable_let_patterns)]
             if let TransparentAddressSource::Derived { address_index, .. } = meta.source() {
                 (
                     id,
@@ -1696,6 +1697,14 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
     // least so long as address-based transaction data requests are required at all) these requests
     // would not be served by address-based lookups, but instead by querying for the spends of the
     // associated outpoints directly.
+    //
+    // Note: this query deliberately does NOT exclude ephemeral-scope addresses. Under the sync
+    // orchestration introduced alongside External-only scanning, transparent-to-shielded
+    // shielding flows (ZIP 320) park funds on a single-use ephemeral taddr and then spend them
+    // in a later transaction. That spend is only observable via an address-history lookup on the
+    // ephemeral taddr, so we must include those addresses here. A previous revision excluded
+    // them on the assumption that ephemeral addresses were fully characterised at creation
+    // time, which is not true once the funds have been moved on-chain.
     let mut spend_requests_stmt = conn.prepare_cached(
         "SELECT
             ssq.address,
@@ -1707,7 +1716,6 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
          LEFT OUTER JOIN transparent_received_output_spends tros
             ON tros.transparent_received_output_id = tro.id
          WHERE tros.transaction_id IS NULL
-         AND addresses.key_scope != :ephemeral_key_scope
          AND (
              tro.max_observed_unspent_height IS NULL
              OR tro.max_observed_unspent_height < :chain_tip_height
@@ -1720,7 +1728,6 @@ pub(crate) fn transaction_data_requests<P: consensus::Parameters>(
 
     let spend_search_rows = spend_requests_stmt.query_and_then(
         named_params! {
-            ":ephemeral_key_scope": KeyScope::Ephemeral.encode(),
             ":chain_tip_height": u32::from(chain_tip_height)
         },
         |row| {
@@ -2193,6 +2200,17 @@ pub(crate) fn put_transparent_output<P: consensus::Parameters>(
 
     if let Some(spending_transaction_id) = spending_tx_ref {
         mark_transparent_utxo_spent(conn, spending_transaction_id, output.outpoint())?;
+    } else if known_unspent {
+        // Current-UTXO refresh only tells us that the output is presently unspent. Queue an
+        // address-history lookup so that a later spend, such as transparent-to-shielded
+        // shielding, can be discovered and enhanced.
+        queue_transparent_spend_detection(
+            conn,
+            params,
+            *output.recipient_address(),
+            TxRef(id_tx),
+            output.outpoint().n(),
+        )?;
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -2243,12 +2261,20 @@ pub(crate) fn queue_transparent_spend_detection<P: consensus::Parameters>(
 #[cfg(test)]
 mod tests {
     use secrecy::Secret;
-    use transparent::keys::{NonHardenedChildIndex, TransparentKeyScope};
-    use zcash_client_backend::{
-        data_api::{Account as _, WalletWrite, testing::TestBuilder},
-        wallet::{Exposure, TransparentAddressMetadata},
+    use transparent::{
+        bundle::{OutPoint, TxOut},
+        keys::{NonHardenedChildIndex, TransparentKeyScope},
     };
+    use zcash_client_backend::{
+        data_api::{
+            Account as _, OutputStatusFilter, TransactionDataRequest, WalletRead as _, WalletWrite,
+            testing::TestBuilder,
+        },
+        wallet::{Exposure, TransparentAddressMetadata, WalletTransparentOutput},
+    };
+    use zcash_keys::keys::UnifiedAddressRequest;
     use zcash_primitives::block::BlockHash;
+    use zcash_protocol::value::Zatoshis;
 
     use crate::{
         GapLimits, WalletDb,
@@ -2265,6 +2291,94 @@ mod tests {
         zcash_client_backend::data_api::testing::transparent::put_received_transparent_utxo(
             TestDbFactory::default(),
         );
+    }
+
+    #[test]
+    fn put_received_transparent_utxo_queues_spend_detection() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let uaddr = st
+            .wallet()
+            .get_last_generated_address_matching(
+                account.id(),
+                UnifiedAddressRequest::AllAvailableKeys,
+            )
+            .unwrap()
+            .unwrap();
+        let taddr = uaddr.transparent().unwrap();
+
+        let observed_height = account.birthday().height() + 12345;
+        st.wallet_mut().update_chain_tip(observed_height).unwrap();
+
+        let utxo = WalletTransparentOutput::from_parts(
+            OutPoint::fake(),
+            TxOut::new(Zatoshis::const_from_u64(100000), taddr.script().into()),
+            Some(observed_height),
+        )
+        .unwrap();
+        st.wallet_mut()
+            .put_received_transparent_utxo(&utxo)
+            .unwrap();
+        st.wallet_mut()
+            .update_chain_tip(observed_height + 1)
+            .unwrap();
+
+        let requests = st.wallet().transaction_data_requests().unwrap();
+        assert!(requests.iter().any(|req| matches!(
+            req,
+            TransactionDataRequest::TransactionsInvolvingAddress(address_req)
+                if address_req.address() == *taddr
+                    && address_req.block_range_start() == observed_height + 1
+                    && address_req.block_range_end() == Some(observed_height + 2)
+        )));
+    }
+
+    #[test]
+    fn put_received_ephemeral_utxo_queues_spend_detection() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let observed_height = account.birthday().height() + 12345;
+        st.wallet_mut().update_chain_tip(observed_height).unwrap();
+        let [(ephemeral_addr, _)] = st
+            .wallet_mut()
+            .reserve_next_n_ephemeral_addresses(account.id(), 1)
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let utxo = WalletTransparentOutput::from_parts(
+            OutPoint::fake(),
+            TxOut::new(
+                Zatoshis::const_from_u64(100000),
+                ephemeral_addr.script().into(),
+            ),
+            Some(observed_height),
+        )
+        .unwrap();
+        st.wallet_mut()
+            .put_received_transparent_utxo(&utxo)
+            .unwrap();
+        st.wallet_mut()
+            .update_chain_tip(observed_height + 1)
+            .unwrap();
+
+        let requests = st.wallet().transaction_data_requests().unwrap();
+        assert!(requests.iter().any(|req| matches!(
+            req,
+            TransactionDataRequest::TransactionsInvolvingAddress(address_req)
+                if address_req.address() == ephemeral_addr
+                    && address_req.block_range_start() == observed_height + 1
+                    && address_req.block_range_end() == Some(observed_height + 2)
+                    && address_req.output_status_filter() == &OutputStatusFilter::All
+        )));
     }
 
     #[test]

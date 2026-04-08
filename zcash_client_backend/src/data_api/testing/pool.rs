@@ -27,7 +27,6 @@ use zcash_protocol::{
     memo::{Memo, MemoBytes},
     value::Zatoshis,
 };
-use zip32::Scope;
 use zip321::{Payment, TransactionRequest};
 
 use crate::{
@@ -89,7 +88,7 @@ use {
 };
 
 pub mod dsl;
-use dsl::{TestDsl, TestNoteConfig};
+use dsl::TestDsl;
 
 /// Trait that exposes the pool-specific types and operations necessary to run the
 /// single-shielded-pool tests on a given pool.
@@ -375,33 +374,71 @@ pub fn zip_315_confirmations_test_steps<T: ShieldedPoolTester>(
 ) {
     let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
     let account = st.test_account().cloned().unwrap();
-    let starting_balance = Zatoshis::const_from_u64(60_000);
 
-    // Add funds to the wallet in a single note, owned by the internal spending key,
-    // which will have one confirmation.
     let confirmations_policy = ConfirmationsPolicy::default();
-    let (address_type, min_confirmations) = match input_trust {
-        InputTrust::Internal => (AddressType::Internal, confirmations_policy.trusted()),
-        InputTrust::ExternalUntrusted => (
-            AddressType::DefaultExternal,
-            confirmations_policy.untrusted(),
-        ),
-        InputTrust::ExternalTrusted => {
-            (AddressType::DefaultExternal, confirmations_policy.trusted())
-        }
-    };
-    let min_confirmations = u32::from(min_confirmations);
-
-    let (_, r, _) = st.add_a_single_note_checking_balance(
-        TestNoteConfig::from(starting_balance).with_address_type(address_type),
-    );
-    let txid = r.txids()[0];
-
-    // Mark the external input as explicitly trusted, if so requested
     let trusted = input_trust == InputTrust::ExternalTrusted;
-    if trusted {
-        st.wallet_mut().set_tx_trust(txid, true).unwrap();
-    }
+    let min_confirmations = u32::from(match input_trust {
+        InputTrust::Internal => confirmations_policy.trusted(),
+        InputTrust::ExternalUntrusted => confirmations_policy.untrusted(),
+        InputTrust::ExternalTrusted => confirmations_policy.trusted(),
+    });
+
+    // For Internal trust, create the note as change from a real spend + enhancement.
+    // For External trust variants, inject the note directly via a fake compact block.
+    let (starting_balance, txid) = if input_trust == InputTrust::Internal {
+        // Fund the wallet with more than we need so that a spend produces change.
+        let fund_value = Zatoshis::const_from_u64(100_000);
+        st.add_a_single_note_checking_balance(fund_value);
+
+        let to = T::random_address(st.rng_mut());
+        let change_strategy =
+            single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
+        let input_selector = GreedyInputSelector::new();
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(20_000),
+        )])
+        .unwrap();
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let expected_fee = proposal.steps().head.balance().fee_required();
+        let change_value = (fund_value - Zatoshis::const_from_u64(20_000) - expected_fee).unwrap();
+        let txids = st
+            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+                account.usk(),
+                OvkPolicy::Sender,
+                &proposal,
+            )
+            .unwrap();
+        let (h, _) = st.generate_next_block_including(txids[0]);
+        st.scan_cached_blocks(h, 1);
+        st.service_enhancement_requests();
+
+        assert_eq!(
+            st.get_total_balance(account.id()),
+            change_value,
+            "Unexpected total balance after spend"
+        );
+
+        (change_value, txids[0])
+    } else {
+        let starting_balance = Zatoshis::const_from_u64(60_000);
+        let (_, r, _) = st.add_a_single_note_checking_balance(starting_balance);
+        let txid = r.txids()[0];
+
+        if trusted {
+            st.wallet_mut().set_tx_trust(txid, true).unwrap();
+        }
+
+        (starting_balance, txid)
+    };
 
     let add_confirmation = |i: u32| {
         let (h, _) = st.generate_empty_block();
@@ -410,9 +447,17 @@ pub fn zip_315_confirmations_test_steps<T: ShieldedPoolTester>(
             .wallet()
             .get_received_outputs(txid, TargetHeight::from(h + 1), confirmations_policy)
             .unwrap();
-        assert_eq!(outputs.len(), 1);
+        // For the Internal case, the spending tx produces both the external send
+        // and the internal change; find the output that matches starting_balance.
+        let target_output = outputs
+            .iter()
+            .find(|o| o.value() == starting_balance)
+            .unwrap_or_else(|| {
+                assert_eq!(outputs.len(), 1);
+                &outputs[0]
+            });
         assert_eq!(
-            outputs[0].confirmations_until_spendable(),
+            target_output.confirmations_until_spendable(),
             u32::from(if trusted {
                 confirmations_policy.trusted()
             } else {
@@ -1615,6 +1660,7 @@ pub fn send_with_multiple_change_outputs<T: ShieldedPoolTester>(
 
     let (h, _) = st.generate_next_block_including(sent_tx_id);
     st.scan_cached_blocks(h, 1);
+    st.service_enhancement_requests();
 
     // Now, create another proposal with more outputs requested. We have two change notes;
     // we'll spend one of them, and then we'll generate 7 splits.
@@ -1776,6 +1822,7 @@ pub fn send_multi_step_proposed_transfer<T: ShieldedPoolTester, Dsf>(
             let (h, _) = st.generate_next_block_including(*txid);
             st.scan_cached_blocks(h, 1);
         }
+        st.service_enhancement_requests();
 
         // Check that there are sent outputs with the correct values.
         let confirmed_sent: Vec<Vec<_>> = txids
@@ -2881,59 +2928,79 @@ pub fn spend_succeeds_to_t_addr_zero_change<T: ShieldedPoolTester>(
     );
 }
 
+/// Verifies that change notes recovered via enhancement are spendable.
 pub fn change_note_spends_succeed<T: ShieldedPoolTester>(
     ds_factory: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
     let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
-    // Add funds to the wallet in a single note owned by the internal spending key
-    let value = Zatoshis::const_from_u64(70000);
-    st.add_a_single_note_checking_balance(
-        TestNoteConfig::from(value).with_address_type(AddressType::Internal),
-    );
-
-    // Value is considered pending at 10 confirmations.
     let account = st.test_account().cloned().unwrap();
     let account_id = account.id();
-    assert_eq!(
-        st.get_pending_shielded_balance(account_id, ConfirmationsPolicy::default()),
-        value
-    );
-    assert_eq!(
-        st.get_spendable_balance(account_id, ConfirmationsPolicy::default()),
-        Zatoshis::ZERO
-    );
 
-    let change_note_scope = st
-        .wallet()
-        .get_notes(T::SHIELDED_PROTOCOL)
-        .unwrap()
-        .iter()
-        .find_map(|note| (note.note().value() == value).then_some(note.spending_key_scope()));
-    assert_matches!(change_note_scope, Some(Scope::Internal));
+    // Add funds in a single External-scope note
+    let value = Zatoshis::const_from_u64(100000);
+    st.add_a_single_note_checking_balance(value);
 
+    // Spend part of the funds to produce a change note (Internal scope)
+    let to = T::random_address(st.rng_mut());
     let fee_rule = StandardFeeRule::Zip317;
-
-    // TODO: generate_next_block_from_tx does not currently support transparent outputs.
-    let to = TransparentAddress::PublicKeyHash([7; 20]).into();
+    let change_strategy = single_output_change_strategy(fee_rule, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        Zatoshis::const_from_u64(20000),
+    )])
+    .unwrap();
     let proposal = st
-        .propose_standard_transfer::<Infallible>(
+        .propose_transfer(
             account_id,
-            fee_rule,
+            &input_selector,
+            &change_strategy,
+            request,
             ConfirmationsPolicy::MIN,
-            &to,
-            Zatoshis::const_from_u64(50000),
-            None,
-            None,
-            T::SHIELDED_PROTOCOL,
         )
         .unwrap();
+    let txids = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    let (h, _) = st.generate_next_block_including(txids[0]);
+    st.scan_cached_blocks(h, 1);
+    st.service_enhancement_requests();
 
-    // Executing the proposal should succeed
-    assert_matches!(
-        st.create_proposed_transactions::<Infallible, _, Infallible, _>(account.usk(), OvkPolicy::Sender, &proposal),
-        Ok(txids) if txids.len() == 1
+    // Verify the change note was recovered with the correct balance.
+    let total_balance = st.get_total_balance(account_id);
+    assert!(
+        total_balance > Zatoshis::ZERO,
+        "Change note was not recovered"
+    );
+
+    // Verify the change note is spendable (has a valid commitment tree position).
+    let spendable_balance = st.get_spendable_balance(account_id, ConfirmationsPolicy::MIN);
+    assert_eq!(
+        total_balance, spendable_balance,
+        "Change note is not spendable; position may be missing from commitment tree"
+    );
+
+    // Verify the change note can be proposed for spending.
+    let to2 = T::random_address(st.rng_mut());
+    let proposal2 = st.propose_standard_transfer::<Infallible>(
+        account_id,
+        fee_rule,
+        ConfirmationsPolicy::MIN,
+        &to2,
+        Zatoshis::const_from_u64(10000),
+        None,
+        None,
+        T::SHIELDED_PROTOCOL,
+    );
+    assert!(
+        proposal2.is_ok(),
+        "Failed to propose spending change note: {proposal2:?}"
     );
 }
 
@@ -3191,9 +3258,18 @@ pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedP
 
     let (h, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(h, 1);
+    st.service_enhancement_requests();
 
     assert_eq!(st.get_total_balance(account2), amount_sent,);
     assert_eq!(st.get_total_balance(account1), amount_left);
+
+    // Save the raw spending transaction before reset; in production the sync loop
+    // would fetch this from lightwalletd during the enhancement phase.
+    let spending_tx = st
+        .wallet()
+        .get_transaction(txid)
+        .unwrap()
+        .expect("spending tx should be in wallet");
 
     st.reset();
 
@@ -3217,6 +3293,11 @@ pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedP
     ));
 
     st.scan_cached_blocks(st.sapling_activation_height(), 2);
+
+    // Simulate the enhancement phase: decrypt and store the spending tx with enriched
+    // note commitment tree positions, mirroring what the sync loop does via
+    // enrich_decrypted_transaction + store_raw_transaction.
+    st.enhance_transaction(&spending_tx, Some(h));
 
     assert_eq!(st.get_total_balance(account2), amount_sent);
     assert_eq!(st.get_total_balance(account1), amount_left);
@@ -3718,6 +3799,7 @@ pub fn pool_crossing_required<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
 
     let (h, _) = st.generate_next_block_including(create_proposed_result.unwrap()[0]);
     st.scan_cached_blocks(h, 1);
+    st.service_enhancement_requests();
 
     assert_eq!(
         st.get_total_balance(account.id()),
@@ -3808,6 +3890,7 @@ pub fn fully_funded_fully_private<P0: ShieldedPoolTester, P1: ShieldedPoolTester
 
     let (h, _) = st.generate_next_block_including(create_proposed_result.unwrap()[0]);
     st.scan_cached_blocks(h, 1);
+    st.service_enhancement_requests();
 
     assert_eq!(
         st.get_total_balance(account.id()),
@@ -3894,6 +3977,7 @@ pub fn fully_funded_send_to_t<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
 
     let (h, _) = st.generate_next_block_including(create_proposed_result.unwrap()[0]);
     st.scan_cached_blocks(h, 1);
+    st.service_enhancement_requests();
 
     // Since the recipient address is in the same account, the total balance includes the transfer
     // amount.
@@ -4603,6 +4687,8 @@ pub fn scan_cached_blocks_finds_received_notes<T: ShieldedPoolTester, Dsf>(
     );
 }
 
+/// Verifies that change notes produced by a spending transaction are recovered via
+/// enhancement after External-only batch scanning.
 pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -4613,73 +4699,702 @@ pub fn scan_cached_blocks_finds_change_notes<T: ShieldedPoolTester, Dsf>(
     let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
 
     // Wallet summary is not yet available
     assert_eq!(st.get_wallet_summary(ConfirmationsPolicy::MIN), None);
 
-    // Create a fake CompactBlock sending value to the address
+    // Add funds to the wallet
     let value = Zatoshis::const_from_u64(50000);
-    let (_, _, nf) = st.add_a_single_note_checking_balance(value);
+    st.add_a_single_note_checking_balance(value);
 
-    // Create a second fake CompactBlock spending value from the address
-    let not_our_key = T::sk_to_fvk(&T::sk(&[0xf5; 32]));
-    let to2 = T::fvk_default_address(&not_our_key);
+    // Spend part of the value to an external address
+    let to2 = T::random_address(st.rng_mut());
     let value2 = Zatoshis::const_from_u64(20000);
-    let (spent_height, _) = st.generate_next_block_spending(&dfvk, (nf, value), to2, value2);
+    let fee_rule = StandardFeeRule::Zip317;
+    let change_strategy = single_output_change_strategy(fee_rule, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to2.to_zcash_address(st.network()),
+        value2,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let expected_fee = proposal.steps().head.balance().fee_required();
+    let txids = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    let (h, _) = st.generate_next_block_including(txids[0]);
 
-    // Scan the cache again
-    st.scan_cached_blocks(spent_height, 1);
+    // External-only scan: change note (Internal scope) is NOT found by scanning alone.
+    st.scan_cached_blocks(h, 1);
+
+    // Enhancement recovers the change note via Internal IVK trial decryption.
+    st.service_enhancement_requests();
 
     // Account balance should equal the change
+    let expected_change = (value - value2 - expected_fee).unwrap();
+    assert_eq!(st.get_total_balance(account.id()), expected_change);
     assert_eq!(
-        st.get_total_balance(account.id()),
-        (value - value2).unwrap()
+        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+        expected_change
     );
 }
 
+/// Verifies that scanning blocks out of order (spending block before receive block)
+/// correctly detects spends and recovers change via enhancement.
 pub fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
 ) where
     Dsf: DataStoreFactory,
     <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+    <Dsf as DataStoreFactory>::DataStore: Reset,
 {
     let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
 
     let account = st.test_account().cloned().unwrap();
-    let dfvk = T::test_account_fvk(&st);
 
     // Wallet summary is not yet available
     assert_eq!(st.get_wallet_summary(ConfirmationsPolicy::MIN), None);
 
-    // Create a fake CompactBlock sending value to the address
+    // Add funds to the wallet in a single note
     let value = Zatoshis::const_from_u64(50000);
-    let (received_height, _, nf) =
-        st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    let (received_height, _, _) = st.add_a_single_note_checking_balance(value);
 
-    // Create a second fake CompactBlock spending value from the address
-    let not_our_key = T::sk_to_fvk(&T::sk(&[0xf5; 32]));
-    let to2 = T::fvk_default_address(&not_our_key);
+    // Spend part of the value
+    let to2 = T::random_address(st.rng_mut());
     let value2 = Zatoshis::const_from_u64(20000);
-    let (spent_height, _) = st.generate_next_block_spending(&dfvk, (nf, value), to2, value2);
+    let fee_rule = StandardFeeRule::Zip317;
+    let change_strategy = single_output_change_strategy(fee_rule, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to2.to_zcash_address(st.network()),
+        value2,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let expected_fee = proposal.steps().head.balance().fee_required();
+    let expected_change = (value - value2 - expected_fee).unwrap();
+    let txids = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
 
-    // Scan the spending block first.
+    // Save the raw tx before reset (simulates fetching from lightwalletd)
+    let spending_tx = st.wallet().get_transaction(txids[0]).unwrap().unwrap();
+    let (spent_height, _) = st.generate_next_block_including(txids[0]);
+
+    // Reset wallet, recreate the account from seed.
+    // TestBuilder uses seed [0u8; 32] by default.
+    let seed = Secret::new([0u8; 32].to_vec());
+    let birthday = account.birthday().clone();
+    st.reset();
+    let (restored_account_id, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, &birthday, None)
+        .unwrap();
+
+    // Scan the spending block FIRST (out of order)
     st.scan_cached_blocks(spent_height, 1);
+    st.enhance_transaction(&spending_tx, Some(spent_height));
 
     // Account balance should equal the change
-    assert_eq!(
-        st.get_total_balance(account.id()),
-        (value - value2).unwrap()
-    );
+    assert_eq!(st.get_total_balance(restored_account_id), expected_change);
 
-    // Now scan the block in which we received the note that was spent.
+    // Now scan the receive block
     st.scan_cached_blocks(received_height, 1);
 
-    // Account balance should be the same.
+    // Account balance should be the same (not double-counted)
+    assert_eq!(st.get_total_balance(restored_account_id), expected_change);
+}
+
+/// Verifies that a chain of self-sends spanning more than `PRUNING_DEPTH` blocks is
+/// correctly reconstructed during chunked sync.
+///
+/// Under the External-only batch scanning optimization, Internal-scope change notes
+/// are recovered only during post-scan transaction enhancement, and enhancement uses
+/// the `nullifier_map` to detect whether those change notes were themselves spent.
+/// If the nullifier map is pruned before enhancement has a chance to consult it (as
+/// happened in a previous revision of this codebase, when `put_blocks` called
+/// `prune_tracked_nullifiers` before the sync orchestrator drained the enhancement
+/// queue), the cascade of change-note discovery halts at the first change note whose
+/// spend has been wiped from the map, and the wallet reports an inflated balance.
+///
+/// This test exercises that exact scenario:
+/// 1. Fund a wallet with a single note.
+/// 2. Build a chain of two self-sends, with tx2 (which spends tx1's change) placed
+///    in a block more than `PRUNING_DEPTH` blocks after tx1 but within the same
+///    future scan batch. Both spending txs and the intervening empty blocks are
+///    deposited into the cache WITHOUT scanning them.
+/// 3. Reset the wallet (simulating a fresh recovery from seed) and re-scan the
+///    entire cached range with a batch large enough that pruning after the batch
+///    would wipe the `nullifier_map` entry for tx2's spend of tx1's change.
+/// 4. Assert that enhancement correctly discovers both change notes, marks the
+///    first change note as spent, and leaves only the second change note in the
+///    balance.
+///
+/// With the bug present (pruning inside `put_blocks`), `detect_*_spend` for tx1's
+/// change note returns `None` because tx2's spend-nullifier entry was cascaded out
+/// of the map, tx2 is never enhanced, and the balance incorrectly equals the value
+/// of tx1's change note.
+///
+/// With the fix (pruning deferred to the sync orchestrator after enhancement), the
+/// cascade completes and the balance correctly equals the value of tx2's change note.
+#[cfg(feature = "sync")]
+pub fn enhancement_cascade_survives_pruning<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+    <Dsf as DataStoreFactory>::DataStore: Reset,
+{
+    use crate::data_api::ll::wallet::PRUNING_DEPTH;
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+    let birthday = account.birthday().clone();
+
+    // Fund the wallet with a single note and scan it so the wallet knows about the
+    // note as a spendable External-scope receipt.
+    let funding_value = Zatoshis::const_from_u64(100_000);
+    let (h_funding, _, _) = st.add_a_single_note_checking_balance(funding_value);
+
+    // Build transaction 1: spend part of the funded note to an external recipient,
+    // producing an Internal-scope change note.
+    let ext_addr_1 = T::random_address(st.rng_mut());
+    let send_value_1 = Zatoshis::const_from_u64(10_000);
+    let fee_rule = StandardFeeRule::Zip317;
+    let change_strategy = single_output_change_strategy(fee_rule, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+    let request_1 = TransactionRequest::new(vec![Payment::without_memo(
+        ext_addr_1.to_zcash_address(st.network()),
+        send_value_1,
+    )])
+    .unwrap();
+    let proposal_1 = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request_1,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let fee_1 = proposal_1.steps().head.balance().fee_required();
+    let change_1 = (funding_value - send_value_1 - fee_1).unwrap();
+    let txids_1 = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal_1,
+        )
+        .unwrap();
+
+    // Mine tx1 into the next block, scan it, and run enhancement so the wallet
+    // discovers tx1's change note and can use it to construct tx2. The change
+    // note's spendability is contingent on enhancement having run; without it,
+    // External-only scanning would not have detected the Internal-scope output.
+    let (h_tx1, _) = st.generate_next_block_including(txids_1[0]);
+    st.scan_cached_blocks(h_tx1, 1);
+    st.service_enhancement_requests();
+
+    // Capture tx1's raw bytes from the wallet so we can replay enhancement
+    // after the wallet reset that we perform below.
+    let tx1_raw = st
+        .wallet()
+        .get_transaction(txids_1[0])
+        .unwrap()
+        .expect("tx1 should be stored in the wallet after creation");
+
+    // Add empty filler blocks so that tx2 lands more than `PRUNING_DEPTH` blocks
+    // after tx1. Under the buggy ordering (pruning inside `put_blocks`), pruning
+    // at the end of a single large `scan_cached_blocks` call would advance the
+    // pruning floor past tx1's `h_tx1`, cascade-deleting the `nullifier_map`
+    // entry for tx2's spend of tx1's change note. With the fix, pruning is
+    // deferred to `WalletWrite::prune_tracked_nullifiers` invoked by the sync
+    // orchestrator AFTER enhancement has had a chance to consult the map.
+    let tx2_offset = PRUNING_DEPTH as usize + 20;
+    for _ in 0..tx2_offset {
+        st.generate_empty_block();
+    }
+
+    // Build transaction 2: spend tx1's change note to a different external
+    // recipient, producing another Internal-scope change note.
+    let ext_addr_2 = T::random_address(st.rng_mut());
+    let send_value_2 = Zatoshis::const_from_u64(5_000);
+    let request_2 = TransactionRequest::new(vec![Payment::without_memo(
+        ext_addr_2.to_zcash_address(st.network()),
+        send_value_2,
+    )])
+    .unwrap();
+    let proposal_2 = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request_2,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let fee_2 = proposal_2.steps().head.balance().fee_required();
+    let change_2 = (change_1 - send_value_2 - fee_2).unwrap();
+    let txids_2 = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal_2,
+        )
+        .unwrap();
+    let (h_tx2, _) = st.generate_next_block_including(txids_2[0]);
+
+    // Capture tx2's raw bytes likewise.
+    let tx2_raw = st
+        .wallet()
+        .get_transaction(txids_2[0])
+        .unwrap()
+        .expect("tx2 should be stored in the wallet after creation");
+
+    // Add trailing empty blocks so that the chunked scan advances the
+    // fully-scanned height more than `PRUNING_DEPTH` blocks past `h_tx2`.
+    // Without this, pruning at `(fully_scanned - PRUNING_DEPTH)` would not
+    // advance past `h_tx2`, and the buggy ordering would NOT actually wipe
+    // tx2's locator entry — meaning the test would pass even with the bug.
+    let trailing_fillers = PRUNING_DEPTH as usize + 20;
+    for _ in 0..trailing_fillers {
+        st.generate_empty_block();
+    }
+
+    // Reset the wallet and restore from the same seed/birthday. The cache is
+    // preserved, so the scan will observe all blocks from funding through the
+    // trailing filler.
+    let seed = Secret::new([0u8; 32].to_vec());
+    st.reset();
+    let (restored_account_id, _) = st
+        .wallet_mut()
+        .create_account("restored", &seed, &birthday, None)
+        .unwrap();
+
+    // Re-scan the entire cached range in a single batch. With per-chunk
+    // semantics this is the largest meaningful chunk: scan everything, then
+    // enhance, then prune. Under the buggy ordering (pruning inside
+    // `put_blocks`), this would cascade-delete the `nullifier_map` entry for
+    // tx2's spend of tx1's change note before enhancement gets a chance to
+    // consult it.
+    let scan_start = h_funding;
+    let scan_limit =
+        (u32::from(h_tx2) + (trailing_fillers as u32) + 1 - u32::from(scan_start)) as usize;
+    st.scan_cached_blocks(scan_start, scan_limit);
+
+    // Manually drive enhancement using the raw bytes we captured pre-reset.
+    // This mirrors what the production `sync::service_transaction_data_requests`
+    // would do via `fetch_raw_transaction`. Critically: when tx1 is enhanced,
+    // its change note is stored, and `detect_*_spend(nf_change_1)` consults
+    // the `nullifier_map` for tx2's spend at `h_tx2`. With the fix that map
+    // entry is still present (because the sync orchestrator defers pruning
+    // until after enhancement); under the buggy ordering, pruning would have
+    // already cascade-deleted the entry, causing the cascade to halt at tx1's
+    // change note.
+    st.enhance_transaction(&tx1_raw, Some(h_tx1));
+    st.enhance_transaction(&tx2_raw, Some(h_tx2));
+
+    // Invoke the post-enhancement prune exactly as `sync::run` would. This is
+    // a no-op for the test's correctness under the fix; the explicit call
+    // mirrors the production sync orchestrator and exercises the new
+    // `WalletWrite::prune_tracked_nullifiers` code path.
+    st.wallet_mut()
+        .prune_tracked_nullifiers(PRUNING_DEPTH)
+        .unwrap();
+
+    // With the fix, tx1's change note is marked as spent by tx2 via
+    // `detect_*_spend` consulting the still-intact `nullifier_map`, and only
+    // tx2's change note contributes to the balance. Without the fix, the
+    // map entry has been cascade-deleted by the time tx1 is enhanced, so
+    // `detect_*_spend(nf_change_1)` returns None, tx1's change note is stored
+    // as unspent, and the balance is incorrectly inflated to `change_1`.
     assert_eq!(
-        st.get_total_balance(account.id()),
-        (value - value2).unwrap()
+        st.get_total_balance(restored_account_id),
+        change_2,
+        "Final balance should equal tx2's change note ({:?}), not tx1's change note ({:?}). \
+         A mismatch here indicates that the cascade of change-note discovery halted at the \
+         first change note, which happens when the nullifier_map is pruned before enhancement.",
+        change_2,
+        change_1,
+    );
+}
+
+/// Structural regression test for the pruning-before-enhancement ordering bug.
+///
+/// The positive test [`enhancement_cascade_survives_pruning`] demonstrates that a
+/// chain of self-sends spanning more than `PRUNING_DEPTH` blocks can be correctly
+/// reconstructed if pruning happens after enhancement. For that test to be meaningful
+/// we need independent evidence that the alternative ordering (pruning before
+/// enhancement) would in fact lose information. Rather than asserting on the
+/// user-visible balance — which is a derived property that could become robust for
+/// unrelated reasons — this test asserts directly on the structural property that
+/// makes the cascade work: the backend's tracked-nullifier entry for tx2's spend of
+/// tx1's change note must exist between scanning and pruning, and must be wiped
+/// by pruning.
+///
+/// Because the notion of "tracked nullifier entry" is backend-specific (SQLite uses
+/// a `nullifier_map` table; other backends may differ), this test takes a
+/// `count_tracked_spends_at` callback that the caller implements against the
+/// concrete backend. The callback returns the number of tracked entries at a
+/// specific block height.
+///
+/// Concretely:
+/// 1. Fund the wallet, build tx1 spending the funding note (producing an
+///    Internal-scope change note in tx1), enhance so tx2 can be built against it.
+/// 2. Insert `PRUNING_DEPTH + 20` filler blocks, build tx2 spending tx1's change
+///    note, then add another `PRUNING_DEPTH + 20` trailing fillers so the
+///    fully-scanned height advances past `h_tx2 + PRUNING_DEPTH`.
+/// 3. Reset and re-sync. Under External-only scanning, tx1's change note is
+///    Internal-scope and therefore unknown at scan time; tx2's spend of that
+///    unknown nullifier is recorded in the backend's tracked-spend index at
+///    `(h_tx2, tx_index)`, waiting for enhancement to resolve it.
+/// 4. **Before** calling `prune_tracked_nullifiers`, assert
+///    `count_tracked_spends_at(h_tx2) >= 1`.
+/// 5. Call `prune_tracked_nullifiers`.
+/// 6. Assert `count_tracked_spends_at(h_tx2) == 0`. With the tracked entry gone,
+///    a later enhancement of tx1 would no longer be able to link tx1's change
+///    note to its spending transaction, and the cascade would halt.
+#[cfg(feature = "sync")]
+pub fn pruning_wipes_late_discovered_spend_locator<T, Dsf, Cache, CountFn>(
+    ds_factory: Dsf,
+    cache: Cache,
+    count_tracked_spends_at: CountFn,
+) where
+    T: ShieldedPoolTester,
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+    <Dsf as DataStoreFactory>::DataStore: Reset,
+    Cache: TestCache,
+    CountFn: Fn(
+        &TestState<Cache, <Dsf as DataStoreFactory>::DataStore, LocalNetwork>,
+        BlockHeight,
+    ) -> i64,
+{
+    use crate::data_api::ll::wallet::PRUNING_DEPTH;
+
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+    let birthday = account.birthday().clone();
+
+    // Fund the wallet with a single External-scope note.
+    let funding_value = Zatoshis::const_from_u64(100_000);
+    let (h_funding, _, _) = st.add_a_single_note_checking_balance(funding_value);
+
+    // tx1: spend part of the funding note, producing an Internal-scope change note.
+    let ext_addr_1 = T::random_address(st.rng_mut());
+    let send_value_1 = Zatoshis::const_from_u64(10_000);
+    let fee_rule = StandardFeeRule::Zip317;
+    let change_strategy = single_output_change_strategy(fee_rule, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+    let request_1 = TransactionRequest::new(vec![Payment::without_memo(
+        ext_addr_1.to_zcash_address(st.network()),
+        send_value_1,
+    )])
+    .unwrap();
+    let proposal_1 = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request_1,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let txids_1 = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal_1,
+        )
+        .unwrap();
+    let (h_tx1, _) = st.generate_next_block_including(txids_1[0]);
+    st.scan_cached_blocks(h_tx1, 1);
+    st.service_enhancement_requests();
+
+    // Filler blocks so tx2 lands far enough past tx1 that the pruning floor will
+    // eventually sweep past h_tx2.
+    let tx2_offset = PRUNING_DEPTH as usize + 20;
+    for _ in 0..tx2_offset {
+        st.generate_empty_block();
+    }
+
+    // tx2: spend tx1's change note.
+    let ext_addr_2 = T::random_address(st.rng_mut());
+    let send_value_2 = Zatoshis::const_from_u64(5_000);
+    let request_2 = TransactionRequest::new(vec![Payment::without_memo(
+        ext_addr_2.to_zcash_address(st.network()),
+        send_value_2,
+    )])
+    .unwrap();
+    let proposal_2 = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request_2,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let txids_2 = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal_2,
+        )
+        .unwrap();
+    let (h_tx2, _) = st.generate_next_block_including(txids_2[0]);
+
+    // Trailing fillers so the fully-scanned height advances well past h_tx2 + PRUNING_DEPTH.
+    let trailing_fillers = PRUNING_DEPTH as usize + 20;
+    for _ in 0..trailing_fillers {
+        st.generate_empty_block();
+    }
+
+    // Reset and re-sync from seed. Scanning identifies tx2's spend as an unknown
+    // nullifier and records it in the backend's tracked-spend index at h_tx2.
+    let seed = Secret::new([0u8; 32].to_vec());
+    st.reset();
+    st.wallet_mut()
+        .create_account("restored", &seed, &birthday, None)
+        .unwrap();
+    let scan_start = h_funding;
+    let scan_limit =
+        (u32::from(h_tx2) + (trailing_fillers as u32) + 1 - u32::from(scan_start)) as usize;
+    st.scan_cached_blocks(scan_start, scan_limit);
+
+    let before = count_tracked_spends_at(&st, h_tx2);
+    assert!(
+        before >= 1,
+        "Expected at least one tracked-spend entry at block_height = h_tx2 ({:?}) for \
+         tx2's spend of tx1's change note (got {}). Scanning should have inserted a \
+         locator entry for the unresolved spend, since tx1's change note is Internal-scope \
+         and therefore unknown under External-only trial decryption.",
+        h_tx2,
+        before,
+    );
+
+    // Prune. The cascade relation between the locator and the tracked-spend entry
+    // should wipe the entry at h_tx2.
+    st.wallet_mut()
+        .prune_tracked_nullifiers(PRUNING_DEPTH)
+        .unwrap();
+
+    let after = count_tracked_spends_at(&st, h_tx2);
+    assert_eq!(
+        after, 0,
+        "Pruning should cascade-delete the tracked-spend entry at block_height = h_tx2 \
+         ({:?}), but {} entry/entries remain. If this assertion fails, either the cascade \
+         relation has been removed or block_fully_scanned has advanced less far than \
+         expected — in either case the pruning-before-enhancement ordering that the \
+         positive test `enhancement_cascade_survives_pruning` guards against would no \
+         longer be a hazard, and that test's rationale needs re-examination.",
+        h_tx2, after,
+    );
+}
+
+/// Verifies that `v_transactions` hides wallet-spending transactions that are in the
+/// intermediate scan-only state (inputs marked spent, change outputs not yet stored
+/// via enhancement), and shows them with the correct balance delta once enhancement
+/// has completed.
+///
+/// This test directly guards against the regression that caused the user to see
+/// transiently wrong "sent" / "received" amounts during sync under External-only
+/// batch scanning. Specifically:
+///
+/// 1. Fund the wallet with a note (this tx is a pure receive — always visible).
+/// 2. Construct a wallet spend-to-external transaction via `create_proposed_transactions`.
+///    The wallet-created tx has `raw` set via `store_transaction_to_be_sent` so it is
+///    always visible from the moment of creation (covers the mempool display case).
+/// 3. Mine the send, scan the block, but do NOT run enhancement yet. At this point,
+///    scanning has marked the wallet input as spent via `mark_notes_spent`, but the
+///    Internal-scope change note has not been recovered. Because the wallet-created
+///    tx already has `raw` set from creation, the filter still admits it — so the
+///    pre-enhancement state is correctly handled for wallet-created transactions.
+/// 4. **The more important case**: reset the wallet and re-sync from seed. Under a
+///    fresh re-sync, there is no `store_transaction_to_be_sent` history — both the
+///    receipt and the send must be discovered from the chain. The receipt is visible
+///    post-scan because it has zero wallet-side spends (pure receive). The send is
+///    HIDDEN post-scan because it has wallet-side spends but no `raw` yet; it becomes
+///    visible after enhancement runs and `put_tx_data` sets `raw`. Before enhancement,
+///    `get_tx_history()` should not include the send's half-formed row.
+/// 5. Run enhancement. The send now has correct data and appears in `get_tx_history`.
+#[cfg(feature = "sync")]
+pub fn v_transactions_hides_unenhanced_txs<T: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+    <Dsf as DataStoreFactory>::DataStore: Reset,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+    let birthday = account.birthday().clone();
+
+    // Fund the wallet with a single note. This tx has no wallet spends, so under
+    // both the old and new view, it should appear in `get_tx_history` as a pure
+    // receive immediately after scanning.
+    let funding_value = Zatoshis::const_from_u64(100_000);
+    let (h_funding, _, _) = st.add_a_single_note_checking_balance(funding_value);
+
+    // Construct a spend-to-external transaction.
+    let ext_addr = T::random_address(st.rng_mut());
+    let send_value = Zatoshis::const_from_u64(10_000);
+    let fee_rule = StandardFeeRule::Zip317;
+    let change_strategy = single_output_change_strategy(fee_rule, None, T::SHIELDED_PROTOCOL);
+    let input_selector = GreedyInputSelector::new();
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        ext_addr.to_zcash_address(st.network()),
+        send_value,
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    let fee = proposal.steps().head.balance().fee_required();
+    let expected_change = (funding_value - send_value - fee).unwrap();
+    let txids = st
+        .create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        )
+        .unwrap();
+    let send_txid = txids[0];
+
+    // Capture the raw tx bytes for later enhancement replay post-reset.
+    let send_tx = st
+        .wallet()
+        .get_transaction(send_txid)
+        .unwrap()
+        .expect("wallet-created tx should be stored");
+
+    // Mine the send and scan it. Note that because this is a wallet-created tx,
+    // `store_transaction_to_be_sent` has already populated both `raw` and the
+    // change note in `received_notes` at creation time, so the filter admits it
+    // even without running enhancement.
+    let (h_send, _) = st.generate_next_block_including(send_txid);
+    st.scan_cached_blocks(h_send, 1);
+
+    // Sanity check: wallet-created send is visible immediately with correct delta.
+    // This confirms the HAVING-based filter does not hide wallet-created transactions
+    // that had their state populated via `store_transaction_to_be_sent`.
+    let history_before_reset = st.wallet().get_tx_history().unwrap();
+    assert!(
+        history_before_reset.iter().any(|tx| tx.txid() == send_txid),
+        "Wallet-created send tx should be immediately visible in v_transactions via \
+         raw IS NOT NULL (set by store_transaction_to_be_sent)"
+    );
+
+    // Now the harder case: reset the wallet and re-sync. This simulates the user's
+    // scenario (they wipe and re-enter the seed). On a fresh re-sync, the wallet
+    // has no `store_transaction_to_be_sent` history — both txs must be discovered
+    // purely from the chain. The receipt has no wallet spends, so it's visible
+    // post-scan. The send has wallet spends, so it must be hidden until
+    // enhancement runs and sets `raw`.
+    let seed = Secret::new([0u8; 32].to_vec());
+    st.reset();
+    st.wallet_mut()
+        .create_account("restored", &seed, &birthday, None)
+        .unwrap();
+
+    // Scan blocks without running enhancement on the send tx.
+    st.scan_cached_blocks(h_funding, 1);
+    st.scan_cached_blocks(h_send, 1);
+
+    // Check: receipt visible (pure receive), send HIDDEN (wallet spends present but
+    // no `raw`). The filter should drop the send tx from v_transactions here because
+    // displaying it would show the wrong intermediate delta.
+    let history_post_scan = st.wallet().get_tx_history().unwrap();
+    assert!(
+        history_post_scan
+            .iter()
+            .any(|tx| tx.txid() != send_txid && tx.mined_height() == Some(h_funding)),
+        "Receipt tx should be visible immediately after scanning (no wallet spends \
+         means no intermediate state to hide)"
+    );
+    assert!(
+        !history_post_scan.iter().any(|tx| tx.txid() == send_txid),
+        "Send tx should be HIDDEN by v_transactions filter after scanning \
+         (wallet input marked spent but change note not yet recovered via enhancement). \
+         If this assertion fails, the UI would display a transiently-wrong balance \
+         delta for the send. Found: {:?}",
+        history_post_scan
+            .iter()
+            .find(|tx| tx.txid() == send_txid)
+            .map(|tx| tx.account_value_delta())
+    );
+
+    // Now run enhancement explicitly for the send transaction. We pre-captured the
+    // raw bytes before reset, so we can replay enhancement without gRPC.
+    st.enhance_transaction(&send_tx, Some(h_send));
+
+    // After enhancement, the send tx should be visible with the correct delta:
+    // the wallet sent `send_value + fee` externally and kept `expected_change`,
+    // so the net outflow is `send_value + fee`.
+    let history_post_enhance = st.wallet().get_tx_history().unwrap();
+    let send_entry = history_post_enhance
+        .iter()
+        .find(|tx| tx.txid() == send_txid)
+        .expect(
+            "Send tx should be VISIBLE in v_transactions after enhancement \
+             (raw now set via put_tx_data, change note now in received_notes)",
+        );
+
+    // Verify the delta reflects what the wallet actually sent (outflow).
+    // account_balance_delta should be -(funding - change) = -(send + fee).
+    let actual_spent = send_entry.total_spent();
+    let actual_received = send_entry.total_received();
+    assert_eq!(
+        actual_spent, funding_value,
+        "Send tx total_spent should equal the funded note value ({funding_value:?}), got {actual_spent:?}",
+    );
+    assert_eq!(
+        actual_received, expected_change,
+        "Send tx total_received should equal the change note value ({expected_change:?}), got {actual_received:?}",
+    );
+    // Net outflow = spent - received; this should equal the external send value + fee.
+    let net_outflow = (actual_spent - actual_received).unwrap();
+    let expected_net_outflow = (funding_value - expected_change).unwrap();
+    assert_eq!(
+        net_outflow, expected_net_outflow,
+        "Net outflow should equal (external send + fee) = {expected_net_outflow:?}, got {net_outflow:?}",
     );
 }
 

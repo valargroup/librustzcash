@@ -539,6 +539,24 @@ pub(crate) mod tests {
         testing::pool::change_note_spends_succeed::<SaplingPoolTester>()
     }
 
+    #[cfg(feature = "sync")]
+    #[test]
+    fn enhancement_cascade_survives_pruning() {
+        testing::pool::enhancement_cascade_survives_pruning::<SaplingPoolTester>()
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn pruning_wipes_late_discovered_spend_locator() {
+        testing::pool::pruning_wipes_late_discovered_spend_locator::<SaplingPoolTester>()
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn v_transactions_hides_unenhanced_txs() {
+        testing::pool::v_transactions_hides_unenhanced_txs::<SaplingPoolTester>()
+    }
+
     #[test]
     fn account_deletion() {
         testing::pool::account_deletion::<SaplingPoolTester>()

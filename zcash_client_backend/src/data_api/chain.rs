@@ -600,7 +600,13 @@ where
     let account_ufvks = data_db
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
-    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+    // Use External IVK only for batch trial decryption. This halves the
+    // key-agreement work per output. Change notes (Internal IVK) are recovered
+    // via the nullifier_map: when a newly discovered note's nullifier matches
+    // one from a previously-scanned block, the spending transaction is queued
+    // for enhancement, where decrypt_and_store_transaction tries all key scopes.
+    let scanning_keys =
+        ScanningKeys::from_account_ufvks_with_scopes(account_ufvks, &[zip32::Scope::External]);
     let mut runners = BatchRunners::<_, (), ()>::for_keys(100, &scanning_keys);
 
     block_source.with_blocks::<_, DbT::Error>(Some(from_height), Some(limit), |block| {

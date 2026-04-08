@@ -615,7 +615,7 @@ pub trait ReceivedShieldedOutput {
     fn is_change(&self) -> bool;
     /// Returns the nullifier that will be revealed when the note is spent, if the output was
     /// observed using a key that provides the capability for nullifier computation.
-    fn nullifier(&self) -> Option<&Self::Nullifier>;
+    fn nullifier(&self) -> Option<Self::Nullifier>;
     /// Returns the position of the note in the note commitment tree, if the transaction that
     /// produced the output has been mined.
     fn note_commitment_tree_position(&self) -> Option<Position>;
@@ -661,8 +661,8 @@ impl<AccountId: Copy> ReceivedShieldedOutput for WalletSaplingOutput<AccountId> 
     fn is_change(&self) -> bool {
         WalletSaplingOutput::is_change(self)
     }
-    fn nullifier(&self) -> Option<&::sapling::Nullifier> {
-        self.nf()
+    fn nullifier(&self) -> Option<::sapling::Nullifier> {
+        self.nf().copied()
     }
     fn note_commitment_tree_position(&self) -> Option<Position> {
         Some(WalletSaplingOutput::note_commitment_tree_position(self))
@@ -696,11 +696,12 @@ impl<AccountId: Copy> ReceivedShieldedOutput for DecryptedOutput<::sapling::Note
     fn is_change(&self) -> bool {
         self.transfer_type() == TransferType::WalletInternal
     }
-    fn nullifier(&self) -> Option<&::sapling::Nullifier> {
-        None
+    fn nullifier(&self) -> Option<::sapling::Nullifier> {
+        self.nullifier_bytes()
+            .and_then(|bytes| ::sapling::Nullifier::from_slice(&bytes).ok())
     }
     fn note_commitment_tree_position(&self) -> Option<Position> {
-        None
+        self.note_commitment_tree_position()
     }
     fn recipient_key_scope(&self) -> Option<Scope> {
         if self.transfer_type() == TransferType::WalletInternal {
@@ -752,8 +753,8 @@ impl<AccountId: Copy> ReceivedShieldedOutput for WalletOrchardOutput<AccountId> 
     fn is_change(&self) -> bool {
         WalletOrchardOutput::is_change(self)
     }
-    fn nullifier(&self) -> Option<&::orchard::note::Nullifier> {
-        self.nf()
+    fn nullifier(&self) -> Option<::orchard::note::Nullifier> {
+        self.nf().copied()
     }
     fn note_commitment_tree_position(&self) -> Option<Position> {
         Some(WalletOrchardOutput::note_commitment_tree_position(self))
@@ -788,11 +789,12 @@ impl<AccountId: Copy> ReceivedShieldedOutput for DecryptedOutput<::orchard::Note
     fn is_change(&self) -> bool {
         self.transfer_type() == TransferType::WalletInternal
     }
-    fn nullifier(&self) -> Option<&::orchard::note::Nullifier> {
-        None
+    fn nullifier(&self) -> Option<::orchard::note::Nullifier> {
+        self.nullifier_bytes()
+            .and_then(|bytes| Option::from(::orchard::note::Nullifier::from_bytes(&bytes)))
     }
     fn note_commitment_tree_position(&self) -> Option<Position> {
-        None
+        self.note_commitment_tree_position()
     }
     fn recipient_key_scope(&self) -> Option<Scope> {
         if self.transfer_type() == TransferType::WalletInternal {

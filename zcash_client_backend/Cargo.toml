@@ -264,6 +264,9 @@ test-dependencies = [
 ## Exposes APIs that allow calculation of non-standard fees.
 non-standard-fees = ["zcash_primitives/non-standard-fees"]
 
+## Enables the prospective ZIP 233 (Network Sustainability Mechanism) feature.
+zip-233 = ["zcash_primitives/zip-233"]
+
 #! ### Experimental features
 
 ## Exposes unstable APIs. Their behaviour may change at any time.

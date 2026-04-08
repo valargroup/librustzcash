@@ -881,6 +881,100 @@ where
     }
 }
 
+impl<Cache, DbT, ParamsT> TestState<Cache, DbT, ParamsT>
+where
+    Cache: TestCache,
+    ParamsT: consensus::Parameters + Send + 'static,
+    DbT: InputSource + WalletTest + WalletWrite + WalletCommitmentTrees,
+    <DbT as WalletRead>::AccountId:
+        std::fmt::Debug + ConditionallySelectable + Default + Send + 'static,
+{
+    /// Decrypts, enriches, and stores a transaction, mirroring the enhancement phase
+    /// of the sync loop. Outputs are enriched with note commitment tree positions and
+    /// nullifiers via the production [`compute_enriched_outputs`] function, and the
+    /// tree is updated to maintain witnesses for the new positions.
+    ///
+    /// [`compute_enriched_outputs`]: crate::decrypt::compute_enriched_outputs
+    pub fn enhance_transaction(&mut self, tx: &Transaction, mined_height: Option<BlockHeight>) {
+        use crate::decrypt::{
+            TxBundlePositions, collect_wallet_note_positions, compute_enriched_outputs,
+            decrypt_transaction,
+        };
+
+        let ufvks = self.wallet_data.get_unified_full_viewing_keys().unwrap();
+        let chain_tip_height = self.wallet_data.chain_height().unwrap();
+        let height = mined_height.or_else(|| self.wallet_data.get_tx_height(tx.txid()).unwrap());
+        let d_tx = decrypt_transaction(&self.network, height, chain_tip_height, tx, &ufvks);
+
+        // Derive the per-pool bundle base positions from our cached fake-block metadata.
+        // Production sync derives these from lightwalletd via `fetch_tx_bundle_positions`;
+        // the test framework short-circuits that by reading the end-size of the previous
+        // block out of `cached_blocks`. If `height` falls outside what we've cached (e.g.
+        // a non-contiguous scan), we leave `positions` as `None` and let
+        // `compute_enriched_outputs` degrade to position-less enrichment, matching the
+        // production path's behavior in the same scenario.
+        let positions = height.and_then(|h| {
+            if h == BlockHeight::from(0) {
+                Some(TxBundlePositions {
+                    sapling_base: Some(0),
+                    #[cfg(feature = "orchard")]
+                    orchard_base: Some(0),
+                })
+            } else {
+                self.cached_blocks
+                    .get(&(h - 1))
+                    .map(|cb| TxBundlePositions {
+                        sapling_base: Some(cb.sapling_end_size() as u64),
+                        #[cfg(feature = "orchard")]
+                        orchard_base: Some(cb.orchard_end_size() as u64),
+                    })
+            }
+        });
+
+        let enriched = compute_enriched_outputs(tx, &d_tx, positions.as_ref(), &ufvks);
+        let wallet_note_positions = collect_wallet_note_positions(&enriched);
+        self.wallet_data.store_decrypted_tx(enriched).unwrap();
+
+        if let Some(h) = height {
+            if !wallet_note_positions.is_empty() {
+                self.wallet_data
+                    .notify_wallet_note_positions(h..h + 1, &wallet_note_positions)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Services pending enhancement requests using [`enhance_transaction`](Self::enhance_transaction).
+    pub fn service_enhancement_requests(&mut self) {
+        loop {
+            let requests = self.wallet_data.transaction_data_requests().unwrap();
+            let enhancement_txids: Vec<TxId> = requests
+                .into_iter()
+                .filter_map(|req| match req {
+                    TransactionDataRequest::Enhancement(txid) => Some(txid),
+                    _ => None,
+                })
+                .collect();
+
+            if enhancement_txids.is_empty() {
+                break;
+            }
+
+            let mut any_enhanced = false;
+            for txid in enhancement_txids {
+                if let Some(tx) = self.wallet_data.get_transaction(txid).unwrap() {
+                    self.enhance_transaction(&tx, None);
+                    any_enhanced = true;
+                }
+            }
+
+            if !any_enhanced {
+                break;
+            }
+        }
+    }
+}
+
 impl<Cache, DbT, ParamsT, AccountIdT, ErrT> TestState<Cache, DbT, ParamsT>
 where
     ParamsT: consensus::Parameters + Send + 'static,

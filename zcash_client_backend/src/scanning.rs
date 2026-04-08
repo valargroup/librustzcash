@@ -248,6 +248,24 @@ impl<AccountId: Copy + Eq + Hash + 'static> ScanningKeys<AccountId, (AccountId, 
     pub fn from_account_ufvks(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
     ) -> Self {
+        Self::from_account_ufvks_with_scopes(ufvks, &[Scope::External, Scope::Internal])
+    }
+
+    /// Constructs a [`ScanningKeys`] from an iterator of [`UnifiedFullViewingKey`]s,
+    /// using only the specified scopes for key derivation.
+    ///
+    /// Passing `&[Scope::External]` omits internal (change) keys from trial
+    /// decryption, which halves the key-agreement work per output. Change notes
+    /// are still recoverable: when a note is discovered whose nullifier matches
+    /// one already in the `nullifier_map` (from a previously-scanned block), the
+    /// spending transaction can be queued for enhancement, and
+    /// [`decrypt_and_store_transaction`] will find the change via IVK Internal.
+    ///
+    /// [`decrypt_and_store_transaction`]: crate::data_api::wallet::decrypt_and_store_transaction
+    pub fn from_account_ufvks_with_scopes(
+        ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
+        scopes: &[Scope],
+    ) -> Self {
         #![allow(clippy::type_complexity)]
 
         let mut sapling: HashMap<
@@ -262,7 +280,7 @@ impl<AccountId: Copy + Eq + Hash + 'static> ScanningKeys<AccountId, (AccountId, 
 
         for (account_id, ufvk) in ufvks {
             if let Some(dfvk) = ufvk.sapling() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     sapling.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {
@@ -277,7 +295,7 @@ impl<AccountId: Copy + Eq + Hash + 'static> ScanningKeys<AccountId, (AccountId, 
 
             #[cfg(feature = "orchard")]
             if let Some(fvk) = ufvk.orchard() {
-                for scope in [Scope::External, Scope::Internal] {
+                for &scope in scopes {
                     orchard.insert(
                         (account_id, scope),
                         Box::new(ScanningKey {

@@ -14,6 +14,24 @@ impl TransactionDataRequestQueue {
     pub fn queue_status_retrieval(&mut self, txid: &TxId) {
         self.0.push_back(TransactionDataRequest::GetStatus(*txid));
     }
+
+    pub fn queue_enhancement(&mut self, txid: &TxId) {
+        self.0.push_back(TransactionDataRequest::Enhancement(*txid));
+    }
+
+    /// Removes any pending [`TransactionDataRequest::Enhancement`] entries for
+    /// the given txid.
+    ///
+    /// This deliberately does NOT remove [`TransactionDataRequest::GetStatus`]
+    /// entries: `store_decrypted_tx` queues fresh `GetStatus` requests for
+    /// unmined transparent-bundle transactions, and those need to survive the
+    /// end-of-function cleanup so the sync orchestrator can later poll for
+    /// their mined status. Removing them here would silently drop the work
+    /// `store_decrypted_tx` just queued.
+    pub fn remove_enhancement_entries_for_txid(&mut self, txid: &TxId) {
+        self.0
+            .retain(|req| !matches!(req, TransactionDataRequest::Enhancement(id) if id == txid));
+    }
 }
 
 impl Deref for TransactionDataRequestQueue {
@@ -21,6 +39,64 @@ impl Deref for TransactionDataRequestQueue {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_txid(byte: u8) -> TxId {
+        TxId::from_bytes([byte; 32])
+    }
+
+    /// Regression test for the bug where the end-of-`store_decrypted_tx`
+    /// cleanup wiped both `Enhancement` and `GetStatus` entries for the
+    /// stored txid, silently dropping `GetStatus` requests that
+    /// `store_decrypted_tx` had just queued for unmined transparent-bundle
+    /// transactions.
+    #[test]
+    fn remove_enhancement_entries_for_txid_preserves_get_status() {
+        let tx_a = make_txid(1);
+        let tx_b = make_txid(2);
+        let mut queue = TransactionDataRequestQueue::new();
+        queue.queue_enhancement(&tx_a);
+        queue.queue_status_retrieval(&tx_a);
+        queue.queue_enhancement(&tx_b);
+        queue.queue_status_retrieval(&tx_b);
+
+        queue.remove_enhancement_entries_for_txid(&tx_a);
+
+        let remaining: Vec<_> = queue.0.iter().collect();
+        assert_eq!(
+            remaining.len(),
+            3,
+            "should have removed exactly one entry (the Enhancement for tx_a)"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|r| matches!(r, TransactionDataRequest::GetStatus(t) if *t == tx_a)),
+            "GetStatus(tx_a) must survive remove_enhancement_entries_for_txid(&tx_a)"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|r| matches!(r, TransactionDataRequest::Enhancement(t) if *t == tx_b)),
+            "Enhancement(tx_b) must survive (different txid)"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|r| matches!(r, TransactionDataRequest::GetStatus(t) if *t == tx_b)),
+            "GetStatus(tx_b) must survive (different txid)"
+        );
+        assert!(
+            !remaining
+                .iter()
+                .any(|r| matches!(r, TransactionDataRequest::Enhancement(t) if *t == tx_a)),
+            "Enhancement(tx_a) should have been removed"
+        );
     }
 }
 

@@ -528,6 +528,24 @@ pub(crate) mod tests {
         testing::pool::change_note_spends_succeed::<OrchardPoolTester>()
     }
 
+    #[cfg(feature = "sync")]
+    #[test]
+    fn enhancement_cascade_survives_pruning() {
+        testing::pool::enhancement_cascade_survives_pruning::<OrchardPoolTester>()
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn pruning_wipes_late_discovered_spend_locator() {
+        testing::pool::pruning_wipes_late_discovered_spend_locator::<OrchardPoolTester>()
+    }
+
+    #[cfg(feature = "sync")]
+    #[test]
+    fn v_transactions_hides_unenhanced_txs() {
+        testing::pool::v_transactions_hides_unenhanced_txs::<OrchardPoolTester>()
+    }
+
     #[test]
     fn account_deletion() {
         testing::pool::account_deletion::<OrchardPoolTester>()

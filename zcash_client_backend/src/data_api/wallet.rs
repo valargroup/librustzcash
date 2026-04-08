@@ -49,6 +49,7 @@ use crate::{
         Account, MaxSpendMode, SentTransaction, SentTransactionOutput, WalletCommitmentTrees,
         WalletRead, WalletWrite, error::Error, wallet::input_selection::propose_send_max,
     },
+    decrypt::compute_enriched_outputs,
     decrypt_transaction,
     fees::{
         ChangeStrategy, DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy,
@@ -204,6 +205,22 @@ impl<AccountId: Copy> PcztRecipient<AccountId> {
 
 /// Scans a [`Transaction`] for any information that can be decrypted by the accounts in
 /// the wallet, and saves it to the wallet.
+///
+/// In addition to running [`decrypt_transaction`] over the input transaction, this
+/// function enriches the resulting [`crate::data_api::DecryptedTransaction`] via
+/// `crate::decrypt::compute_enriched_outputs` so that any change notes recovered via
+/// Internal-IVK decryption have their nullifier metadata populated. Without this
+/// enrichment, change notes would be stored in the wallet without nullifiers, and
+/// subsequent transactions that spend those change notes would fail to mark them as
+/// spent — resulting in an inflated wallet balance.
+///
+/// Because this entry point does not have access to a block source, it cannot compute
+/// per-output Sapling note commitment tree positions; the enrichment is therefore best-effort
+/// for Sapling. Orchard nullifiers do not depend on note positions, so they ARE populated
+/// regardless. Callers that require Sapling nullifier population should use the
+/// [`crate::sync`] module's enhancement pipeline (which fetches block contents from
+/// lightwalletd to derive positions) or pass enriched transactions directly via
+/// [`WalletWrite::store_decrypted_tx`].
 pub fn decrypt_and_store_transaction<ParamsT, DbT>(
     params: &ParamsT,
     data: &mut DbT,
@@ -217,13 +234,23 @@ where
     // Fetch the UnifiedFullViewingKeys we are tracking
     let ufvks = data.get_unified_full_viewing_keys()?;
 
-    data.store_decrypted_tx(decrypt_transaction(
-        params,
-        mined_height.map_or_else(|| data.get_tx_height(tx.txid()), |h| Ok(Some(h)))?,
-        data.chain_height()?,
-        tx,
-        &ufvks,
-    ))?;
+    let resolved_height =
+        mined_height.map_or_else(|| data.get_tx_height(tx.txid()), |h| Ok(Some(h)))?;
+    let chain_tip = data.chain_height()?;
+
+    let d_tx = decrypt_transaction(params, resolved_height, chain_tip, tx, &ufvks);
+
+    // Enrich the decrypted outputs with nullifier metadata. We do not have access
+    // to bundle base positions here (computing them requires block contents), so
+    // Sapling nullifiers will be left unset; Orchard nullifiers ARE populated
+    // because they are derived from the note + FVK alone, without dependence on
+    // the note's commitment tree position. This is sufficient to enable
+    // `mark_notes_spent` to detect spends of Orchard change notes in subsequent
+    // transactions, which is the primary failure mode this enrichment guards
+    // against.
+    let d_tx = compute_enriched_outputs(tx, &d_tx, None, &ufvks);
+
+    data.store_decrypted_tx(d_tx)?;
 
     Ok(())
 }

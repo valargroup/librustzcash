@@ -508,11 +508,9 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         tracing::debug!("get_transaction: {:?}", txid);
         self.tx_table
             .get(&txid)
-            .map(|tx| (tx.status(), tx.expiry_height(), tx.raw()))
+            .filter(|tx| tx.raw().is_some())
+            .map(|tx| (tx.status(), tx.expiry_height(), tx.raw().unwrap()))
             .map(|(status, expiry_height, raw)| {
-                let raw = raw.ok_or_else(|| {
-                    Self::Error::CorruptedData("Transaction raw data not found".to_string())
-                })?;
 
                 // We need to provide a consensus branch ID so that pre-v5 `Transaction` structs
                 // (which don't commit directly to one) can store it internally.
