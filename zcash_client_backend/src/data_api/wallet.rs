@@ -1121,7 +1121,9 @@ where
                         result
                     }
                     None => {
-                        tracing::info!("[PIR-DEBUG] Using PIR path with empty Orchard tree (no shielded inputs)");
+                        tracing::info!(
+                            "[PIR-DEBUG] Using PIR path with empty Orchard tree (no shielded inputs)"
+                        );
                         (Some(orchard::Anchor::empty_tree()), vec![])
                     }
                 };
@@ -1584,7 +1586,6 @@ where
         utxos_spent,
     })
 }
-
 
 /// Retrieves a `MerklePath` for each Orchard note from PIR-stored witness data.
 /// All PIR witnesses must share the same anchor root; that root becomes the

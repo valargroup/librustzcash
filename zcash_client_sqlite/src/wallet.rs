@@ -2157,8 +2157,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
 
         // If spendability-pir is enabled, we can use the pir_witness_data table to check if the note has a witness.
         // For non-Orchard notes or when spendability-pir is disabled, we can use the shard tree to check if the note is spendable.
-        let pir_witness_available =
-            cfg!(feature = "spendability-pir") && table_prefix == "orchard";
+        let pir_witness_available = cfg!(feature = "spendability-pir") && table_prefix == "orchard";
         let any_spendable = if pir_witness_available {
             true
         } else {

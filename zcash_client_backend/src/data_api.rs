@@ -3181,7 +3181,7 @@ pub trait WalletCommitmentTrees {
     /// given commitment tree position. Returns the path, anchor height, and anchor root.
     ///
     /// The default implementation returns `Ok(None)`, indicating no PIR witness is
-    /// available. See [`zcash_client_sqlite::WalletDb`] for the production implementation
+    /// available. See `zcash_client_sqlite::WalletDb` for the production implementation
     /// backed by the `pir_witness_data` table.
     #[cfg(feature = "orchard")]
     fn get_pir_orchard_merkle_path(

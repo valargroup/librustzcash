@@ -614,7 +614,10 @@ pub fn fetch_witnesses_via_pir(
     let t0 = std::time::Instant::now();
     let client = witness_client::WitnessClientBlocking::connect(server_url)
         .map_err(|e| PirClientError::ConnectionFailed(e.to_string()))?;
-    tracing::info!(elapsed_ms = t0.elapsed().as_millis(), "PIR witness fetch: connected");
+    tracing::info!(
+        elapsed_ms = t0.elapsed().as_millis(),
+        "PIR witness fetch: connected"
+    );
 
     let positions: Vec<u64> = requests.iter().map(|r| r.position).collect();
 
@@ -770,9 +773,7 @@ pub mod testing {
     /// ordered by id.
     pub fn query_orchard_notes(conn: &Connection) -> Vec<(i64, i64)> {
         let mut stmt = conn
-            .prepare(
-                "SELECT id, commitment_tree_position FROM orchard_received_notes ORDER BY id",
-            )
+            .prepare("SELECT id, commitment_tree_position FROM orchard_received_notes ORDER BY id")
             .unwrap();
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
@@ -810,6 +811,8 @@ mod tests {
     #[cfg(feature = "orchard")]
     use std::convert::Infallible;
     #[cfg(feature = "orchard")]
+    use testing::{delete_orchard_checkpoints, mark_shards_unscanned, query_orchard_notes};
+    #[cfg(feature = "orchard")]
     use zcash_client_backend::{
         data_api::{
             Account as _,
@@ -823,8 +826,6 @@ mod tests {
     use zcash_protocol::value::Zatoshis;
     #[cfg(feature = "orchard")]
     use zip321::Payment;
-    #[cfg(feature = "orchard")]
-    use testing::{delete_orchard_checkpoints, mark_shards_unscanned, query_orchard_notes};
 
     #[cfg(feature = "orchard")]
     macro_rules! real_orchard_witness_fixture {
@@ -1618,15 +1619,11 @@ mod tests {
 
         let mut expected_server_root = current;
         for level in SHARD_HEIGHT..(TREE_DEPTH as u8) {
-            expected_server_root =
-                hash_combine(level, &expected_server_root, &empty_root(level));
+            expected_server_root = hash_combine(level, &expected_server_root, &empty_root(level));
         }
 
-        let server_anchor_root = compute_root_from_path(
-            server_position,
-            &server_leaves[leaf_idx],
-            &server_siblings,
-        );
+        let server_anchor_root =
+            compute_root_from_path(server_position, &server_leaves[leaf_idx], &server_siblings);
         let server_anchor_height = anchor_height;
 
         assert_eq!(server_anchor_root, expected_server_root);
