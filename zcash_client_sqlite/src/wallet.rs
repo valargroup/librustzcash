@@ -163,6 +163,7 @@ pub mod init;
 pub(crate) mod orchard;
 pub(crate) mod sapling;
 pub(crate) mod scanning;
+pub mod spendability_pir;
 #[cfg(feature = "transparent-inputs")]
 pub(crate) mod transparent;
 
@@ -2154,20 +2155,32 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         let untrusted_height =
             target_height.saturating_sub(u32::from(confirmations_policy.untrusted()));
 
-        let any_spendable =
-            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?;
+        // If spendability-pir is enabled, we can use the pir_witness_data table to check if the note has a witness.
+        // For non-Orchard notes or when spendability-pir is disabled, we can use the shard tree to check if the note is spendable.
+        let pir_witness_available =
+            cfg!(feature = "spendability-pir") && table_prefix == "orchard";
+        let any_spendable = if pir_witness_available {
+            true
+        } else {
+            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?
+        };
+
+        let pw_join = common::pir_witness_join(pir_witness_available);
+        let pw_col = common::pir_witness_select_col(pir_witness_available);
 
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
                     scan_state.max_priority,
                     t.mined_height AS mined_height,
                     MAX(tt.mined_height) AS max_shielding_input_height
+                    {pw_col}
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
              LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
                 ON rn.commitment_tree_position >= scan_state.start_position
                 AND rn.commitment_tree_position < scan_state.end_position_exclusive
+             {pw_join}
              LEFT OUTER JOIN transparent_received_output_spends ros
                 ON ros.transaction_id = t.id_tx
              LEFT OUTER JOIN transparent_received_outputs tro
@@ -2216,6 +2229,8 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                 },
             )?;
 
+            let has_pir_witness = common::read_pir_witness_flag(row, pir_witness_available)?;
+
             let received_height = row
                 .get::<_, Option<u32>>("mined_height")?
                 .map(BlockHeight::from);
@@ -2228,7 +2243,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             // the shard that its witness resides in is sufficiently scanned that we can construct
             // the witness for the note, and the note has enough confirmations to be spent.
             let is_spendable = any_spendable
-                && max_priority <= ScanPriority::Scanned
+                && (max_priority <= ScanPriority::Scanned || has_pir_witness)
                 && match recipient_key_scope {
                     Some(KeyScope::INTERNAL) => {
                         // The note was has at least `trusted` confirmations.
@@ -3319,6 +3334,10 @@ pub(crate) fn truncate_to_height<P: consensus::Parameters>(
          WHERE mined_height > :height",
         named_params![":height": u32::from(truncation_height)],
     )?;
+
+    // Clear PIR witness data — the authentication paths are bound to a specific
+    // anchor height that may no longer be valid after a reorg.
+    conn.execute("DELETE FROM pir_witness_data", [])?;
 
     // If we're removing scanned blocks, we need to truncate the note commitment tree and remove
     // affected block records from the database.

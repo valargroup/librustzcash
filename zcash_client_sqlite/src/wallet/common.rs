@@ -121,6 +121,50 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
     )
 }
 
+/// SQL `LEFT OUTER JOIN` clause for PIR witness data, or empty when
+/// `is_orchard` is false. Pairs with [`pir_witness_select_col`].
+pub(crate) fn pir_witness_join(is_orchard: bool) -> &'static str {
+    if is_orchard {
+        "LEFT OUTER JOIN pir_witness_data pw ON pw.note_id = rn.id"
+    } else {
+        ""
+    }
+}
+
+/// SQL select-list column that evaluates to `1` when a PIR witness exists,
+/// or empty when `is_orchard` is false. Pairs with [`pir_witness_join`].
+pub(crate) fn pir_witness_select_col(is_orchard: bool) -> &'static str {
+    if is_orchard {
+        ", CASE WHEN pw.note_id IS NOT NULL THEN 1 ELSE 0 END AS has_pir_witness"
+    } else {
+        ""
+    }
+}
+
+/// Reads the `has_pir_witness` column added by [`pir_witness_select_col`],
+/// returning `false` when the column is absent.
+pub(crate) fn read_pir_witness_flag(
+    row: &rusqlite::Row<'_>,
+    is_orchard: bool,
+) -> Result<bool, rusqlite::Error> {
+    if is_orchard {
+        row.get::<_, bool>("has_pir_witness")
+    } else {
+        Ok(false)
+    }
+}
+
+/// Returns the SQL condition for the shard-scanned gate in coin selection.
+///
+/// For Orchard, also accepts notes that have a PIR witness.
+fn shard_scanned_condition(protocol: ShieldedProtocol) -> &'static str {
+    if matches!(protocol, ShieldedProtocol::Orchard) {
+        return "scan_state.max_priority <= :scanned_priority \
+                OR EXISTS (SELECT 1 FROM pir_witness_data pw WHERE pw.note_id = rn.id)";
+    }
+    "scan_state.max_priority <= :scanned_priority"
+}
+
 fn unscanned_tip_exists(
     conn: &Connection,
     anchor_height: BlockHeight,
@@ -376,6 +420,10 @@ where
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
 
+    let is_orchard = matches!(protocol, ShieldedProtocol::Orchard);
+    let pw_join = pir_witness_join(is_orchard);
+    let pw_col = pir_witness_select_col(is_orchard);
+
     // Select all unspent notes belonging to the given account, ignoring dust notes.
     let mut stmt_select_notes = conn.prepare_cached(&format!(
         "SELECT
@@ -387,12 +435,14 @@ where
              IFNULL(t.trust_status, 0) AS trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
              MIN(IFNULL(tt.trust_status, 0)) AS min_shielding_input_trust
+             {pw_col}
          FROM {table_prefix}_received_notes rn
          INNER JOIN accounts ON accounts.id = rn.account_id
          INNER JOIN transactions t ON t.id_tx = rn.transaction_id
          LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
             ON rn.commitment_tree_position >= scan_state.start_position
             AND rn.commitment_tree_position < scan_state.end_position_exclusive
+         {pw_join}
          LEFT OUTER JOIN transparent_received_output_spends ros
             ON ros.transaction_id = t.id_tx
          LEFT OUTER JOIN transparent_received_outputs tro
@@ -437,6 +487,7 @@ where
             let max_priority_raw = row.get::<_, Option<i64>>("max_priority")?;
             let tx_trust_status = row.get::<_, bool>("trust_status")?;
             let tx_shielding_inputs_trusted = row.get::<_, bool>("min_shielding_input_trust")?;
+            let has_pir_witness = read_pir_witness_flag(row, is_orchard)?;
             let shard_scan_priority = max_priority_raw
                 .map(|code| {
                     parse_priority_code(code).ok_or_else(|| {
@@ -450,6 +501,7 @@ where
             Ok((
                 result_note,
                 shard_scan_priority,
+                has_pir_witness,
                 tx_trust_status,
                 tx_shielding_inputs_trusted,
             ))
@@ -462,10 +514,17 @@ where
 
     row_results
         .map(|t| match t? {
-            (Some(note), max_shard_priority, trusted, tx_shielding_inputs_trusted) => {
+            (
+                Some(note),
+                max_shard_priority,
+                has_pir_witness,
+                trusted,
+                tx_shielding_inputs_trusted,
+            ) => {
                 let shard_scanned = max_shard_priority
                     .iter()
-                    .any(|p| *p <= ScanPriority::Scanned);
+                    .any(|p| *p <= ScanPriority::Scanned)
+                    || has_pir_witness;
 
                 let mined_at_anchor = note
                     .mined_height()
@@ -540,9 +599,15 @@ where
         note_reconstruction_cols,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
-    if unscanned_tip_exists(conn, anchor_height, table_prefix)? {
+    let skip_unscanned_check = matches!(protocol, ShieldedProtocol::Orchard);
+
+    if !skip_unscanned_check && unscanned_tip_exists(conn, anchor_height, table_prefix)? {
         return Ok(vec![]);
     }
+
+    // With witness PIR, Orchard notes that have a PIR-obtained authentication path
+    // can be spent even when their shard is not fully scanned.
+    let shard_scanned_condition = shard_scanned_condition(protocol);
 
     // The goal of this SQL statement is to select the oldest notes until the required
     // value has been reached.
@@ -588,10 +653,7 @@ where
              AND accounts.ufvk IS NOT NULL
              AND recipient_key_scope IS NOT NULL
              AND nf IS NOT NULL
-             -- the shard containing the note is fully scanned; this condition will exclude
-             -- notes for which `scan_state.max_priority IS NULL` (which will also arise if
-             -- `rn.commitment_tree_position IS NULL`; hence we don't need that explicit filter)
-             AND scan_state.max_priority <= :scanned_priority
+             AND ({shard_scanned_condition})
              AND t.block <= :anchor_height
              AND rn.id NOT IN rarray(:exclude)
              AND rn.id NOT IN ({})
