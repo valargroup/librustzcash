@@ -27,9 +27,6 @@ workspace.
     should override this to prune entries below the pruning horizon. Callers
     must only invoke it after the `TransactionDataRequest` queue has been
     drained for the range being pruned.
-  - `ll::wallet::PRUNING_DEPTH` is now `pub` (previously `pub(crate)`) so the
-    `sync` module and external sync drivers can pass it to
-    `prune_tracked_nullifiers`.
 - `zcash_client_backend::decrypt`:
   - `DecryptedOutput::nullifier_bytes`
   - `DecryptedOutput::note_commitment_tree_position`

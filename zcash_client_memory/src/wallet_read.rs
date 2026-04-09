@@ -508,7 +508,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         tracing::debug!("get_transaction: {:?}", txid);
         self.tx_table
             .get(&txid)
-            .filter(|tx| tx.raw().is_some())
+            .filter(|tx| {
+                if tx.raw().is_none() {
+                    tracing::debug!("get_transaction({txid:?}): entry exists but raw is None; treating as not-yet-enhanced");
+                    false
+                } else {
+                    true
+                }
+            })
             .map(|tx| (tx.status(), tx.expiry_height(), tx.raw().unwrap()))
             .map(|(status, expiry_height, raw)| {
 

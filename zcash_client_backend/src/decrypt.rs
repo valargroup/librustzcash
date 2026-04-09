@@ -343,17 +343,17 @@ pub fn compute_enriched_outputs<'a, AccountId: Copy + std::hash::Hash + Eq>(
         .sapling_outputs()
         .iter()
         .map(|output| {
-            let scope = match output.transfer_type() {
-                TransferType::WalletInternal => Scope::Internal,
-                TransferType::Incoming => Scope::External,
-                TransferType::Outgoing => Scope::External,
-            };
             let position = positions
                 .and_then(|pos| pos.sapling_base)
                 .map(|base| Position::from(base + output.index() as u64));
             let nullifier_bytes = if output.transfer_type() == TransferType::Outgoing {
                 None
             } else {
+                let scope = match output.transfer_type() {
+                    TransferType::WalletInternal => Scope::Internal,
+                    TransferType::Incoming => Scope::External,
+                    TransferType::Outgoing => unreachable!(),
+                };
                 position.and_then(|position| {
                     ufvks
                         .get(output.account())

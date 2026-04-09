@@ -906,13 +906,13 @@ where
         let height = mined_height.or_else(|| self.wallet_data.get_tx_height(tx.txid()).unwrap());
         let d_tx = decrypt_transaction(&self.network, height, chain_tip_height, tx, &ufvks);
 
-        // Derive the per-pool bundle base positions from our cached fake-block metadata.
-        // Production sync derives these from lightwalletd via `fetch_tx_bundle_positions`;
-        // the test framework short-circuits that by reading the end-size of the previous
-        // block out of `cached_blocks`. If `height` falls outside what we've cached (e.g.
-        // a non-contiguous scan), we leave `positions` as `None` and let
-        // `compute_enriched_outputs` degrade to position-less enrichment, matching the
-        // production path's behavior in the same scenario.
+        // Derive the per-pool bundle base positions, mirroring the production
+        // `fetch_tx_bundle_positions` logic: start from the previous block's tree
+        // end-size, then add outputs from any preceding transactions in the same
+        // block. If `height` falls outside what we've cached (e.g. a non-contiguous
+        // scan), we leave `positions` as `None` and let `compute_enriched_outputs`
+        // degrade to position-less enrichment, matching production behavior.
+        let txid = tx.txid();
         let positions = height.and_then(|h| {
             if h == BlockHeight::from(0) {
                 Some(TxBundlePositions {
@@ -921,13 +921,36 @@ where
                     orchard_base: Some(0),
                 })
             } else {
-                self.cached_blocks
-                    .get(&(h - 1))
-                    .map(|cb| TxBundlePositions {
-                        sapling_base: Some(cb.sapling_end_size() as u64),
-                        #[cfg(feature = "orchard")]
-                        orchard_base: Some(cb.orchard_end_size() as u64),
+                let prev = self.cached_blocks.get(&(h - 1))?;
+                let mut sapling_base = prev.sapling_end_size() as u64;
+                #[cfg(feature = "orchard")]
+                let mut orchard_base = prev.orchard_end_size() as u64;
+
+                // Read the compact block from the cache to find the tx's
+                // position and sum shielded outputs from preceding txs.
+                use crate::data_api::chain::BlockSource;
+                self.cache
+                    .block_source()
+                    .with_blocks::<_, Infallible>(Some(h), Some(1), |block| {
+                        for vtx in &block.vtx {
+                            if vtx.txid() == txid {
+                                break;
+                            }
+                            sapling_base += vtx.outputs.len() as u64;
+                            #[cfg(feature = "orchard")]
+                            {
+                                orchard_base += vtx.actions.len() as u64;
+                            }
+                        }
+                        Ok(())
                     })
+                    .ok();
+
+                Some(TxBundlePositions {
+                    sapling_base: Some(sapling_base),
+                    #[cfg(feature = "orchard")]
+                    orchard_base: Some(orchard_base),
+                })
             }
         });
 

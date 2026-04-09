@@ -1165,6 +1165,11 @@ where
 
         if let Some(leaf) = leaf {
             tree.batch_insert(position, std::iter::once((leaf, Retention::Marked)))?;
+        } else {
+            tracing::warn!(
+                "mark_positions: leaf not found at position {position:?}; \
+                 note at this position will not be spendable until the shard is populated"
+            );
         }
     }
 

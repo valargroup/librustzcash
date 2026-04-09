@@ -630,7 +630,7 @@ where
         .map_err(Error::Wallet)?;
     let chain_tip_height = db_data.chain_height().map_err(Error::Wallet)?;
     let d_tx = decrypt_transaction(params, mined_height, chain_tip_height, &tx, &ufvks);
-    let d_tx = enrich_decrypted_transaction(client, params, db_data, &tx, d_tx, &ufvks).await?;
+    let d_tx = enrich_decrypted_transaction(client, db_data, &tx, d_tx, &ufvks).await?;
     let wallet_note_positions = collect_wallet_note_positions(&d_tx);
     db_data.store_decrypted_tx(d_tx).map_err(Error::Wallet)?;
     if let Some(height) = mined_height {
@@ -654,9 +654,8 @@ where
 /// transactions (or pure-transparent txs with no shielded bundle) the position lookup is
 /// skipped; Sapling outputs remain without nullifiers, but Orchard outputs still get
 /// nullifiers because Orchard nullifier computation does not depend on tree position.
-async fn enrich_decrypted_transaction<'a, P, ChT, DbT, CaErr, TrErr>(
+async fn enrich_decrypted_transaction<'a, ChT, DbT, CaErr, TrErr>(
     client: &mut CompactTxStreamerClient<ChT>,
-    _params: &P,
     db_data: &DbT,
     tx: &'a Transaction,
     d_tx: crate::data_api::DecryptedTransaction<'a, Transaction, DbT::AccountId>,
@@ -666,7 +665,6 @@ async fn enrich_decrypted_transaction<'a, P, ChT, DbT, CaErr, TrErr>(
     Error<CaErr, DbT::Error, TrErr>,
 >
 where
-    P: Parameters + Send + 'static,
     ChT: GrpcService<TonicBody>,
     ChT::Error: Into<StdError>,
     ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
@@ -750,28 +748,32 @@ where
         .position(|tx| tx.txid() == txid)
         .ok_or(Error::MisbehavingServer)?;
 
-    let prior_sapling_tree_size = if height == BlockHeight::from(0) {
-        0
-    } else if let Some(meta) = db_data.block_metadata(height - 1).map_err(Error::Wallet)? {
-        meta.sapling_tree_size().map(u64::from).unwrap_or(0)
-    } else {
-        download_chain_state(client, height - 1)
-            .await?
-            .final_sapling_tree()
-            .tree_size()
-    };
-
+    // Fetch prior-block metadata once (not per-pool) to avoid redundant DB
+    // queries and, on cache miss, redundant gRPC round-trips.
+    let prior_sapling_tree_size;
     #[cfg(feature = "orchard")]
-    let prior_orchard_tree_size = if height == BlockHeight::from(0) {
-        0
+    let prior_orchard_tree_size;
+
+    if height == BlockHeight::from(0) {
+        prior_sapling_tree_size = 0;
+        #[cfg(feature = "orchard")]
+        {
+            prior_orchard_tree_size = 0;
+        }
     } else if let Some(meta) = db_data.block_metadata(height - 1).map_err(Error::Wallet)? {
-        meta.orchard_tree_size().map(u64::from).unwrap_or(0)
+        prior_sapling_tree_size = meta.sapling_tree_size().map(u64::from).unwrap_or(0);
+        #[cfg(feature = "orchard")]
+        {
+            prior_orchard_tree_size = meta.orchard_tree_size().map(u64::from).unwrap_or(0);
+        }
     } else {
-        download_chain_state(client, height - 1)
-            .await?
-            .final_orchard_tree()
-            .tree_size()
-    };
+        let state = download_chain_state(client, height - 1).await?;
+        prior_sapling_tree_size = state.final_sapling_tree().tree_size();
+        #[cfg(feature = "orchard")]
+        {
+            prior_orchard_tree_size = state.final_orchard_tree().tree_size();
+        }
+    }
 
     Ok(TxBundlePositions {
         sapling_base: Some(

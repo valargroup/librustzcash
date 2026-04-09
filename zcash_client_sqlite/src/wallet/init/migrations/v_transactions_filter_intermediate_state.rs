@@ -169,6 +169,10 @@ impl RusqliteMigration for Migration {
                  ON sent_note_counts.account_id = notes.account_id
                  AND sent_note_counts.transaction_id = notes.transaction_id
             GROUP BY notes.account_id, notes.transaction_id
+            -- NOTE: This HAVING clause is duplicated in the inline VIEW_TRANSACTIONS
+            -- constant at wallet/db.rs. If you modify it here, update that constant
+            -- as well (and vice versa).
+            --
             -- Hide transactions whose DB state is transiently inconsistent during
             -- sync, to prevent v_transactions from reporting a wrong balance delta
             -- in the brief window between when pieces of the transaction are

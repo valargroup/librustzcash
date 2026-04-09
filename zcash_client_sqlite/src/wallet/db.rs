@@ -1084,6 +1084,10 @@ LEFT JOIN sent_note_counts
      ON sent_note_counts.account_id = notes.account_id
      AND sent_note_counts.transaction_id = notes.transaction_id
 GROUP BY notes.account_id, notes.transaction_id
+-- NOTE: This HAVING clause is duplicated in the migration at
+-- wallet/init/migrations/v_transactions_filter_intermediate_state.rs.
+-- If you modify it here, update the migration as well (and vice versa).
+--
 -- Hide transactions whose DB state is transiently inconsistent during
 -- sync, to prevent v_transactions from reporting a wrong balance delta
 -- in the brief window between when pieces of the transaction are

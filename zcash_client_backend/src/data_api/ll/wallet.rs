@@ -49,7 +49,7 @@ use {crate::data_api::ORCHARD_SHARD_HEIGHT, shardtree::store::Checkpoint};
 /// The maximum number of blocks the wallet is allowed to rewind. This is
 /// consistent with the bound in zcashd, and allows block data deeper than
 /// this delta from the chain tip to be pruned.
-pub const PRUNING_DEPTH: u32 = 100;
+pub(crate) const PRUNING_DEPTH: u32 = 100;
 
 #[derive(Debug)]
 struct TransparentSentOutput<AccountId> {
