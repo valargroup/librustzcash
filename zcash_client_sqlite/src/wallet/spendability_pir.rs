@@ -1346,7 +1346,7 @@ mod tests {
     /// `create_proposed_transactions` with `use_pir_witnesses = true` uses
     /// PIR-stored witnesses and anchors to build a valid Orchard spend, even
     /// when ShardTree checkpoints are unavailable.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn pir_witness_fallback_creates_transaction() {
         let (mut st, account, note_id, _pos, siblings, anchor_root, anchor_height) =
@@ -1408,7 +1408,7 @@ mod tests {
     /// A server-produced witness for the wallet's actual note commitment is
     /// rejected if tampered before insert, but succeeds end-to-end when
     /// inserted honestly and consumed via `use_pir_witnesses = true`.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn pir_witness_server_round_trip_inserts_and_spends_real_note() {
         use incrementalmerkletree::{Hashable, Level};
@@ -1702,7 +1702,7 @@ mod tests {
 
     /// When no PIR witness is stored for a note, transaction creation should
     /// fail rather than silently produce an invalid spend.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn pir_witness_missing_fails_transaction() {
         use zcash_client_backend::data_api::testing::{AddressType, TestBuilder};
@@ -1766,7 +1766,7 @@ mod tests {
     /// When two notes have PIR witnesses with different anchor roots,
     /// transaction creation should fail because the Orchard bundle requires a
     /// single anchor.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn pir_witness_anchor_mismatch_fails_transaction() {
         use zcash_client_backend::data_api::WalletCommitmentTrees;
@@ -1880,7 +1880,7 @@ mod tests {
     /// Coin selection includes a note whose shard is NOT fully scanned when a
     /// PIR witness is available. Exercises the `OR EXISTS` branch of
     /// `shard_scanned_condition`.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn pir_witness_enables_selection_for_unscanned_shard() {
         let (mut st, account, note_id, _pos, siblings, anchor_root, anchor_height) =
