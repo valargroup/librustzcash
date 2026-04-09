@@ -2797,9 +2797,8 @@ impl AccountBirthday {
 ///
 /// An account is treated as having a single root of spending authority that spans the shielded and
 /// transparent rules for the purpose of balance, transaction listing, and so forth. However,
-/// transparent keys imported via `WalletWrite::import_standalone_transparent_pubkey` or
-/// `WalletWrite::import_standalone_transparent_script` (both gated on the
-/// `transparent-key-import` feature) break this abstraction slightly, so
+/// transparent keys imported via [`WalletWrite::import_standalone_transparent_pubkey`] or
+/// [`WalletWrite::import_standalone_transparent_script`] break this abstraction slightly, so
 /// wallets using this API need to be cautious to enforce the invariant that the wallet either
 /// maintains access to the keys required to spend **ALL** outputs received by the account, or that
 /// it **DOES NOT** offer any spending capability for the account, i.e. the account is treated as

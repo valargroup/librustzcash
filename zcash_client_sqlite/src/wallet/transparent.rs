@@ -624,7 +624,6 @@ pub(crate) fn reserve_next_n_addresses<P: consensus::Parameters>(
     Ok(addresses_to_reserve
         .into_iter()
         .map(|(id, addr, meta)| {
-            #[allow(irrefutable_let_patterns)]
             if let TransparentAddressSource::Derived { address_index, .. } = meta.source() {
                 (
                     id,
