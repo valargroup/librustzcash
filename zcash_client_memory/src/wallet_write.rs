@@ -606,6 +606,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         Ok(())
     }
 
+    fn notify_wallet_note_positions(
+        &mut self,
+        block_range: Range<BlockHeight>,
+        wallet_note_positions: &[(ShieldedProtocol, Position)],
+    ) -> Result<(), Self::Error> {
+        self.scan_complete(block_range, wallet_note_positions)
+    }
+
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(
         &mut self,
