@@ -53,13 +53,6 @@ pub struct PirWitnessRow {
     pub anchor_root: [u8; 32],
 }
 
-/// A note that has a PIR witness but whose shard hasn't caught up yet.
-pub struct PirWitnessedNote {
-    pub note_id: i64,
-    pub value: u64,
-    pub anchor_height: u64,
-}
-
 #[cfg(feature = "orchard")]
 type PirWitnessResult =
     Result<Option<(MerklePath<MerkleHashOrchard, 32>, u64, [u8; 32])>, SqliteClientError>;
@@ -103,15 +96,6 @@ const NOTES_NEEDING_WITNESS_SQL: &str = "\
     AND NOT EXISTS ( \
         SELECT 1 FROM orchard_received_note_spends sp \
         WHERE sp.orchard_received_note_id = rn.id \
-    )";
-
-const WITNESSED_NOTES_SQL: &str = "\
-    SELECT pw.note_id, rn.value, pw.anchor_height \
-    FROM pir_witness_data pw \
-    JOIN orchard_received_notes rn ON pw.note_id = rn.id \
-    WHERE NOT EXISTS ( \
-        SELECT 1 FROM orchard_received_note_spends sp \
-        WHERE sp.orchard_received_note_id = pw.note_id \
     )";
 
 // =========================================================================
@@ -243,37 +227,6 @@ pub fn get_pir_witness(
             }))
         }
     }
-}
-
-/// Returns notes that have PIR witnesses and are still unspent.
-pub fn get_pir_witnessed_notes(
-    conn: &Connection,
-) -> Result<Vec<PirWitnessedNote>, SqliteClientError> {
-    let mut stmt = conn.prepare(WITNESSED_NOTES_SQL)?;
-
-    let notes = stmt
-        .query_map([], |row| {
-            let note_id: i64 = row.get(0)?;
-            let value: i64 = row.get(1)?;
-            let anchor_height: i64 = row.get(2)?;
-            Ok(PirWitnessedNote {
-                note_id,
-                value: value as u64,
-                anchor_height: anchor_height as u64,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(notes)
-}
-
-/// DEBUG-ONLY — remove before merge.
-///
-/// Deletes all rows from the `pir_witness_data` table and returns the number
-/// of rows removed. Used by the debug screen to reset PIR state.
-pub fn delete_all_pir_witnesses(conn: &Connection) -> Result<u64, SqliteClientError> {
-    let deleted = conn.execute("DELETE FROM pir_witness_data", [])?;
-    Ok(deleted as u64)
 }
 
 /// Checks whether a PIR witness exists for the given note.
@@ -995,46 +948,6 @@ mod tests {
         assert_eq!(row.siblings, siblings);
         assert_eq!(row.anchor_height, 100);
         assert_eq!(row.anchor_root, root);
-    }
-
-    // =====================================================================
-    // Witnessed notes
-    // =====================================================================
-
-    #[test]
-    fn witnessed_notes_empty_when_no_witnesses() {
-        let db = PirTestDb::new();
-        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
-
-        let notes = get_pir_witnessed_notes(db.conn()).unwrap();
-        assert!(notes.is_empty());
-    }
-
-    #[test]
-    fn witnessed_notes_returns_unspent_with_witness() {
-        let db = PirTestDb::new();
-        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
-        insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
-        insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
-        insert_pir_witness(db.conn(), 2, &make_siblings(0x20), 100, &make_root(0xFF)).unwrap();
-
-        let notes = get_pir_witnessed_notes(db.conn()).unwrap();
-        assert_eq!(notes.len(), 2);
-        assert_eq!(notes[0].value + notes[1].value, 125_000);
-    }
-
-    #[test]
-    fn witnessed_notes_excludes_spent() {
-        let db = PirTestDb::new();
-        insert_test_note_with_position(db.conn(), 1, 50_000, Some(&make_nf(0xAA)), Some(1000));
-        insert_test_note_with_position(db.conn(), 2, 75_000, Some(&make_nf(0xBB)), Some(2000));
-        insert_pir_witness(db.conn(), 1, &make_siblings(0x10), 100, &make_root(0xFF)).unwrap();
-        insert_pir_witness(db.conn(), 2, &make_siblings(0x20), 100, &make_root(0xFF)).unwrap();
-        mark_spent(db.conn(), 2);
-
-        let notes = get_pir_witnessed_notes(db.conn()).unwrap();
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].note_id, 1);
     }
 
     // =====================================================================

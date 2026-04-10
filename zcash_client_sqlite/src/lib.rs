@@ -537,22 +537,6 @@ impl<C: Borrow<Connection>, P, CL, R> WalletDb<C, P, CL, R> {
     ) -> Result<Option<wallet::spendability_pir::PirWitnessRow>, SqliteClientError> {
         wallet::spendability_pir::get_pir_witness(self.conn.borrow(), note_id)
     }
-
-    /// Returns all notes that have PIR witnesses and are still unspent. Useful for
-    /// displaying PIR-spendable balance in the wallet UI.
-    pub fn get_pir_witnessed_notes(
-        &self,
-    ) -> Result<Vec<wallet::spendability_pir::PirWitnessedNote>, SqliteClientError> {
-        wallet::spendability_pir::get_pir_witnessed_notes(self.conn.borrow())
-    }
-
-    /// DEBUG-ONLY — remove before merge.
-    ///
-    /// Deletes all rows from the `pir_witness_data` table. Returns the number
-    /// of rows removed.
-    pub fn delete_all_pir_witnesses(&self) -> Result<u64, SqliteClientError> {
-        wallet::spendability_pir::delete_all_pir_witnesses(self.conn.borrow())
-    }
 }
 
 #[cfg(feature = "transparent-inputs")]
