@@ -103,10 +103,7 @@ pub struct SqliteShardStore<C, H, const SHARD_HEIGHT: u8> {
 impl<C, H, const SHARD_HEIGHT: u8> SqliteShardStore<C, H, SHARD_HEIGHT> {
     const SHARD_ROOT_LEVEL: Level = Level::new(SHARD_HEIGHT);
 
-    pub(crate) fn from_connection(
-        conn: C,
-        table_prefix: &'static str,
-    ) -> Result<Self, rusqlite::Error> {
+    pub fn from_connection(conn: C, table_prefix: &'static str) -> Result<Self, rusqlite::Error> {
         Ok(SqliteShardStore {
             conn,
             table_prefix,
@@ -1138,6 +1135,25 @@ pub(crate) fn check_witnesses(
     }
 
     Ok(scan_ranges)
+}
+
+/// Creates the Orchard commitment-tree tables in the given connection.
+///
+/// This enables constructing an ephemeral in-memory [`SqliteShardStore`] for
+/// operations like witness generation at a historical frontier, without
+/// requiring the full wallet schema.
+#[cfg(feature = "orchard")]
+pub fn create_orchard_tree_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    use super::db::{
+        TABLE_ORCHARD_TREE_CAP, TABLE_ORCHARD_TREE_CHECKPOINT_MARKS_REMOVED,
+        TABLE_ORCHARD_TREE_CHECKPOINTS, TABLE_ORCHARD_TREE_SHARDS,
+    };
+    conn.execute_batch(&format!(
+        "{TABLE_ORCHARD_TREE_SHARDS};\
+         {TABLE_ORCHARD_TREE_CAP};\
+         {TABLE_ORCHARD_TREE_CHECKPOINTS};\
+         {TABLE_ORCHARD_TREE_CHECKPOINT_MARKS_REMOVED};",
+    ))
 }
 
 #[cfg(test)]

@@ -10,6 +10,14 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `WalletDb::conn()` provides access to the underlying connection handle.
+- `wallet::commitment_tree::create_orchard_tree_tables` creates the
+  Orchard commitment-tree schema in a given connection, enabling
+  construction of an ephemeral in-memory `SqliteShardStore`.
+- `wallet::commitment_tree::SqliteShardStore::from_connection` is now
+  publicly accessible.
+
 ## [0.19.5] - 2026-03-10
 
 ### Fixed

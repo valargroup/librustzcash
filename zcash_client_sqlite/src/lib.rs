@@ -401,6 +401,11 @@ impl Borrow<rusqlite::Connection> for SqlTransaction<'_> {
 }
 
 impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+    /// Returns a reference to the underlying connection handle.
+    pub fn conn(&self) -> &C {
+        &self.conn
+    }
+
     /// Returns the network parameters that this walletdb instance is bound to.
     pub fn params(&self) -> &P {
         &self.params
