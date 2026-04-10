@@ -319,6 +319,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
 
             for transaction in block.transactions().iter() {
                 let txid = transaction.txid();
+                self.transaction_data_request_queue.queue_enhancement(&txid);
 
                 // Mark the Sapling nullifiers of the spent notes as spent in the `sapling_spends` map.
                 for spend in transaction.sapling_spends() {
@@ -355,6 +356,11 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                         .and_then(|(height, tx_idx)| self.tx_locator.get(*height, *tx_idx))
                         .copied();
 
+                    if let Some(spending_txid) = spent_in {
+                        self.transaction_data_request_queue
+                            .queue_enhancement(&spending_txid);
+                    }
+
                     self.insert_received_sapling_note(note_id, output, spent_in);
                 }
 
@@ -377,6 +383,11 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                         .and_then(|nf| self.nullifiers.get(&Nullifier::Orchard(*nf)))
                         .and_then(|(height, tx_idx)| self.tx_locator.get(*height, *tx_idx))
                         .copied();
+
+                    if let Some(spending_txid) = spent_in {
+                        self.transaction_data_request_queue
+                            .queue_enhancement(&spending_txid);
+                    }
 
                     self.insert_received_orchard_note(note_id, output, spent_in)
                 }
@@ -595,6 +606,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         Ok(())
     }
 
+    fn notify_wallet_note_positions(
+        &mut self,
+        block_range: Range<BlockHeight>,
+        wallet_note_positions: &[(ShieldedProtocol, Position)],
+    ) -> Result<(), Self::Error> {
+        self.scan_complete(block_range, wallet_note_positions)
+    }
+
     /// Adds a transparent UTXO received by the wallet to the data store.
     fn put_received_transparent_utxo(
         &mut self,
@@ -709,7 +728,20 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                     );
                 }
                 TransferType::Incoming => {
-                    todo!("store decrypted tx sapling incoming")
+                    // Construct the ReceivedNote directly from the DecryptedOutput
+                    // so the external-scope semantics are preserved. Routing through
+                    // `from_sent_tx_output` would force `is_change = true` and
+                    // `recipient_key_scope = Some(Scope::Internal)`, both of which
+                    // are wrong for an external incoming receipt.
+                    let note_id = NoteId::new(
+                        d_tx.tx().txid(),
+                        Sapling,
+                        u16::try_from(output.index())
+                            .expect("output indices are representable as u16"),
+                    );
+                    self.received_notes.insert_received_note(
+                        ReceivedNote::from_decrypted_sapling_output(note_id, output)?,
+                    );
                 }
             }
         }
@@ -780,7 +812,20 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                     );
                 }
                 TransferType::Incoming => {
-                    todo!("store decrypted tx orchard incoming")
+                    // Construct the ReceivedNote directly from the DecryptedOutput
+                    // so the external-scope semantics are preserved. Routing through
+                    // `from_sent_tx_output` would force `is_change = true` and
+                    // `recipient_key_scope = Some(Scope::Internal)`, both of which
+                    // are wrong for an external incoming receipt.
+                    let note_id = NoteId::new(
+                        d_tx.tx().txid(),
+                        Orchard,
+                        u16::try_from(output.index())
+                            .expect("output indices are representable as u16"),
+                    );
+                    self.received_notes.insert_received_note(
+                        ReceivedNote::from_decrypted_orchard_output(note_id, output)?,
+                    );
                 }
             }
         }
@@ -937,6 +982,14 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
                     .queue_status_retrieval(&d_tx.tx().txid());
             }
         }
+
+        // Remove enhancement requests for this transaction now that it has been processed.
+        // GetStatus entries are intentionally preserved: the queue_status_retrieval calls
+        // earlier in this function need to survive past this cleanup so the sync orchestrator
+        // can later poll for unmined transparent-bundle transactions.
+        self.transaction_data_request_queue
+            .remove_enhancement_entries_for_txid(&d_tx.tx().txid());
+
         Ok(())
     }
 

@@ -97,6 +97,9 @@ test-dependencies = [
   "incrementalmerkletree/test-dependencies"
 ]
 
+## Enables integration testing of the sync module's enhancement logic.
+sync = ["zcash_client_backend/sync", "transparent-inputs"]
+
 ## Enables receiving transparent funds and sending to transparent recipients
 transparent-inputs = [
   "dep:bip32",

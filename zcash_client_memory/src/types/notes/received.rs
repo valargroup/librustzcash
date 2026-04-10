@@ -11,6 +11,7 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::{PoolType, ShieldedProtocol::Sapling, memo::Memo};
 
 use zcash_client_backend::{
+    DecryptedOutput, TransferType,
     data_api::{ReceivedNotes, SentTransactionOutput},
     wallet::{Note, NoteId, Recipient, WalletSaplingOutput},
 };
@@ -172,6 +173,87 @@ impl ReceivedNote {
             commitment_tree_position: Some(output.note_commitment_tree_position()),
             recipient_key_scope: output.recipient_key_scope(),
         }
+    }
+
+    /// Constructs a [`ReceivedNote`] from a Sapling [`DecryptedOutput`] produced by the
+    /// transaction-enhancement path.
+    ///
+    /// `is_change` and `recipient_key_scope` are derived from the output's
+    /// [`TransferType`]: [`TransferType::WalletInternal`] is change in the
+    /// internal scope, [`TransferType::Incoming`] is a regular receive in the
+    /// external scope. [`TransferType::Outgoing`] is rejected because outgoing
+    /// outputs are not stored as received notes.
+    ///
+    /// `nf` is populated from `output.nullifier_bytes()` when available;
+    /// `commitment_tree_position` is populated from
+    /// `output.note_commitment_tree_position()` when available. Both may be
+    /// `None` if the enhancement path could not derive them (e.g. Sapling
+    /// outputs decrypted via `decrypt_and_store_transaction` without bundle
+    /// position information).
+    pub fn from_decrypted_sapling_output(
+        note_id: NoteId,
+        output: &DecryptedOutput<sapling::Note, AccountId>,
+    ) -> Result<Self, Error> {
+        let (is_change, recipient_key_scope) = match output.transfer_type() {
+            TransferType::WalletInternal => (true, Some(Scope::Internal)),
+            TransferType::Incoming => (false, Some(Scope::External)),
+            TransferType::Outgoing => {
+                return Err(Error::Other(
+                    "outgoing outputs are not stored as received notes".to_owned(),
+                ));
+            }
+        };
+        let nf = output
+            .nullifier_bytes()
+            .and_then(|bytes| sapling::Nullifier::from_slice(&bytes).ok())
+            .map(Nullifier::Sapling);
+        Ok(ReceivedNote {
+            note_id,
+            txid: *note_id.txid(),
+            output_index: output.index() as u32,
+            account_id: *output.account(),
+            note: Note::Sapling(output.note().clone()),
+            nf,
+            is_change,
+            memo: Memo::try_from(output.memo().clone())?,
+            commitment_tree_position: output.note_commitment_tree_position(),
+            recipient_key_scope,
+        })
+    }
+
+    /// Constructs a [`ReceivedNote`] from an Orchard [`DecryptedOutput`] produced by the
+    /// transaction-enhancement path. See [`Self::from_decrypted_sapling_output`] for the
+    /// `is_change` / `recipient_key_scope` derivation.
+    #[cfg(feature = "orchard")]
+    pub fn from_decrypted_orchard_output(
+        note_id: NoteId,
+        output: &DecryptedOutput<orchard::Note, AccountId>,
+    ) -> Result<Self, Error> {
+        let (is_change, recipient_key_scope) = match output.transfer_type() {
+            TransferType::WalletInternal => (true, Some(Scope::Internal)),
+            TransferType::Incoming => (false, Some(Scope::External)),
+            TransferType::Outgoing => {
+                return Err(Error::Other(
+                    "outgoing outputs are not stored as received notes".to_owned(),
+                ));
+            }
+        };
+        let nf = output
+            .nullifier_bytes()
+            .and_then(|bytes| Option::from(orchard::note::Nullifier::from_bytes(&bytes)))
+            .map(Nullifier::Orchard);
+        Ok(ReceivedNote {
+            note_id,
+            txid: *note_id.txid(),
+            output_index: output.index() as u32,
+            account_id: *output.account(),
+            note: Note::Orchard(*output.note()),
+            nf,
+            is_change,
+            memo: Memo::try_from(output.memo().clone())?,
+            commitment_tree_position: output.note_commitment_tree_position(),
+            recipient_key_scope,
+        })
     }
 }
 
@@ -394,5 +476,95 @@ mod serialization {
                 },
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_protocol::memo::MemoBytes;
+
+    /// Builds a stub Sapling note for use in classification tests. Field
+    /// values are arbitrary; the test only cares about how the constructor
+    /// maps `transfer_type` to `is_change` and `recipient_key_scope`.
+    fn stub_sapling_note() -> sapling::Note {
+        sapling::note::Note::from_parts(
+            sapling::PaymentAddress::from_bytes(&[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x8e, 0x11,
+                0x9d, 0x72, 0x99, 0x2b, 0x56, 0x0d, 0x26, 0x50, 0xff, 0xe0, 0xbe, 0x7f, 0x35, 0x42,
+                0xfd, 0x97, 0x00, 0x3c, 0xb7, 0xcc, 0x3a, 0xbf, 0xf8, 0x1a, 0x7f, 0x90, 0x37, 0xf3,
+                0xea,
+            ])
+            .unwrap(),
+            sapling::value::NoteValue::from_raw(99),
+            sapling::Rseed::AfterZip212([0; 32]),
+        )
+    }
+
+    fn stub_note_id() -> NoteId {
+        NoteId::new(TxId::from_bytes([0; 32]), Sapling, 0)
+    }
+
+    fn make_decrypted_output(
+        transfer_type: TransferType,
+    ) -> DecryptedOutput<sapling::Note, AccountId> {
+        DecryptedOutput::new(
+            0,
+            stub_sapling_note(),
+            AccountId::from(0),
+            MemoBytes::empty(),
+            transfer_type,
+        )
+    }
+
+    /// Regression test for the bug where `TransferType::Incoming` shielded
+    /// outputs were stored via `from_sent_tx_output`, which hardcoded
+    /// `is_change = true` and `recipient_key_scope = Some(Scope::Internal)`,
+    /// silently reclassifying ordinary incoming receipts as change in the
+    /// internal scope.
+    #[test]
+    fn from_decrypted_sapling_output_incoming_is_external_receive() {
+        let output = make_decrypted_output(TransferType::Incoming);
+        let received = ReceivedNote::from_decrypted_sapling_output(stub_note_id(), &output)
+            .expect("Incoming should produce a valid ReceivedNote");
+        assert!(
+            !received.is_change,
+            "Incoming output should NOT be marked as change"
+        );
+        assert_eq!(
+            received.recipient_key_scope,
+            Some(Scope::External),
+            "Incoming output should be in the external scope"
+        );
+    }
+
+    /// Sanity check that `WalletInternal` still maps to change in the
+    /// internal scope, since we use the same constructor for both transfer
+    /// types.
+    #[test]
+    fn from_decrypted_sapling_output_internal_is_change() {
+        let output = make_decrypted_output(TransferType::WalletInternal);
+        let received = ReceivedNote::from_decrypted_sapling_output(stub_note_id(), &output)
+            .expect("WalletInternal should produce a valid ReceivedNote");
+        assert!(
+            received.is_change,
+            "WalletInternal output should be marked as change"
+        );
+        assert_eq!(
+            received.recipient_key_scope,
+            Some(Scope::Internal),
+            "WalletInternal output should be in the internal scope"
+        );
+    }
+
+    /// `Outgoing` outputs are not received notes and must be rejected.
+    #[test]
+    fn from_decrypted_sapling_output_outgoing_is_rejected() {
+        let output = make_decrypted_output(TransferType::Outgoing);
+        let result = ReceivedNote::from_decrypted_sapling_output(stub_note_id(), &output);
+        assert!(
+            result.is_err(),
+            "Outgoing output should be rejected by from_decrypted_sapling_output"
+        );
     }
 }
