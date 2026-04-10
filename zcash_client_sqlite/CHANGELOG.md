@@ -11,6 +11,8 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `WalletDb::get_orchard_notes_at_snapshot` returns Orchard notes received
+  and unspent as of a given height, for governance voting snapshots.
 - `WalletDb::conn()` provides access to the underlying connection handle.
 - `wallet::commitment_tree::create_orchard_tree_tables` creates the
   Orchard commitment-tree schema in a given connection, enabling

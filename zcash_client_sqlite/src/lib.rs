@@ -2315,6 +2315,29 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
     }
 }
 
+#[cfg(feature = "orchard")]
+impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<C, P, CL, R> {
+    /// Return all Orchard notes received at or before `snapshot_height` and
+    /// unspent as of that height, for the given account.
+    ///
+    /// Unlike [`InputSource::select_unspent_notes`] which is forward-looking
+    /// (based on tx expiry), this is backward-looking: a note is included if
+    /// it was mined at or before `snapshot_height` and no spend of that note
+    /// was mined at or before `snapshot_height`.
+    pub fn get_orchard_notes_at_snapshot(
+        &self,
+        account: AccountUuid,
+        snapshot_height: BlockHeight,
+    ) -> Result<Vec<ReceivedNote<ReceivedNoteId, orchard::note::Note>>, SqliteClientError> {
+        wallet::orchard::get_orchard_notes_at_snapshot(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            snapshot_height,
+        )
+    }
+}
+
 /// A handle for the SQLite block source.
 pub struct BlockDb(Connection);
 
