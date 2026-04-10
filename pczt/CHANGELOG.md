@@ -10,6 +10,9 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `pczt::orchard::Spend::spend_auth_sig` getter (via `getset`).
+
 ## [0.4.1, 0.5.1] - 2026-02-26
 
 ### Fixed
