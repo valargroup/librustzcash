@@ -1899,10 +1899,6 @@ where
 ///
 /// Once the PCZT fully authorized, call [`extract_and_store_transaction_from_pczt`] to
 /// finish transaction creation.
-///
-/// `use_pir_witnesses` selects the Orchard witness source: when `true`, PIR-stored
-/// witnesses are used directly; when `false`, witnesses are computed from the local
-/// ShardTree.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 #[cfg(feature = "pczt")]
@@ -1912,7 +1908,6 @@ pub fn create_pczt_from_proposal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT,
     account_id: <DbT as WalletRead>::AccountId,
     ovk_policy: OvkPolicy,
     proposal: &Proposal<FeeRuleT, N>,
-    #[cfg(feature = "spendability-pir")] use_pir_witnesses: bool,
 ) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
 where
     DbT: WalletWrite + WalletCommitmentTrees,
@@ -1951,7 +1946,7 @@ where
         #[cfg(feature = "transparent-inputs")]
         unused_transparent_outputs,
         #[cfg(feature = "spendability-pir")]
-        use_pir_witnesses,
+        false,
     )?;
 
     // Build the transaction with the specified fee rule
