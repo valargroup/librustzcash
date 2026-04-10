@@ -14,7 +14,7 @@ use std::{
 
 use incrementalmerkletree::{Address, Hashable, Level, Position, Retention};
 use shardtree::{
-    LocatedPrunableTree, LocatedTree, PrunableTree, RetentionFlags,
+    LocatedPrunableTree, LocatedTree, PrunableTree, RetentionFlags, ShardTree,
     error::{QueryError, ShardTreeError},
     store::{Checkpoint, ShardStore, TreeState},
 };
@@ -1148,6 +1148,77 @@ pub(crate) fn check_witnesses(
     }
 
     Ok(scan_ranges)
+}
+
+fn mark_positions<S, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &mut ShardTree<S, DEPTH, SHARD_HEIGHT>,
+    positions: impl IntoIterator<Item = Position>,
+) -> Result<(), ShardTreeError<S::Error>>
+where
+    S: ShardStore<CheckpointId = BlockHeight>,
+    S::H: Clone + PartialEq + Hashable,
+{
+    for position in positions {
+        if tree.get_marked_leaf(position)?.is_some() {
+            continue;
+        }
+
+        let leaf = tree
+            .store()
+            .get_shard(ShardTree::<S, DEPTH, SHARD_HEIGHT>::subtree_addr(position))
+            .map_err(ShardTreeError::Storage)?
+            .and_then(|subtree| {
+                subtree
+                    .value_at_position(position)
+                    .map(|(leaf, _retention)| leaf.clone())
+            });
+
+        if let Some(leaf) = leaf {
+            tree.batch_insert(position, std::iter::once((leaf, Retention::Marked)))?;
+        } else {
+            tracing::warn!(
+                "mark_positions: leaf not found at position {position:?}; \
+                 note at this position will not be spendable until the shard is populated"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn mark_wallet_note_positions(
+    conn: &rusqlite::Transaction<'_>,
+    wallet_note_positions: &[(ShieldedProtocol, Position)],
+) -> Result<(), SqliteClientError> {
+    let sapling_positions = wallet_note_positions
+        .iter()
+        .filter_map(|(protocol, position)| {
+            (*protocol == ShieldedProtocol::Sapling).then_some(*position)
+        })
+        .collect::<BTreeSet<_>>();
+
+    if !sapling_positions.is_empty() {
+        let mut tree = sapling_tree(conn).map_err(SqliteClientError::CommitmentTree)?;
+        mark_positions(&mut tree, sapling_positions).map_err(SqliteClientError::CommitmentTree)?;
+    }
+
+    #[cfg(feature = "orchard")]
+    {
+        let orchard_positions = wallet_note_positions
+            .iter()
+            .filter_map(|(protocol, position)| {
+                (*protocol == ShieldedProtocol::Orchard).then_some(*position)
+            })
+            .collect::<BTreeSet<_>>();
+
+        if !orchard_positions.is_empty() {
+            let mut tree = orchard_tree(conn).map_err(SqliteClientError::CommitmentTree)?;
+            mark_positions(&mut tree, orchard_positions)
+                .map_err(SqliteClientError::CommitmentTree)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

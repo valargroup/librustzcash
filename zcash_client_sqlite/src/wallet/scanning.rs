@@ -369,6 +369,7 @@ pub(crate) fn scan_complete<P: consensus::Parameters>(
         .chain(extended_after);
 
     replace_queue_entries::<SqliteClientError>(conn, &query_range, replacement, false)?;
+    super::commitment_tree::mark_wallet_note_positions(conn, wallet_note_positions)?;
 
     Ok(())
 }

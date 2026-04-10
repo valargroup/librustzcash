@@ -46,6 +46,7 @@ mod utxos_to_txos;
 mod v_received_output_spends_account;
 mod v_sapling_shard_unscanned_ranges;
 mod v_transactions_additional_totals;
+mod v_transactions_filter_intermediate_state;
 mod v_transactions_net;
 mod v_transactions_note_uniqueness;
 mod v_transactions_shielding_balance;
@@ -227,6 +228,7 @@ pub(super) fn all_migrations<
         Box::new(ivk_item_cache::Migration {
             params: params.clone(),
         }),
+        Box::new(v_transactions_filter_intermediate_state::Migration),
     ]
 }
 
@@ -370,6 +372,7 @@ pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
     v_tx_outputs_key_scopes::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
+    v_transactions_filter_intermediate_state::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(

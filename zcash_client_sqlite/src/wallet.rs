@@ -4116,12 +4116,38 @@ pub(crate) fn queue_tx_retrieval(
     dependent_tx_ref: Option<TxRef>,
 ) -> Result<(), SqliteClientError> {
     // Add an entry to the transaction retrieval queue if it would not be redundant.
+    //
+    // The `mined_height IS NULL` predicate on the IIF guard means: even if the
+    // transaction already has `raw` set, a mined tx still gets queued as
+    // `Enhancement` rather than `GetStatus`. This is deliberate. Under External-only
+    // batch scanning, a mined tx may have been recorded only via the scan path
+    // (`put_tx_meta`), and `store_decrypted_tx` is the step that actually runs
+    // `decrypt_transaction` under all key scopes to recover Internal-scope change
+    // outputs and OVK metadata. `GetStatus` alone would not do that work, so we only
+    // treat mempool/unmined transactions (whose state was already fully populated
+    // via `store_transaction_to_be_sent`) as pure status-refresh candidates.
+    //
+    // Note: under per-chunk sync orchestration, a transaction may be re-queued for
+    // enhancement multiple times during a single sync pass — once when
+    // `query_nullifier_map` cascade-inserts its row during an earlier chunk's
+    // enhancement, and again when its enclosing chunk is finally scanned and
+    // `put_blocks` calls this function for every wallet-touching tx. The
+    // `service_transaction_data_requests` stabilization check catches this as
+    // no-progress after one redundant pass, and the idempotent `store_decrypted_tx`
+    // upserts make each enhancement safe to repeat. The performance cost is
+    // bounded by the number of wallet-touching transactions per chunk.
     let mut stmt_insert_tx = conn.prepare_cached(
         "INSERT INTO tx_retrieval_queue (txid, query_type, dependent_transaction_id)
          SELECT
             :txid,
             IIF(
-                EXISTS (SELECT 1 FROM transactions WHERE txid = :txid AND raw IS NOT NULL),
+                EXISTS (
+                    SELECT 1
+                    FROM transactions
+                    WHERE txid = :txid
+                    AND raw IS NOT NULL
+                    AND mined_height IS NULL
+                ),
                 :status_type,
                 :enhancement_type
             ),
@@ -4129,7 +4155,13 @@ pub(crate) fn queue_tx_retrieval(
         ON CONFLICT (txid) DO UPDATE
         SET query_type =
             IIF(
-                EXISTS (SELECT 1 FROM transactions WHERE txid = :txid AND raw IS NOT NULL),
+                EXISTS (
+                    SELECT 1
+                    FROM transactions
+                    WHERE txid = :txid
+                    AND raw IS NOT NULL
+                    AND mined_height IS NULL
+                ),
                 :status_type,
                 :enhancement_type
             ),
@@ -4160,28 +4192,61 @@ pub(crate) fn transaction_data_requests(
     // For transactions with a known expiry height of 0, we will continue to query indefinitely.
     // Such transactions should be rebroadcast by the wallet until they are either mined or
     // conflict with another mined transaction.
+    // The results are ordered by (mined_height, tx_index, txid) so that enhancement
+    // downstream processes transactions in chain order. This is important for the
+    // cascade-discovery mechanism in `detect_*_spend`: when tx A spends a change note
+    // created in tx B (where B is at an earlier block), processing B first ensures
+    // that by the time A is enhanced, B's change note is already stored in
+    // `received_notes` and A's `mark_notes_spent` call can successfully mark the
+    // spend. Without a deterministic block-ordered sequence, A might be processed
+    // before B and end up with its own `raw` set but the spend relationship
+    // unrecorded until B's enhancement cascades back via `put_received_note`'s
+    // `spent_in` param — a window during which `v_transactions` computes a
+    // transiently-wrong balance delta for A.
+    //
+    // The `txid` tiebreaker ensures stable ordering when multiple transactions
+    // have the same `(mined_height, tx_index)` — most importantly when multiple
+    // mempool transactions have NULL `tx_index`. This avoids thrashing in the
+    // stabilization check in `sync::service_transaction_data_requests`, which
+    // uses `Vec<TransactionDataRequest>` equality as a termination condition.
+    //
+    // Unmined transactions (`mined_height IS NULL`) and cascade-inserted entries
+    // in `tx_retrieval_queue` without a matching `transactions` row sort to the
+    // end via `COALESCE(..., 4294967295)`.
     let mut tx_retrieval_stmt = conn.prepare_cached(
-        "SELECT txid, query_type FROM tx_retrieval_queue
-         UNION
-         SELECT txid, :status_type
-         FROM transactions
-         WHERE mined_height IS NULL
-         AND (
-            -- we have no confirmation of expiry
-            confirmed_unmined_at_height IS NULL
-            -- a nonzero expiry height is known, and we have confirmation that the transaction was
-            -- not unmined as of a height greater than or equal to that expiry height
-            OR (
-                expiry_height > 0
-                AND confirmed_unmined_at_height < expiry_height
+        "SELECT txid, query_type FROM (
+            SELECT trq.txid AS txid,
+                   trq.query_type AS query_type,
+                   COALESCE(t.mined_height, 4294967295) AS sort_height,
+                   COALESCE(t.tx_index, 0) AS sort_idx
+            FROM tx_retrieval_queue trq
+            LEFT JOIN transactions t ON t.txid = trq.txid
+            UNION
+            SELECT t.txid AS txid,
+                   :status_type AS query_type,
+                   COALESCE(t.mined_height, 4294967295) AS sort_height,
+                   COALESCE(t.tx_index, 0) AS sort_idx
+            FROM transactions t
+            WHERE t.mined_height IS NULL
+            AND (
+                -- we have no confirmation of expiry
+                t.confirmed_unmined_at_height IS NULL
+                -- a nonzero expiry height is known, and we have confirmation that the
+                -- transaction was not unmined as of a height greater than or equal to
+                -- that expiry height
+                OR (
+                    t.expiry_height > 0
+                    AND t.confirmed_unmined_at_height < t.expiry_height
+                )
+                -- the expiry height is unknown and the default expiry height for it is
+                -- not yet in the stable block range according to the PRUNING_DEPTH
+                OR (
+                    t.expiry_height IS NULL
+                    AND t.confirmed_unmined_at_height < t.min_observed_height + :certainty_depth
+                )
             )
-            -- the expiry height is unknown and the default expiry height for it is not yet in the
-            -- stable block range according to the PRUNING_DEPTH
-            OR (
-                expiry_height IS NULL
-                AND confirmed_unmined_at_height < min_observed_height + :certainty_depth
-            )
-        )",
+        )
+        ORDER BY sort_height, sort_idx, txid",
     )?;
 
     let result = tx_retrieval_stmt
@@ -4525,7 +4590,7 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
     // have been created during the same scan that the locator was added to the nullifier
     // map, but it would not happen if the transaction in question spent the note with no
     // change or explicit in-wallet recipient.
-    put_tx_meta(
+    let tx_ref = put_tx_meta(
         conn,
         &WalletTx::new(
             txid,
@@ -4538,12 +4603,24 @@ pub(crate) fn query_nullifier_map<N: AsRef<[u8]>>(
             vec![],
         ),
         height,
-    )
-    .map(Some)
+    )?;
+
+    // Queue the spending transaction for enhancement so that
+    // decrypt_and_store_transaction can recover change notes (IVK Internal)
+    // and outgoing details (OVK) from the full transaction bytes. This is
+    // needed because scanning may use only External IVK for batch trial
+    // decryption, deferring Internal/OVK decryption to the enhancement phase.
+    queue_tx_retrieval(conn, std::iter::once(txid), Some(tx_ref))?;
+
+    Ok(Some(tx_ref))
 }
 
 /// Deletes from the nullifier map any entries with a locator referencing a block height
 /// lower than the pruning height.
+///
+/// Callers should only prune locators once any pending transaction enhancement and transparent
+/// address-history checks that may rely on these entries to link late-discovered notes have
+/// converged past `block_height`.
 pub(crate) fn prune_nullifier_map(
     conn: &rusqlite::Transaction<'_>,
     block_height: BlockHeight,

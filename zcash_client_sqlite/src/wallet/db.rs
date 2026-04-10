@@ -1098,7 +1098,47 @@ LEFT JOIN blocks ON blocks.height = transactions.mined_height
 LEFT JOIN sent_note_counts
      ON sent_note_counts.account_id = notes.account_id
      AND sent_note_counts.transaction_id = notes.transaction_id
-GROUP BY notes.account_id, notes.transaction_id";
+GROUP BY notes.account_id, notes.transaction_id
+-- NOTE: This HAVING clause is duplicated in the inline VIEW_TRANSACTIONS
+-- constant at wallet/db.rs. If you modify it here, update that constant
+-- as well (and vice versa).
+--
+-- Hide transactions whose DB state is transiently inconsistent during
+-- sync, to prevent v_transactions from reporting a wrong balance delta
+-- in the brief window between when pieces of the transaction are
+-- recorded and when all of them are in place. Two disjoint failure
+-- modes are caught:
+--
+-- Cause A (intra-tx scan-to-enhance window): scanning has recorded the
+-- wallet's spent inputs via `mark_notes_spent`, but enhancement has
+-- not yet recovered the Internal-scope change output via
+-- decrypt_transaction → put_received_note. `raw IS NULL` signals that
+-- enhancement's `put_tx_data` has not yet run. If the tx has wallet
+-- spends in this state, its computed delta is `-total_input` instead
+-- of the final `-(external_sent + fee)`.
+--
+-- Cause B (post-own-enhance, pre-cascade): the tx's own enhancement
+-- has run and stored change notes (so `raw IS NOT NULL`) but the
+-- cascade that marks its wallet-side spend has not yet fired. This
+-- happens when a downstream-in-chain-order dependency transaction
+-- has not yet been enhanced, so when THIS tx's `mark_notes_spent`
+-- looked up its spend nullifier it found nothing in `received_notes`.
+-- The cascade from the dependency's eventual enhancement then records
+-- the spend relationship via `put_received_note`'s `spent_in` param.
+-- We detect this inconsistent state via the invariant: 'a transaction
+-- with a wallet change note can only be wallet-sent, therefore it
+-- must also have wallet spend markings to be consistent.' A nonzero
+-- `change_note_count` with a zero `spent_note_count` is a violation
+-- of that invariant.
+--
+-- Pure receives (no change notes, no wallet spends) always satisfy
+-- both conditions and are immediately visible. Wallet-created mempool
+-- transactions have `raw` set and both sides populated at creation
+-- time, so they also pass immediately.
+HAVING NOT (
+    (transactions.raw IS NULL AND SUM(notes.spent_note_count) > 0)
+    OR (SUM(notes.change_note_count) > 0 AND SUM(notes.spent_note_count) = 0)
+)";
 
 /// Selects all outputs received by the wallet, plus any outputs sent from the wallet to
 /// external recipients.

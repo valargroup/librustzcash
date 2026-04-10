@@ -1352,6 +1352,20 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL: Clock, R:
     ) -> Result<(), Self::Error> {
         self.transactionally(|wdb| wdb.notify_address_checked(request, as_of_height))
     }
+
+    fn notify_wallet_note_positions(
+        &mut self,
+        block_range: std::ops::Range<BlockHeight>,
+        wallet_note_positions: &[(ShieldedProtocol, incrementalmerkletree::Position)],
+    ) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| {
+            wdb.notify_wallet_note_positions(block_range, wallet_note_positions)
+        })
+    }
+
+    fn prune_tracked_nullifiers(&mut self, pruning_depth: u32) -> Result<(), Self::Error> {
+        self.transactionally(|wdb| WalletWrite::prune_tracked_nullifiers(wdb, pruning_depth))
+    }
 }
 
 /// This impl block is only usable when you already have an [`SqlTransaction`], meaning
@@ -1616,6 +1630,29 @@ impl<P: consensus::Parameters, CL: Clock, R: RngCore> WalletWrite
             chain_tip,
             d_tx,
         )
+    }
+
+    fn notify_wallet_note_positions(
+        &mut self,
+        block_range: std::ops::Range<BlockHeight>,
+        wallet_note_positions: &[(ShieldedProtocol, incrementalmerkletree::Position)],
+    ) -> Result<(), Self::Error> {
+        wallet::scanning::scan_complete(
+            self.conn.0,
+            &self.params,
+            block_range,
+            wallet_note_positions,
+        )
+    }
+
+    fn prune_tracked_nullifiers(&mut self, pruning_depth: u32) -> Result<(), Self::Error> {
+        if let Some(meta) = wallet::block_fully_scanned(self.conn.0, &self.params)? {
+            wallet::prune_nullifier_map(
+                self.conn.0,
+                meta.block_height().saturating_sub(pruning_depth),
+            )?;
+        }
+        Ok(())
     }
 
     fn set_tx_trust(&mut self, txid: TxId, trusted: bool) -> Result<(), Self::Error> {
