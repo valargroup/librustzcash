@@ -23,6 +23,34 @@ workspace.
     allowing callers to control which transparent outputs are eligible for
     selection (e.g., coinbase-only filtering).
   - `wallet::ConfirmationsPolicyError`
+  - `WalletWrite::notify_wallet_note_positions` with a default no-op
+    implementation. Backends should override this to mark note commitment tree
+    positions for notes discovered during transaction enhancement, so that those
+    notes become spendable.
+  - `WalletWrite::prune_tracked_nullifiers` with a default no-op implementation.
+    Backends that record an internal nullifier-to-locator map during scanning
+    should override this to prune entries below the pruning horizon. Callers
+    must only invoke it after the `TransactionDataRequest` queue has been
+    drained for the range being pruned.
+- `zcash_client_backend::decrypt`:
+  - `DecryptedOutput::nullifier_bytes`
+  - `DecryptedOutput::note_commitment_tree_position`
+  - `DecryptedOutput::with_spend_metadata`
+  - `TxBundlePositions` struct describing the per-pool base positions of a
+    transaction's shielded bundles within the global note commitment trees.
+  - `compute_enriched_outputs` function that re-maps a `DecryptedTransaction`
+    with per-output nullifier bytes and commitment-tree positions derived from
+    a `TxBundlePositions`. Used by the enhancement path to make late-discovered
+    change notes spendable.
+  - `collect_wallet_note_positions` function (gated on `sync` or
+    `test-dependencies`) that extracts the non-outgoing note positions from a
+    `DecryptedTransaction` for passing to
+    `WalletWrite::notify_wallet_note_positions`.
+- `zcash_client_backend::scanning::ScanningKeys::from_account_ufvks_with_scopes`
+- The `sync` module now services queued transaction-data requests
+  (enhancement, status retrieval, and transparent address history) so that
+  compact scanning, transaction enhancement, and transparent history discovery
+  converge to a complete wallet view during recovery.
 - `zcash_client_backend::proto::CompactFormatError`
 - `zcash_client_backend::proto::compact_formats`:
   - `CompactTx` has added fields `vin` and `vout`
@@ -68,6 +96,14 @@ workspace.
     having no economic value in `zcash_client_sqlite`.
   - `chain::scan_cached_blocks` now requires `DbT::AccountId: Sync` (in addition
     to its existing `Send + 'static` bounds).
+  - `chain::scan_cached_blocks` now uses External-scope IVKs only for batch trial
+    decryption, halving key-agreement work per output. Change notes (Internal IVK)
+    are recovered via the enhancement phase: when a note's nullifier matches one
+    already in the nullifier map, the spending transaction is queued for
+    enhancement, where `decrypt_and_store_transaction` tries all key scopes.
+    Callers that use `scan_cached_blocks` directly (outside the `sync` module)
+    must ensure that enhancement requests are serviced for change notes to be
+    discovered.
   - `error::Error::MemoForbidden` has been replaced by
     `Error::Payment(zip321::PaymentError)`, which can represent both
     memo-to-transparent and zero-valued-transparent-output errors.
@@ -92,6 +128,15 @@ workspace.
       version.
     - `input_selection::InputSelector::propose_transaction` trait method.
   - Trait `Account` has added method `birthday_height`
+  - `ll::ReceivedShieldedOutput::nullifier` now returns `Option<Self::Nullifier>`
+    (by value) instead of `Option<&Self::Nullifier>`.
+  - `wallet::decrypt_and_store_transaction` now enriches the decrypted transaction
+    via `decrypt::compute_enriched_outputs` before handing it to
+    `WalletWrite::store_decrypted_tx`. This populates Orchard nullifier bytes on
+    non-outgoing outputs. Sapling nullifier bytes remain unset when called through
+    this entry point because computing them requires the bundle's base position in
+    the global note commitment tree; callers that need Sapling nullifiers should go
+    through the `sync` module's enhancement pipeline instead.
 - `zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new` now returns
   `Result<Self, ConfirmationsPolicyError>` instead of `Result<Self, ()>`.
 - `zcash_client_backend::fees`:
@@ -127,6 +172,14 @@ workspace.
 - `zcash_client_backend::sync`:
   - `run` now requires `DbT::AccountId: Sync` (in addition to its existing
     `Send + 'static` bounds).
+  - `run` now treats a stabilized but non-empty transaction-data request queue
+    as a terminal state once scanning is idle, preventing an infinite outer-loop
+    spin when lightwalletd cannot resolve a queued txid.
+  - `prune_tracked_nullifiers` is now called exclusively from `run()`, after the
+    post-`running()` drain, and only when that drain returns
+    `ServiceOutcome::Drained`.
+  - `TransactionDataRequest::TransactionsInvolvingAddress` handling now always
+    calls `notify_address_checked` after a successful address-history lookup.
 - `zcash_client_backend::wallet`:
   - `OvkPolicy` has been substantially modified to reflect the view that a
     single outgoing viewing key should be uniformly applied to encrypt all
@@ -168,6 +221,25 @@ workspace.
 ### Removed
 - `zcash_client_backend::data_api::testing::transparent::GapLimits` (use
   `zcash_keys::keys::transparent::GapLimits` instead).
+
+### Fixed
+- `zcash_client_memory`: `TransferType::Incoming` shielded outputs handed to
+  `WalletWrite::store_decrypted_tx` are no longer misclassified as change
+  notes in the internal scope. Previously the memory backend wrapped them
+  in `Recipient::InternalAccount` and routed them through
+  `ReceivedNote::from_sent_tx_output`, which hardcoded `is_change = true`
+  and `recipient_key_scope = Some(Scope::Internal)`. Two new constructors
+  (`ReceivedNote::from_decrypted_sapling_output` and
+  `from_decrypted_orchard_output`) derive `is_change` and
+  `recipient_key_scope` from the output's `TransferType`, so external
+  incoming receipts are now stored correctly.
+- `zcash_client_memory`: `GetStatus` retrieval requests queued during
+  `store_decrypted_tx` for unmined transparent-bundle transactions are no
+  longer wiped by the end-of-function cleanup. The cleanup helper
+  `TransactionDataRequestQueue::remove_entries_for_txid` was renamed to
+  `remove_enhancement_entries_for_txid` and narrowed to only strip
+  `Enhancement` entries, leaving `GetStatus` work intact for the sync
+  orchestrator.
 
 ## [0.21.2] - 2026-03-10
 - The following APIs no longer crash in certain regtest mode configurations with

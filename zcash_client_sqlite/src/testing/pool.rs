@@ -362,6 +362,86 @@ pub(crate) fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTest
     >(TestDbFactory::default(), BlockCache::new())
 }
 
+#[cfg(feature = "sync")]
+pub(crate) fn enhancement_cascade_survives_pruning<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::enhancement_cascade_survives_pruning::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(feature = "sync")]
+pub(crate) fn v_transactions_hides_unenhanced_txs<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::v_transactions_hides_unenhanced_txs::<T, _>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+/// Structural regression test for the pruning-before-enhancement ordering bug.
+///
+/// The positive test [`enhancement_cascade_survives_pruning`] demonstrates that a
+/// chain of self-sends spanning more than `PRUNING_DEPTH` blocks can be correctly
+/// reconstructed if pruning happens after enhancement. For that test to be meaningful
+/// we need to prove that the alternative ordering (pruning before enhancement) would
+/// in fact lose information. Rather than asserting on the user-visible balance — which
+/// is a derived property that could become robust for unrelated reasons — we assert
+/// directly on the structural property that makes the cascade work: the
+/// `nullifier_map` row for tx2's spend of tx1's change note must exist between scanning
+/// and pruning, and must be wiped by pruning.
+///
+/// Concretely:
+/// 1. Fund the wallet, build tx1 spending a single external-scope input (produces a
+///    change note), build tx2 spending tx1's change note (produces another change note).
+/// 2. Put tx2 in a block more than `PRUNING_DEPTH` after tx1, with sufficient trailing
+///    fillers that the "fully scanned" height advances past `h_tx2 + PRUNING_DEPTH`.
+/// 3. Reset and re-sync: scanning identifies tx2's spend nullifier as an unknown
+///    (because under External-only scanning tx1's change note is Internal-scope and
+///    therefore not in the known-nullifier set). That unknown spend is recorded in
+///    `nullifier_map` at `(h_tx2, tx_index)`, waiting for enhancement to resolve it.
+/// 4. **Before** calling `prune_tracked_nullifiers`, assert the `nullifier_map` row at
+///    `block_height = h_tx2` is present.
+/// 5. Call `prune_tracked_nullifiers`.
+/// 6. Assert the row is gone. Because `nullifier_map.tx_locator` has `ON DELETE CASCADE`,
+///    pruning the `tx_locator_map` row at `h_tx2` also removes the nullifier entry;
+///    with the locator gone, `detect_*_spend` during any later enhancement of tx1
+///    would return `None` and the cascade would halt.
+///
+/// This asserts only the specific DB state that the positive test relies on. It does
+/// not depend on enhancement semantics, balance-delta arithmetic, or any other
+/// higher-level behavior, so it should remain stable under future refactors that
+/// strengthen enhancement without changing the pruning contract.
+#[cfg(feature = "sync")]
+pub(crate) fn pruning_wipes_late_discovered_spend_locator<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::pruning_wipes_late_discovered_spend_locator::<
+        T,
+        _,
+        _,
+        _,
+    >(
+        TestDbFactory::default(),
+        BlockCache::new(),
+        |state, height| {
+            use rusqlite::params;
+
+            let spend_pool: i64 = match T::SHIELDED_PROTOCOL {
+                zcash_protocol::ShieldedProtocol::Sapling => 2,
+                zcash_protocol::ShieldedProtocol::Orchard => 3,
+            };
+            state
+                .wallet()
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM nullifier_map
+                     WHERE spend_pool = ?1 AND block_height = ?2",
+                    params![spend_pool, u32::from(height)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        },
+    );
+}
+
 pub(crate) fn metadata_queries_exclude_unwanted_notes<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::metadata_queries_exclude_unwanted_notes::<T, _, _>(
         TestDbFactory::default(),
