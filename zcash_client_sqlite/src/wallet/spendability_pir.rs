@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     // =====================================================================
-    // Integration tests (moved from orchard.rs)
+    // Integration tests
     // =====================================================================
 
     /// `create_proposed_transactions` with `use_pir_witnesses = true` uses
