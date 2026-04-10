@@ -732,7 +732,13 @@ where
         tx_ref,
         funding_account,
         d_tx.sapling_outputs(),
-        |_, _| Ok(None),
+        |wallet_db, output| {
+            Ok(output
+                .nullifier()
+                .map(|nf| wallet_db.detect_sapling_spend(&nf))
+                .transpose()?
+                .flatten())
+        },
         |wallet_db, output, tx_ref, spent_in| {
             wallet_db.put_received_sapling_note(output, tx_ref, d_tx.mined_height(), spent_in)
         },
@@ -749,7 +755,13 @@ where
         tx_ref,
         funding_account,
         d_tx.orchard_outputs(),
-        |_, _| Ok(None),
+        |wallet_db, output| {
+            Ok(output
+                .nullifier()
+                .map(|nf| wallet_db.detect_orchard_spend(&nf))
+                .transpose()?
+                .flatten())
+        },
         |wallet_db, output, tx_ref, spent_in| {
             wallet_db.put_received_orchard_note(output, tx_ref, d_tx.mined_height(), spent_in)
         },

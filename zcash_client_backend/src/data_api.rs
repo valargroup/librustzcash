@@ -1943,6 +1943,15 @@ pub trait WalletRead {
     /// responding to a set of transaction data requests may result in the creation of new
     /// transaction data requests, such as when it is necessary to fill in purely-transparent
     /// transaction history by walking the chain backwards via transparent inputs.
+    ///
+    /// Servicing these requests is required in order for the wallet to converge to a complete
+    /// view of transaction history when compact block scanning omits internal-scope shielded
+    /// trial decryption. In particular, the wallet relies on:
+    /// - [`TransactionDataRequest::Enhancement`] to recover internal/change shielded outputs and
+    ///   outgoing metadata from full transactions.
+    /// - [`TransactionDataRequest::TransactionsInvolvingAddress`] to discover shielding and other
+    ///   transparent-address transactions that are not fully identifiable from compact block data
+    ///   alone.
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error>;
 
     /// Returns a vector of [`ReceivedTransactionOutput`] values describing the outputs of the
@@ -3140,6 +3149,51 @@ pub trait WalletWrite: WalletRead {
         &mut self,
         received_tx: DecryptedTransaction<Transaction, Self::AccountId>,
     ) -> Result<(), Self::Error>;
+
+    /// Notifies the wallet that the given note positions have been discovered as belonging
+    /// to the wallet during enhancement, so that witnesses can be maintained for them.
+    ///
+    /// This is needed because External-only batch scanning may not discover all wallet
+    /// outputs; those found later via enhancement need their commitment tree positions
+    /// registered so they are spendable.
+    fn notify_wallet_note_positions(
+        &mut self,
+        _block_range: std::ops::Range<BlockHeight>,
+        _wallet_note_positions: &[(ShieldedProtocol, incrementalmerkletree::Position)],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Prunes backend-tracked metadata about nullifiers whose owning wallet note has
+    /// not yet been identified, for blocks that are at least `pruning_depth` below the
+    /// wallet's current fully-scanned chain tip.
+    ///
+    /// During compact-block scanning, a wallet backend may observe nullifiers for which
+    /// the owning note has not yet been decrypted (for example, a spend of a change note
+    /// whose [`Scope::Internal`] output will only be recovered via
+    /// [`TransactionDataRequest::Enhancement`] of the output-producing transaction). If
+    /// the backend retains these observations, a later enhancement step can use them to
+    /// link the newly-recovered note to its spending transaction; without them, such a
+    /// note would remain unspent in the wallet's view even after its spend has been
+    /// mined, producing an inflated balance.
+    ///
+    /// Callers MUST only invoke this method after the wallet's
+    /// [`TransactionDataRequest`] queue has been drained for the range being pruned.
+    /// Pruning prematurely releases the information the backend needs to attach
+    /// late-discovered notes to their spends.
+    ///
+    /// Because pruning is defined relative to the wallet's contiguous-from-birthday
+    /// fully-scanned chain tip, the effective pruning floor will not advance during
+    /// non-linear scan passes (for example, when a higher-priority [`ScanPriority::FoundNote`]
+    /// range is being scanned ahead of the historical fill). This is correct but means
+    /// that under non-linear scan plans, tracked nullifier metadata may retain more
+    /// entries than under purely linear scanning.
+    ///
+    /// [`Scope::Internal`]: zip32::Scope::Internal
+    /// [`ScanPriority::FoundNote`]: scanning::ScanPriority::FoundNote
+    fn prune_tracked_nullifiers(&mut self, _pruning_depth: u32) -> Result<(), Self::Error> {
+        Ok(())
+    }
 
     /// Sets the trust status of the given transaction to either trusted or untrusted.
     ///
