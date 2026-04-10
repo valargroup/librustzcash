@@ -459,10 +459,17 @@ where
         }
     }
 
-    // Prune the nullifier map of entries we no longer need.
-    wallet_db
-        .prune_tracked_nullifiers(PRUNING_DEPTH)
-        .map_err(PutBlocksError::Storage)?;
+    // NOTE: Nullifier-map pruning is intentionally NOT performed here. Under the
+    // External-only batch scanning optimization, Internal-scope change notes are
+    // discovered only during post-scan transaction enhancement, and
+    // `detect_*_spend` consults the nullifier map to link those late-discovered
+    // notes to their spending transactions. Pruning here — before enhancement
+    // has a chance to run — would cascade-delete those locator entries (see
+    // ON DELETE CASCADE on the `nullifier_map` foreign key in `db.rs`) and cause
+    // the wallet to report an inflated balance. The sync orchestrator
+    // (`zcash_client_backend::sync::run` via `WalletWrite::prune_tracked_nullifiers`)
+    // is now responsible for invoking pruning after it has drained the
+    // transaction-data request queue for the scanned range.
 
     // We will have a start position and a last scanned height in all cases where
     // `blocks` is non-empty.

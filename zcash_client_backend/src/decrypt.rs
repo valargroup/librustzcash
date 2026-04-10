@@ -7,6 +7,8 @@ use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 use zcash_primitives::{
     transaction::Transaction, transaction::components::sapling::zip212_enforcement,
 };
+#[cfg(any(feature = "sync", feature = "test-dependencies"))]
+use zcash_protocol::ShieldedProtocol;
 use zcash_protocol::{
     consensus::{self, BlockHeight, NetworkUpgrade},
     memo::MemoBytes,
@@ -412,4 +414,42 @@ pub fn compute_enriched_outputs<'a, AccountId: Copy + std::hash::Hash + Eq>(
         #[cfg(feature = "orchard")]
         orchard_outputs,
     )
+}
+
+/// Collects note commitment tree positions from a [`DecryptedTransaction`] for use with
+/// [`WalletWrite::notify_wallet_note_positions`].
+///
+/// Only positions for non-outgoing outputs are collected, since the wallet only needs to
+/// maintain witnesses for notes it can spend.
+///
+/// [`WalletWrite::notify_wallet_note_positions`]: crate::data_api::WalletWrite::notify_wallet_note_positions
+#[cfg(any(feature = "sync", feature = "test-dependencies"))]
+pub fn collect_wallet_note_positions<AccountId>(
+    d_tx: &DecryptedTransaction<'_, Transaction, AccountId>,
+) -> Vec<(ShieldedProtocol, Position)> {
+    #[cfg_attr(not(feature = "orchard"), allow(unused_mut))]
+    let mut positions: Vec<(ShieldedProtocol, Position)> = d_tx
+        .sapling_outputs()
+        .iter()
+        .filter(|output| output.transfer_type() != TransferType::Outgoing)
+        .filter_map(|output| {
+            output
+                .note_commitment_tree_position()
+                .map(|position| (ShieldedProtocol::Sapling, position))
+        })
+        .collect();
+
+    #[cfg(feature = "orchard")]
+    positions.extend(
+        d_tx.orchard_outputs()
+            .iter()
+            .filter(|output| output.transfer_type() != TransferType::Outgoing)
+            .filter_map(|output| {
+                output
+                    .note_commitment_tree_position()
+                    .map(|position| (ShieldedProtocol::Orchard, position))
+            }),
+    );
+
+    positions
 }
