@@ -1787,7 +1787,7 @@ mod tests {
     /// `get_wallet_summary` reports a PIR-witnessed note as spendable even when
     /// its shard is not fully scanned. Exercises the `|| has_pir_witness` branch
     /// in the wallet summary query, separate from coin selection.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn wallet_summary_includes_pir_witnessed_note_as_spendable() {
         let (st, account, note_id, _pos, siblings, anchor_root, anchor_height) =
@@ -1819,7 +1819,7 @@ mod tests {
 
     /// Wallet summary aggregation remains note-specific when only a subset of
     /// Orchard notes have PIR witnesses available.
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", feature = "spendability-pir"))]
     #[test]
     fn wallet_summary_only_upgrades_pir_witnessed_notes() {
         use zcash_client_backend::data_api::WalletCommitmentTrees;
