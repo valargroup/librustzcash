@@ -32,6 +32,8 @@ workspace.
   database transaction overhead).
 - `WalletDb::get_unspent_orchard_notes_at_historical_height` returns all Orchard
   notes that existed and were unspent at a given height.
+- `WalletDb::generate_orchard_witnesses_at_historical_height` generates Merkle
+  witnesses at a historical height using an ephemeral in-memory tree.
 
 ### Changed
 - The `accounts` table now stores IVK item caches instead of FVK item caches for

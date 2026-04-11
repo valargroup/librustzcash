@@ -2420,6 +2420,38 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
             height,
         )
     }
+
+    /// Generates Orchard Merkle witnesses at a historical height.
+    ///
+    /// Copies the wallet's Orchard shard data into an ephemeral in-memory database,
+    /// inserts the provided frontier at `height` as a checkpoint, and generates a
+    /// witness for each of the given note positions.
+    ///
+    /// The caller must provide the valid frontier at the given height. The wallet DB
+    /// is strictly read-only; shard data is copied, not modified.
+    pub fn generate_orchard_witnesses_at_historical_height(
+        &self,
+        note_positions: &[Position],
+        frontier_at_height: incrementalmerkletree::frontier::NonEmptyFrontier<
+            orchard::tree::MerkleHashOrchard,
+        >,
+        height: BlockHeight,
+    ) -> Result<
+        Vec<
+            incrementalmerkletree::MerklePath<
+                orchard::tree::MerkleHashOrchard,
+                { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+            >,
+        >,
+        SqliteClientError,
+    > {
+        wallet::commitment_tree::generate_orchard_witnesses_at_historical_height(
+            self.conn.borrow(),
+            note_positions,
+            frontier_at_height,
+            height,
+        )
+    }
 }
 
 /// A handle for the SQLite block source.
