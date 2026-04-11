@@ -9,9 +9,9 @@ use std::{
     sync::Arc,
 };
 
-use incrementalmerkletree::{Address, Hashable, Level, Position, Retention};
+use incrementalmerkletree::{Address, Hashable, Level, Marking, Position, Retention};
 use shardtree::{
-    LocatedPrunableTree, LocatedTree, PrunableTree, RetentionFlags,
+    LocatedPrunableTree, LocatedTree, PrunableTree, RetentionFlags, ShardTree,
     error::{QueryError, ShardTreeError},
     store::{Checkpoint, ShardStore, TreeState},
 };
@@ -27,6 +27,8 @@ use crate::{error::SqliteClientError, sapling_tree};
 
 #[cfg(feature = "orchard")]
 use crate::orchard_tree;
+#[cfg(feature = "orchard")]
+use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
 
 use super::common::{TableConstants, table_constants};
 
@@ -1183,11 +1185,6 @@ pub(crate) fn generate_orchard_witnesses_at_historical_height(
     >,
     SqliteClientError,
 > {
-    use incrementalmerkletree::Marking;
-    use shardtree::ShardTree;
-    use shardtree::store::Checkpoint;
-    use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
-
     let frontier_position = frontier_at_height.position();
 
     let mem_conn = rusqlite::Connection::open_in_memory().map_err(SqliteClientError::DbError)?;
