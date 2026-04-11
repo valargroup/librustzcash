@@ -13,6 +13,8 @@ workspace.
 ### Added
 - `WalletDb::generate_orchard_witnesses_at_historical_height` generates Merkle
   witnesses at a historical height using an ephemeral in-memory tree.
+- `WalletDb::get_orchard_notes_at_historical_height` returns all Orchard
+  notes that existed and were unspent at a given height.
 
 ## [0.19.5] - 2026-03-10
 
