@@ -2312,7 +2312,26 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
 
 #[cfg(feature = "orchard")]
 impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<C, P, CL, R> {
-    /// Generates Orchard Merkle witnesses at a historical height.
+    /// Return all Orchard notes received at or before `height`
+    /// and unspent as of that height, for the given account.
+    ///
+    /// Unlike [`InputSource::select_unspent_notes`] (which applies confirmation,
+    /// dust, and expiry filters for transaction construction), this returns every
+    /// note that existed and was unspent at the given height.
+    pub fn get_unspent_orchard_notes_at_historical_height(
+        &self,
+        account: AccountUuid,
+        height: BlockHeight,
+    ) -> Result<Vec<ReceivedNote<ReceivedNoteId, orchard::note::Note>>, SqliteClientError> {
+        wallet::orchard::get_unspent_orchard_notes_at_historical_height(
+            self.conn.borrow(),
+            &self.params,
+            account,
+            height,
+        )
+    }
+
+    /// Generate Orchard Merkle witnesses at a historical height.
     ///
     /// Copies the wallet's Orchard shard data into an ephemeral in-memory database,
     /// inserts the provided frontier at `height` as a checkpoint, and generates a
