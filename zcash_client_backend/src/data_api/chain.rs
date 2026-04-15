@@ -157,6 +157,7 @@ use incrementalmerkletree::frontier::Frontier;
 use subtle::ConditionallySelectable;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
+use zip32;
 
 use crate::{
     data_api::{NullifierQuery, WalletWrite},
@@ -600,7 +601,39 @@ where
     let account_ufvks = data_db
         .get_unified_full_viewing_keys()
         .map_err(Error::Wallet)?;
-    let scanning_keys = ScanningKeys::from_account_ufvks(account_ufvks);
+
+    let fully_scanned = data_db.block_fully_scanned().map_err(Error::Wallet)?;
+    let is_contiguous = fully_scanned
+        .as_ref()
+        .map_or(false, |meta| from_height == meta.block_height() + 1);
+
+    let scopes = if is_contiguous {
+        tracing::info!(
+            "scan_cached_blocks: EXTERNAL-ONLY from height {} (contiguous)",
+            from_height,
+        );
+        vec![zip32::Scope::External]
+    } else {
+        tracing::info!(
+            "scan_cached_blocks: BOTH IVKs from height {} (non-contiguous)",
+            from_height,
+        );
+        vec![zip32::Scope::External, zip32::Scope::Internal]
+    };
+
+    let scanning_keys = ScanningKeys::from_account_ufvks_with_scopes(
+        account_ufvks.iter().map(|(id, ufvk)| (*id, ufvk.clone())),
+        &scopes,
+    );
+    let internal_keys = if is_contiguous {
+        ScanningKeys::from_account_ufvks_with_scopes(
+            account_ufvks,
+            &[zip32::Scope::Internal],
+        )
+    } else {
+        let _ = account_ufvks;
+        ScanningKeys::empty()
+    };
     let mut runners = BatchRunners::<_, (), ()>::for_keys(100, &scanning_keys);
 
     block_source.with_blocks::<_, DbT::Error>(Some(from_height), Some(limit), |block| {
@@ -638,6 +671,7 @@ where
                 params,
                 block,
                 &scanning_keys,
+                &internal_keys,
                 &nullifiers,
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
