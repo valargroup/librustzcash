@@ -1,14 +1,19 @@
 [package]
-name = "pczt"
+name = "valar-pczt"
 version = "0.5.1"
 authors = ["Jack Grigg <jack@electriccoin.co>"]
 edition.workspace = true
 rust-version.workspace = true
-description = "Tools for working with partially-created Zcash transactions"
-homepage = "https://github.com/zcash/librustzcash"
-repository.workspace = true
+description = "Valar Group fork of pczt with shielded-voting getters, maintained until the getters are upstreamed to zcash/librustzcash."
+homepage = "https://github.com/valargroup/librustzcash"
+repository = "https://github.com/valargroup/librustzcash"
 license.workspace = true
 categories.workspace = true
+
+[lib]
+# Keep the Rust identifier as `pczt` so consumer code using `use pczt::...`
+# continues to work via cargo's `package = "valar-pczt"` rename trick.
+name = "pczt"
 
 [package.metadata.docs.rs]
 all-features = true
