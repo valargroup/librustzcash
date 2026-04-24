@@ -2965,42 +2965,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
-name = "orchard"
-version = "0.12.0"
-source = "git+https://github.com/zcash/orchard.git?rev=b0bf2670e248958c6ce7c1deed466032e0dbd4d9#b0bf2670e248958c6ce7c1deed466032e0dbd4d9"
-dependencies = [
- "aes",
- "bitvec",
- "blake2b_simd",
- "corez",
- "ff",
- "fpe",
- "getset",
- "group",
- "halo2_gadgets",
- "halo2_poseidon",
- "halo2_proofs",
- "hex",
- "incrementalmerkletree",
- "lazy_static",
- "memuse",
- "nonempty",
- "pasta_curves",
- "proptest",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "reddsa",
- "serde",
- "sinsemilla",
- "subtle",
- "tracing",
- "visibility",
- "zcash_note_encryption",
- "zcash_spec",
- "zip32",
-]
-
-[[package]]
 name = "ordered-float"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3154,7 +3118,6 @@ dependencies = [
  "incrementalmerkletree",
  "jubjub",
  "nonempty",
- "orchard",
  "pasta_curves",
  "postcard",
  "rand_core 0.6.4",
@@ -3166,6 +3129,7 @@ dependencies = [
  "serde_with",
  "sha2 0.10.8",
  "shardtree",
+ "valar-orchard",
  "zcash_note_encryption",
  "zcash_primitives",
  "zcash_proofs",
@@ -6313,6 +6277,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "valar-orchard"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0415fc8aba029019c974bb0b0cc47e0bca53a27fdc2da263a2e6c99c9b3727f8"
+dependencies = [
+ "aes",
+ "bitvec",
+ "blake2b_simd",
+ "corez",
+ "ff",
+ "fpe",
+ "getset",
+ "group",
+ "halo2_gadgets",
+ "halo2_poseidon",
+ "halo2_proofs",
+ "hex",
+ "incrementalmerkletree",
+ "lazy_static",
+ "memuse",
+ "nonempty",
+ "pasta_curves",
+ "proptest",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "reddsa",
+ "serde",
+ "sinsemilla",
+ "subtle",
+ "tracing",
+ "visibility",
+ "zcash_note_encryption",
+ "zcash_spec",
+ "zip32",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7065,7 +7066,6 @@ dependencies = [
  "jubjub",
  "memuse",
  "nonempty",
- "orchard",
  "pasta_curves",
  "pczt",
  "percent-encoding",
@@ -7096,6 +7096,7 @@ dependencies = [
  "tower",
  "tracing",
  "trait-variant",
+ "valar-orchard",
  "webpki-roots 1.0.3",
  "which",
  "zcash_address",
@@ -7125,7 +7126,6 @@ dependencies = [
  "incrementalmerkletree",
  "jubjub",
  "nonempty",
- "orchard",
  "postcard",
  "proptest",
  "prost",
@@ -7143,6 +7143,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "valar-orchard",
  "wasm_sync",
  "which",
  "zcash_address",
@@ -7175,7 +7176,6 @@ dependencies = [
  "jubjub",
  "maybe-rayon",
  "nonempty",
- "orchard",
  "pasta_curves",
  "proptest",
  "prost",
@@ -7198,6 +7198,7 @@ dependencies = [
  "time",
  "tracing",
  "uuid",
+ "valar-orchard",
  "zcash_address",
  "zcash_client_backend",
  "zcash_encoding",
@@ -7229,9 +7230,9 @@ dependencies = [
  "blake2b_simd",
  "ff",
  "jubjub",
- "orchard",
  "rand_core 0.6.4",
  "sapling-crypto",
+ "valar-orchard",
  "zcash_address",
  "zcash_primitives",
  "zcash_proofs",
@@ -7269,7 +7270,6 @@ dependencies = [
  "jubjub",
  "memuse",
  "nonempty",
- "orchard",
  "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -7280,6 +7280,7 @@ dependencies = [
  "secrecy",
  "subtle",
  "tracing",
+ "valar-orchard",
  "zcash_address",
  "zcash_encoding",
  "zcash_protocol",
@@ -7321,7 +7322,6 @@ dependencies = [
  "jubjub",
  "memuse",
  "nonempty",
- "orchard",
  "pprof",
  "proptest",
  "rand_core 0.6.4",
@@ -7330,6 +7330,7 @@ dependencies = [
  "sapling-crypto",
  "secp256k1",
  "sha2 0.10.8",
+ "valar-orchard",
  "zcash_encoding",
  "zcash_note_encryption",
  "zcash_protocol",
