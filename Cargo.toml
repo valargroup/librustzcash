@@ -68,7 +68,14 @@ redjubjub = { version = "0.8", default-features = false }
 sapling = { package = "sapling-crypto", version = "0.6", default-features = false }
 
 # - Orchard
-orchard = { version = "0.12", default-features = false }
+#
+# Points at the Valar Group `valar-orchard` fork on crates.io, aliased locally to
+# `orchard` so every member still writes `use orchard::…`. The fork is
+# upstream-0.12.0 + post-release fixes (up to zcash/orchard 6b12c77) + governance-
+# visibility additions needed by the shielded-voting circuits in
+# valargroup/voting-circuits. Drop back to `orchard = "0.12"` once those
+# visibility changes land in zcash/orchard upstream.
+orchard = { version = "0.12.0", package = "valar-orchard", default-features = false }
 pasta_curves = "0.5"
 
 # - Transparent
@@ -231,4 +238,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [patch.crates-io]
 sapling = { package = "sapling-crypto", git = "https://github.com/zcash/sapling-crypto.git", rev = "4f95c2286dbe90f05e6f44d634bc2924b992fab4" }
-orchard = { package = "orchard", git = "https://github.com/zcash/orchard.git", rev = "6b12c77260aa7fac0d804983fc31b71b584d48e0" }
+# No orchard patch: the workspace resolves `orchard` via its `package = "valar-orchard"`
+# alias on crates.io, which already carries the post-0.12.0 upstream fixes plus the
+# governance-visibility additions.
