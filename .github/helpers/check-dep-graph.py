@@ -32,6 +32,14 @@ CRATES_IN_GRAPH = set([
     'zip32',
 ])
 
+# Maps cargo package names to the logical name used in README.md's mermaid graph.
+# The workspace imports `orchard` via the `valar-orchard` crates.io package using
+# cargo's `package = "valar-orchard"` rename, so `cargo tree` reports the real
+# package name `valar-orchard` while the README uses the alias `orchard`.
+PACKAGE_NAME_REMAP = {
+    'valar-orchard': 'orchard',
+}
+
 def main():
     script_dir = os.path.dirname(os.path.realpath(__file__))
     base_dir = os.path.dirname(os.path.dirname(script_dir))
@@ -79,6 +87,7 @@ def main():
             continue
         (depth, crate, _) = line.strip().split(' ', 2)
         depth = int(depth)
+        crate = PACKAGE_NAME_REMAP.get(crate, crate)
 
         if depth == 0:
             crate_stack = [crate]
