@@ -5317,6 +5317,154 @@ pub fn wallet_recovery_computes_fees<T: ShieldedPoolTester, DsF: DataStoreFactor
     assert_eq!(shielding_tx.fee_paid, Some(created_fee));
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeystoneImportPolicy {
+    AutoCheckpointBirthday,
+    ExplicitHistoricalBirthday,
+}
+
+impl KeystoneImportPolicy {
+    fn label(self) -> &'static str {
+        match self {
+            KeystoneImportPolicy::AutoCheckpointBirthday => "old auto-checkpoint birthday",
+            KeystoneImportPolicy::ExplicitHistoricalBirthday => "new explicit historical birthday",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeystoneImportTiming {
+    BeforeHistoricalBlockScan,
+    AfterHistoricalBlockScan,
+}
+
+impl KeystoneImportTiming {
+    fn label(self) -> &'static str {
+        match self {
+            KeystoneImportTiming::BeforeHistoricalBlockScan => {
+                "import before historical block scan"
+            }
+            KeystoneImportTiming::AfterHistoricalBlockScan => "import after historical block scan",
+        }
+    }
+}
+
+/// Verifies that importing a Keystone-like UFVK account with an automatically selected recent
+/// checkpoint birthday is timing-dependent, while importing it with an explicit historical birthday
+/// deterministically recovers the same balance whether the account is added before or after the
+/// historical funding block has been scanned.
+pub fn keystone_import_birthday_determinism<T, DSF, Cache>(
+    mut ds_factory: impl FnMut() -> DSF,
+    mut cache: impl FnMut() -> Cache,
+) where
+    T: ShieldedPoolTester,
+    DSF: DataStoreFactory,
+    Cache: TestCache,
+{
+    for import_policy in [
+        KeystoneImportPolicy::AutoCheckpointBirthday,
+        KeystoneImportPolicy::ExplicitHistoricalBirthday,
+    ] {
+        for import_timing in [
+            KeystoneImportTiming::BeforeHistoricalBlockScan,
+            KeystoneImportTiming::AfterHistoricalBlockScan,
+        ] {
+            keystone_import_birthday_determinism_case::<T, DSF, Cache>(
+                ds_factory(),
+                cache(),
+                import_policy,
+                import_timing,
+            );
+        }
+    }
+}
+
+fn keystone_import_birthday_determinism_case<T, DSF, Cache>(
+    ds_factory: DSF,
+    cache: Cache,
+    import_policy: KeystoneImportPolicy,
+    import_timing: KeystoneImportTiming,
+) where
+    T: ShieldedPoolTester,
+    DSF: DataStoreFactory,
+    Cache: TestCache,
+{
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(ds_factory)
+        .with_block_cache(cache)
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let hotkey_account = st.test_account().cloned().unwrap();
+    let historical_birthday = hotkey_account.birthday().clone();
+
+    let keystone_account_index = zip32::AccountId::try_from(7).unwrap();
+    let keystone_usk =
+        UnifiedSpendingKey::from_seed(st.network(), &[7u8; 32], keystone_account_index).unwrap();
+    let keystone_ufvk = keystone_usk.to_unified_full_viewing_key();
+    let keystone_fvk = T::sk_to_fvk(T::usk_to_sk(&keystone_usk));
+
+    let keystone_value = Zatoshis::const_from_u64(60000);
+    let (historical_block_height, _, _) =
+        st.generate_next_block(&keystone_fvk, AddressType::DefaultExternal, keystone_value);
+
+    // This models the old Swift SDK path: zodl-ios passed no Keystone birthday, so the SDK asked
+    // its bundled checkpoint source for the latest checkpoint at or below the current chain tip.
+    // In this controlled chain, the current tip checkpoint is the block that funded Keystone, so
+    // the resulting account birthday is the following block.
+    let auto_checkpoint_birthday =
+        AccountBirthday::from_parts(st.latest_cached_block().unwrap().chain_state.clone(), None);
+
+    assert_eq!(historical_birthday.height(), historical_block_height);
+    assert_eq!(
+        auto_checkpoint_birthday.height(),
+        historical_block_height + 1
+    );
+
+    if import_timing == KeystoneImportTiming::AfterHistoricalBlockScan {
+        st.scan_cached_blocks(historical_block_height, 1);
+    }
+
+    let import_birthday = match import_policy {
+        KeystoneImportPolicy::AutoCheckpointBirthday => auto_checkpoint_birthday,
+        KeystoneImportPolicy::ExplicitHistoricalBirthday => historical_birthday,
+    };
+
+    let keystone_account = st
+        .wallet_mut()
+        .import_account_ufvk(
+            "keystone",
+            &keystone_ufvk,
+            &import_birthday,
+            data_api::AccountPurpose::Spending { derivation: None },
+            Some("keystone"),
+        )
+        .unwrap();
+
+    if import_timing == KeystoneImportTiming::BeforeHistoricalBlockScan
+        || import_policy == KeystoneImportPolicy::ExplicitHistoricalBirthday
+    {
+        st.scan_cached_blocks(historical_block_height, 1);
+    }
+
+    let expected_keystone_balance = if import_policy == KeystoneImportPolicy::AutoCheckpointBirthday
+        && import_timing == KeystoneImportTiming::AfterHistoricalBlockScan
+    {
+        Zatoshis::ZERO
+    } else {
+        keystone_value
+    };
+
+    assert_eq!(
+        st.get_total_balance(keystone_account.id()),
+        expected_keystone_balance,
+        "{} / {} should recover {:?}",
+        import_policy.label(),
+        import_timing.label(),
+        expected_keystone_balance,
+    );
+}
+
 /// Tests that the wallet correctly reports balance with two notes that are identical
 /// other than their note randomness.
 pub fn receive_two_notes_with_same_value<T: ShieldedPoolTester>(

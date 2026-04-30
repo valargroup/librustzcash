@@ -391,6 +391,13 @@ pub(crate) fn can_spend_inputs_by_confirmations_policy<T: ShieldedPoolTester>() 
     }
 }
 
+pub(crate) fn keystone_import_birthday_determinism<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::keystone_import_birthday_determinism::<T, _, _>(
+        TestDbFactory::default,
+        BlockCache::new,
+    )
+}
+
 pub(crate) fn receive_two_notes_with_same_value<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::receive_two_notes_with_same_value::<T>(
         TestDbFactory::default(),

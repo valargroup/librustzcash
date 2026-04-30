@@ -718,6 +718,11 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn keystone_import_birthday_determinism() {
+        testing::pool::keystone_import_birthday_determinism::<OrchardPoolTester>();
+    }
+
+    #[test]
     fn receive_two_notes_with_same_value() {
         testing::pool::receive_two_notes_with_same_value::<OrchardPoolTester>();
     }
