@@ -4113,6 +4113,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-sync-legacy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "zcash_client_backend",
+ "zcash_keys",
+ "zcash_primitives",
+ "zcash_protocol",
+]
+
+[[package]]
+name = "sample-sync-new"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "zcash_client_backend",
+ "zcash_keys",
+ "zcash_primitives",
+ "zcash_protocol",
+]
+
+[[package]]
 name = "sanitize-filename"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -8,6 +8,8 @@ members = [
     "components/zcash_protocol",
     "components/zip321",
     "pczt",
+    "sample-sync/legacy",
+    "sample-sync/new",
     "zcash",
     "zcash_client_backend",
     "zcash_client_memory",

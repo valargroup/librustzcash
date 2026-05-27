@@ -1,0 +1,15 @@
+[package]
+name = "sample-sync-new"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+zcash_client_backend = { workspace = true, features = ["orchard", "transparent-inputs"] }
+zcash_keys = { workspace = true, features = ["orchard"] }
+zcash_primitives = { workspace = true, features = ["transparent-inputs"] }
+zcash_protocol = { workspace = true }
