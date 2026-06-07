@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(all(
     any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"),
-    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
+    zcash_unstable = "zfuture",
     feature = "zip-233",
 ))]
 use zcash_protocol::value::Zatoshis;
@@ -175,10 +175,7 @@ impl Pczt {
             consensus_branch_id,
             lock_time,
             global.expiry_height.into(),
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             Zatoshis::ZERO,
             transparent_bundle,
             None,
