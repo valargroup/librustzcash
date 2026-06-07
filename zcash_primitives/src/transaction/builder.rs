@@ -1106,6 +1106,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             sprout_bundle: None,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: None,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };
@@ -1175,6 +1177,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             sprout_bundle: unauthed_tx.sprout_bundle,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: None,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };

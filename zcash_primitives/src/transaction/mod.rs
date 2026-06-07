@@ -206,6 +206,12 @@ impl TxVersion {
         }
     }
 
+    /// Returns `true` if this transaction version supports the Ironwood protocol.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn has_ironwood(&self) -> bool {
+        matches!(self, TxVersion::V6)
+    }
+
     #[cfg(all(
         any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
         feature = "zip-233"
@@ -379,6 +385,8 @@ pub struct TransactionData<A: Authorization> {
     sprout_bundle: Option<sprout::Bundle>,
     sapling_bundle: Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
     orchard_bundle: Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
+    #[cfg(zcash_unstable = "nu7")]
+    ironwood_bundle: Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
     #[cfg(zcash_unstable = "zfuture")]
     tze_bundle: Option<tze::Bundle<A::TzeAuth>>,
 }
@@ -399,6 +407,8 @@ impl Clone for TransactionData<Authorized> {
             sprout_bundle: self.sprout_bundle.clone(),
             sapling_bundle: self.sapling_bundle.clone(),
             orchard_bundle: self.orchard_bundle.clone(),
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: self.ironwood_bundle.clone(),
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle: self.tze_bundle.clone(),
         }
@@ -449,6 +459,39 @@ impl<A: Authorization> TransactionData<A> {
             sprout_bundle,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: None,
+            #[cfg(zcash_unstable = "zfuture")]
+            tze_bundle: None,
+        }
+    }
+
+    /// Constructs a V6 [`TransactionData`] from its constituent parts,
+    /// including the Ironwood bundle.
+    #[cfg(zcash_unstable = "nu7")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_v6(
+        consensus_branch_id: BranchId,
+        lock_time: u32,
+        expiry_height: BlockHeight,
+        #[cfg(feature = "zip-233")] zip233_amount: Zatoshis,
+        transparent_bundle: Option<transparent::Bundle<A::TransparentAuth>>,
+        sapling_bundle: Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
+        orchard_bundle: Option<orchard::Bundle<A::OrchardAuth, ZatBalance>>,
+        ironwood_bundle: Option<orchard::Bundle<A::OrchardAuth, ZatBalance>>,
+    ) -> Self {
+        TransactionData {
+            version: TxVersion::V6,
+            consensus_branch_id,
+            lock_time,
+            expiry_height,
+            #[cfg(feature = "zip-233")]
+            zip233_amount,
+            transparent_bundle,
+            sprout_bundle: None,
+            sapling_bundle,
+            orchard_bundle,
+            ironwood_bundle,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle: None,
         }
@@ -481,6 +524,8 @@ impl<A: Authorization> TransactionData<A> {
             sprout_bundle,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: None,
             tze_bundle,
         }
     }
@@ -517,6 +562,11 @@ impl<A: Authorization> TransactionData<A> {
 
     pub fn orchard_bundle(&self) -> Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>> {
         self.orchard_bundle.as_ref()
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn ironwood_bundle(&self) -> Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>> {
+        self.ironwood_bundle.as_ref()
     }
 
     #[cfg(all(
@@ -559,6 +609,10 @@ impl<A: Authorization> TransactionData<A> {
                     self.orchard_bundle
                         .as_ref()
                         .map_or_else(ZatBalance::zero, |b| *b.value_balance()),
+                    #[cfg(zcash_unstable = "nu7")]
+                    self.ironwood_bundle
+                        .as_ref()
+                        .map_or_else(ZatBalance::zero, |b| *b.value_balance()),
                     #[cfg(all(
                         any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
                         feature = "zip-233"
@@ -593,6 +647,8 @@ impl<A: Authorization> TransactionData<A> {
             digester.digest_transparent(self.transparent_bundle.as_ref()),
             digester.digest_sapling(self.sapling_bundle.as_ref()),
             digester.digest_orchard(self.orchard_bundle.as_ref()),
+            #[cfg(zcash_unstable = "nu7")]
+            digester.digest_ironwood(self.ironwood_bundle.as_ref()),
             #[cfg(zcash_unstable = "zfuture")]
             digester.digest_tze(self.tze_bundle.as_ref()),
         )
@@ -626,9 +682,10 @@ impl<A: Authorization> TransactionData<A> {
         f_sapling: impl FnOnce(
             Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
         ) -> Option<sapling::Bundle<B::SaplingAuth, ZatBalance>>,
-        f_orchard: impl FnOnce(
+        mut f_orchard: impl FnMut(
             Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
-        ) -> Option<orchard::bundle::Bundle<B::OrchardAuth, ZatBalance>>,
+        )
+            -> Option<orchard::bundle::Bundle<B::OrchardAuth, ZatBalance>>,
         #[cfg(zcash_unstable = "zfuture")] f_tze: impl FnOnce(
             Option<tze::Bundle<A::TzeAuth>>,
         )
@@ -648,6 +705,8 @@ impl<A: Authorization> TransactionData<A> {
             sprout_bundle: self.sprout_bundle,
             sapling_bundle: f_sapling(self.sapling_bundle),
             orchard_bundle: f_orchard(self.orchard_bundle),
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: f_orchard(self.ironwood_bundle),
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle: f_tze(self.tze_bundle),
         }
@@ -667,10 +726,12 @@ impl<A: Authorization> TransactionData<A> {
             Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
         )
             -> Result<Option<sapling::Bundle<B::SaplingAuth, ZatBalance>>, E>,
-        f_orchard: impl FnOnce(
+        mut f_orchard: impl FnMut(
             Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
-        )
-            -> Result<Option<orchard::bundle::Bundle<B::OrchardAuth, ZatBalance>>, E>,
+        ) -> Result<
+            Option<orchard::bundle::Bundle<B::OrchardAuth, ZatBalance>>,
+            E,
+        >,
         #[cfg(zcash_unstable = "zfuture")] f_tze: impl FnOnce(
             Option<tze::Bundle<A::TzeAuth>>,
         ) -> Result<
@@ -692,6 +753,8 @@ impl<A: Authorization> TransactionData<A> {
             sprout_bundle: self.sprout_bundle,
             sapling_bundle: f_sapling(self.sapling_bundle)?,
             orchard_bundle: f_orchard(self.orchard_bundle)?,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: f_orchard(self.ironwood_bundle)?,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle: f_tze(self.tze_bundle)?,
         })
@@ -728,6 +791,14 @@ impl<A: Authorization> TransactionData<A> {
                 )
             }),
             orchard_bundle: self.orchard_bundle.map(|b| {
+                b.map_authorization(
+                    &mut f_orchard,
+                    |f, _, s| f.map_spend_auth(s),
+                    |f, a| f.map_authorization(a),
+                )
+            }),
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: self.ironwood_bundle.map(|b| {
                 b.map_authorization(
                     &mut f_orchard,
                     |f, _, s| f.map_spend_auth(s),
@@ -907,6 +978,8 @@ impl Transaction {
                     )
                 }),
                 orchard_bundle: None,
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_bundle: None,
                 #[cfg(zcash_unstable = "zfuture")]
                 tze_bundle: None,
             },
@@ -982,6 +1055,8 @@ impl Transaction {
             sprout_bundle: None,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle: None,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle: None,
         };
@@ -996,6 +1071,8 @@ impl Transaction {
         let transparent_bundle = Self::read_transparent(&mut reader)?;
         let sapling_bundle = sapling_serialization::read_v5_bundle(&mut reader)?;
         let orchard_bundle = orchard_serialization::read_v6_bundle(&mut reader)?;
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood_bundle = orchard_serialization::read_v6_bundle(&mut reader)?;
 
         #[cfg(zcash_unstable = "zfuture")]
         let tze_bundle = version
@@ -1015,6 +1092,8 @@ impl Transaction {
             sprout_bundle: None,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_bundle,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };
@@ -1180,6 +1259,8 @@ impl Transaction {
         self.write_transparent(&mut writer)?;
         self.write_v5_sapling(&mut writer)?;
         orchard_serialization::write_v6_bundle(self.orchard_bundle.as_ref(), &mut writer)?;
+        #[cfg(zcash_unstable = "nu7")]
+        orchard_serialization::write_v6_bundle(self.ironwood_bundle.as_ref(), &mut writer)?;
 
         #[cfg(zcash_unstable = "zfuture")]
         self.write_tze(&mut writer)?;
@@ -1257,6 +1338,8 @@ pub struct TxDigests<A> {
     pub transparent_digests: Option<TransparentDigests<A>>,
     pub sapling_digest: Option<A>,
     pub orchard_digest: Option<A>,
+    #[cfg(zcash_unstable = "nu7")]
+    pub ironwood_digest: Option<A>,
     #[cfg(zcash_unstable = "zfuture")]
     pub tze_digests: Option<TzeDigests<A>>,
 }
@@ -1266,6 +1349,8 @@ pub trait TransactionDigest<A: Authorization> {
     type TransparentDigest;
     type SaplingDigest;
     type OrchardDigest;
+    #[cfg(zcash_unstable = "nu7")]
+    type IronwoodDigest;
 
     #[cfg(zcash_unstable = "zfuture")]
     type TzeDigest;
@@ -1300,6 +1385,12 @@ pub trait TransactionDigest<A: Authorization> {
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest;
 
+    #[cfg(zcash_unstable = "nu7")]
+    fn digest_ironwood(
+        &self,
+        ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
+    ) -> Self::IronwoodDigest;
+
     #[cfg(zcash_unstable = "zfuture")]
     fn digest_tze(&self, tze_bundle: Option<&tze::Bundle<A::TzeAuth>>) -> Self::TzeDigest;
 
@@ -1309,6 +1400,7 @@ pub trait TransactionDigest<A: Authorization> {
         transparent_digest: Self::TransparentDigest,
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
+        #[cfg(zcash_unstable = "nu7")] ironwood_digest: Self::IronwoodDigest,
         #[cfg(zcash_unstable = "zfuture")] tze_digest: Self::TzeDigest,
     ) -> Self::Digest;
 }
@@ -1398,6 +1490,11 @@ pub mod testing {
             transparent_bundle in transparent::arb_bundle(),
             sapling_bundle in sapling::arb_bundle_for_version(version),
             orchard_bundle in orchard::arb_bundle_for_version(version),
+            ironwood_bundle in if version.has_ironwood() {
+                orchard::arb_bundle_for_version(version).boxed()
+            } else {
+                Just(None).boxed()
+            },
             version in Just(version),
         ) -> TransactionData<Authorized> {
             TransactionData {
@@ -1409,6 +1506,7 @@ pub mod testing {
                 sprout_bundle: None,
                 sapling_bundle,
                 orchard_bundle,
+                ironwood_bundle,
             }
         }
     }
@@ -1424,6 +1522,11 @@ pub mod testing {
             transparent_bundle in transparent::arb_bundle(),
             sapling_bundle in sapling::arb_bundle_for_version(version),
             orchard_bundle in orchard::arb_bundle_for_version(version),
+            ironwood_bundle in if version.has_ironwood() {
+                orchard::arb_bundle_for_version(version).boxed()
+            } else {
+                Just(None).boxed()
+            },
             version in Just(version),
         ) -> TransactionData<Authorized> {
             TransactionData {
@@ -1436,6 +1539,7 @@ pub mod testing {
                 sprout_bundle: None,
                 sapling_bundle,
                 orchard_bundle,
+                ironwood_bundle,
             }
         }
     }

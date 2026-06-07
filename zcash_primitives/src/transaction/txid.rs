@@ -37,6 +37,8 @@ const ZCASH_TX_PERSONALIZATION_PREFIX: &[u8; 12] = b"ZcashTxHash_";
 const ZCASH_HEADERS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdHeadersHash";
 pub(crate) const ZCASH_TRANSPARENT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdTranspaHash";
 const ZCASH_SAPLING_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdSaplingHash";
+#[cfg(zcash_unstable = "nu7")]
+const ZCASH_IRONWOOD_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdIronwd_Hash";
 #[cfg(zcash_unstable = "zfuture")]
 const ZCASH_TZE_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdTZE____Hash";
 
@@ -289,6 +291,18 @@ fn hash_sapling_txid_empty() -> Blake2bHash {
     hasher(ZCASH_SAPLING_HASH_PERSONALIZATION).finalize()
 }
 
+#[cfg(zcash_unstable = "nu7")]
+fn hash_ironwood_txid_data(ironwood_digest: Option<Blake2bHash>) -> Blake2bHash {
+    let mut h = hasher(ZCASH_IRONWOOD_HASH_PERSONALIZATION);
+    h.write_all(
+        ironwood_digest
+            .unwrap_or_else(orchard::commitments::hash_bundle_txid_empty)
+            .as_bytes(),
+    )
+    .unwrap();
+    h.finalize()
+}
+
 #[cfg(zcash_unstable = "zfuture")]
 fn hash_tze_txid_data(tze_digests: Option<&TzeDigests<Blake2bHash>>) -> Blake2bHash {
     let mut h = hasher(ZCASH_TZE_HASH_PERSONALIZATION);
@@ -316,6 +330,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
     type TransparentDigest = Option<TransparentDigests<Blake2bHash>>;
     type SaplingDigest = Option<Blake2bHash>;
     type OrchardDigest = Option<Blake2bHash>;
+    #[cfg(zcash_unstable = "nu7")]
+    type IronwoodDigest = Option<Blake2bHash>;
 
     #[cfg(zcash_unstable = "zfuture")]
     type TzeDigest = Option<TzeDigests<Blake2bHash>>;
@@ -368,6 +384,14 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         orchard_bundle.map(|b| b.commitment().0)
     }
 
+    #[cfg(zcash_unstable = "nu7")]
+    fn digest_ironwood(
+        &self,
+        ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
+    ) -> Self::IronwoodDigest {
+        ironwood_bundle.map(|b| b.commitment().0)
+    }
+
     #[cfg(zcash_unstable = "zfuture")]
     fn digest_tze(&self, tze_bundle: Option<&tze::Bundle<A::TzeAuth>>) -> Self::TzeDigest {
         tze_bundle.map(tze_digests)
@@ -379,6 +403,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         transparent_digests: Self::TransparentDigest,
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
+        #[cfg(zcash_unstable = "nu7")] ironwood_digest: Self::IronwoodDigest,
         #[cfg(zcash_unstable = "zfuture")] tze_digests: Self::TzeDigest,
     ) -> Self::Digest {
         TxDigests {
@@ -386,6 +411,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
             transparent_digests,
             sapling_digest,
             orchard_digest,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_digest,
             #[cfg(zcash_unstable = "zfuture")]
             tze_digests,
         }
@@ -399,6 +426,7 @@ pub(crate) fn to_hash(
     transparent_digest: Blake2bHash,
     sapling_digest: Option<Blake2bHash>,
     orchard_digest: Option<Blake2bHash>,
+    #[cfg(zcash_unstable = "nu7")] ironwood_digest: Option<Blake2bHash>,
     #[cfg(zcash_unstable = "zfuture")] tze_digests: Option<&TzeDigests<Blake2bHash>>,
 ) -> Blake2bHash {
     let mut personal = [0; 16];
@@ -423,6 +451,12 @@ pub(crate) fn to_hash(
     )
     .unwrap();
 
+    #[cfg(zcash_unstable = "nu7")]
+    if _txversion.has_ironwood() {
+        h.write_all(hash_ironwood_txid_data(ironwood_digest).as_bytes())
+            .unwrap();
+    }
+
     #[cfg(zcash_unstable = "zfuture")]
     if _txversion.has_tze() {
         h.write_all(hash_tze_txid_data(tze_digests).as_bytes())
@@ -444,6 +478,8 @@ pub fn to_txid(
         hash_transparent_txid_data(digests.transparent_digests.as_ref()),
         digests.sapling_digest,
         digests.orchard_digest,
+        #[cfg(zcash_unstable = "nu7")]
+        digests.ironwood_digest,
         #[cfg(zcash_unstable = "zfuture")]
         digests.tze_digests.as_ref(),
     );
@@ -464,6 +500,8 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
     type TransparentDigest = Blake2bHash;
     type SaplingDigest = Blake2bHash;
     type OrchardDigest = Blake2bHash;
+    #[cfg(zcash_unstable = "nu7")]
+    type IronwoodDigest = Blake2bHash;
 
     #[cfg(zcash_unstable = "zfuture")]
     type TzeDigest = Blake2bHash;
@@ -532,6 +570,16 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         })
     }
 
+    #[cfg(zcash_unstable = "nu7")]
+    fn digest_ironwood(
+        &self,
+        ironwood_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
+    ) -> Self::IronwoodDigest {
+        ironwood_bundle.map_or_else(orchard::commitments::hash_bundle_auth_empty, |b| {
+            b.authorizing_commitment().0
+        })
+    }
+
     #[cfg(zcash_unstable = "zfuture")]
     fn digest_tze(&self, tze_bundle: Option<&tze::Bundle<tze::Authorized>>) -> Blake2bHash {
         let mut h = hasher(ZCASH_TZE_WITNESSES_HASH_PERSONALIZATION);
@@ -549,10 +597,9 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         transparent_digest: Self::TransparentDigest,
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
+        #[cfg(zcash_unstable = "nu7")] ironwood_digest: Self::IronwoodDigest,
         #[cfg(zcash_unstable = "zfuture")] tze_digest: Self::TzeDigest,
     ) -> Self::Digest {
-        let digests = [transparent_digest, sapling_digest, orchard_digest];
-
         let mut personal = [0; 16];
         personal[..12].copy_from_slice(ZCASH_AUTH_PERSONALIZATION_PREFIX);
         (&mut personal[12..])
@@ -560,8 +607,13 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
             .unwrap();
 
         let mut h = hasher(&personal);
-        for digest in &digests {
-            h.write_all(digest.as_bytes()).unwrap();
+        h.write_all(transparent_digest.as_bytes()).unwrap();
+        h.write_all(sapling_digest.as_bytes()).unwrap();
+        h.write_all(orchard_digest.as_bytes()).unwrap();
+
+        #[cfg(zcash_unstable = "nu7")]
+        if TxVersion::suggested_for_branch(consensus_branch_id).has_ironwood() {
+            h.write_all(ironwood_digest.as_bytes()).unwrap();
         }
 
         #[cfg(zcash_unstable = "zfuture")]

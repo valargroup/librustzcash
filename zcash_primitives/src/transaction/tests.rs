@@ -59,6 +59,11 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
         tx.orchard_bundle.as_ref().map(|v| *v.value_balance()),
         txo.orchard_bundle.as_ref().map(|v| *v.value_balance())
     );
+    #[cfg(zcash_unstable = "nu7")]
+    prop_assert_eq!(
+        tx.ironwood_bundle.as_ref().map(|v| *v.value_balance()),
+        txo.ironwood_bundle.as_ref().map(|v| *v.value_balance())
+    );
     #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
     if tx.version.has_zip233() {
         prop_assert_eq!(tx.zip233_amount, txo.zip233_amount);
