@@ -16,41 +16,6 @@ use crate::{
     roles::combiner::{merge_map, merge_optional},
 };
 
-/// Orchard note plaintext version.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NotePlaintextVersion {
-    /// The [ZIP 212] Orchard note plaintext format, identified by lead byte
-    /// `0x02`.
-    ///
-    /// [ZIP 212]: https://zips.z.cash/zip-0212
-    V2,
-    /// The quantum-recoverable Orchard note plaintext version defined in
-    /// [ZIP 2005].
-    ///
-    /// [ZIP 2005]: https://zips.z.cash/zip-2005
-    V3,
-}
-
-#[cfg(feature = "orchard")]
-impl From<NotePlaintextVersion> for orchard::note::NoteVersion {
-    fn from(version: NotePlaintextVersion) -> Self {
-        match version {
-            NotePlaintextVersion::V2 => Self::V2,
-            NotePlaintextVersion::V3 => Self::V3,
-        }
-    }
-}
-
-#[cfg(feature = "orchard")]
-impl From<orchard::note::NoteVersion> for NotePlaintextVersion {
-    fn from(version: orchard::note::NoteVersion) -> Self {
-        match version {
-            orchard::note::NoteVersion::V2 => Self::V2,
-            orchard::note::NoteVersion::V3 => Self::V3,
-        }
-    }
-}
-
 /// PCZT fields that are specific to producing the transaction's Orchard bundle (if any).
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
 pub struct Bundle {
@@ -180,13 +145,6 @@ pub struct Spend {
     /// - This is required by the Prover.
     pub(crate) rseed: Option<[u8; 32]>,
 
-    /// The plaintext version of the note being spent.
-    ///
-    /// This is set by the Constructor, and is required by Verifiers and
-    /// Provers to reconstruct the note commitment.
-    #[getset(get = "pub")]
-    pub(crate) note_version: NotePlaintextVersion,
-
     /// The full viewing key that received the note being spent.
     ///
     /// - This is set by the Updater.
@@ -236,12 +194,6 @@ pub struct Output {
     //
     #[getset(get = "pub")]
     pub(crate) cmx: [u8; 32],
-    /// The plaintext version of the note being created.
-    ///
-    /// This is set by the Constructor, and is required by Verifiers and
-    /// Provers to reconstruct the note commitment.
-    #[getset(get = "pub")]
-    pub(crate) note_version: NotePlaintextVersion,
     #[getset(get = "pub")]
     pub(crate) ephemeral_key: [u8; 32],
     /// The encrypted note plaintext for the output.
@@ -389,7 +341,6 @@ impl Bundle {
                         value,
                         rho,
                         rseed,
-                        note_version: spend_note_version,
                         fvk,
                         witness,
                         alpha,
@@ -400,7 +351,6 @@ impl Bundle {
                 output:
                     Output {
                         cmx,
-                        note_version: output_note_version,
                         ephemeral_key,
                         enc_ciphertext,
                         out_ciphertext,
@@ -418,9 +368,7 @@ impl Bundle {
             if lhs.cv_net != cv_net
                 || lhs.spend.nullifier != nullifier
                 || lhs.spend.rk != rk
-                || lhs.spend.note_version != spend_note_version
                 || lhs.output.cmx != cmx
-                || lhs.output.note_version != output_note_version
                 || lhs.output.ephemeral_key != ephemeral_key
                 || lhs.output.enc_ciphertext != enc_ciphertext
                 || lhs.output.out_ciphertext != out_ciphertext
@@ -471,7 +419,6 @@ impl Bundle {
                     action.spend.value,
                     action.spend.rho,
                     action.spend.rseed,
-                    action.spend.note_version.into(),
                     action.spend.fvk,
                     action.spend.witness,
                     action.spend.alpha,
@@ -492,7 +439,6 @@ impl Bundle {
                 let output = orchard::pczt::Output::parse(
                     *spend.nullifier(),
                     action.output.cmx,
-                    action.output.note_version.into(),
                     action.output.ephemeral_key,
                     action.output.enc_ciphertext,
                     action.output.out_ciphertext,
@@ -549,7 +495,6 @@ impl Bundle {
                         value: spend.value().map(|value| value.inner()),
                         rho: spend.rho().map(|rho| rho.to_bytes()),
                         rseed: spend.rseed().map(|rseed| *rseed.as_bytes()),
-                        note_version: (*spend.note_version()).into(),
                         fvk: spend.fvk().as_ref().map(|fvk| fvk.to_bytes()),
                         witness: spend.witness().as_ref().map(|witness| {
                             (
@@ -583,7 +528,6 @@ impl Bundle {
                     },
                     output: Output {
                         cmx: output.cmx().to_bytes(),
-                        note_version: (*output.note_version()).into(),
                         ephemeral_key: output.encrypted_note().epk_bytes,
                         enc_ciphertext: output.encrypted_note().enc_ciphertext.to_vec(),
                         out_ciphertext: output.encrypted_note().out_ciphertext.to_vec(),
