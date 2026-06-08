@@ -48,8 +48,9 @@ use super::InputSource;
 use super::TransparentOutputFilter;
 use crate::{
     data_api::{
-        Account, MaxSpendMode, SentTransaction, SentTransactionOutput, WalletCommitmentTrees,
-        WalletRead, WalletWrite, error::Error, wallet::input_selection::propose_send_max,
+        Account, MaxSpendMode, SentTransaction, SentTransactionOutput, TargetValue,
+        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
+        wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
     fees::{
@@ -282,6 +283,17 @@ pub type CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N> = Error<
     <FeeRuleT as FeeRule>::Error,
     ChangeErrT,
     N,
+>;
+
+/// Errors that may be generated in creating an Orchard to Ironwood migration transaction.
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+pub type MigrateToIronwoodErrT<DbT, FeeRuleT> = Error<
+    <DbT as WalletRead>::Error,
+    <DbT as WalletCommitmentTrees>::Error,
+    std::convert::Infallible,
+    <FeeRuleT as FeeRule>::Error,
+    std::convert::Infallible,
+    <DbT as InputSource>::NoteRef,
 >;
 
 /// Errors that may be generated in the execution of proposals that may send shielded inputs.
@@ -997,6 +1009,253 @@ impl SpendingKeys {
             standalone_transparent_keys: HashMap::new(),
         }
     }
+}
+
+/// The result of creating an Orchard to Ironwood migration transaction.
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+pub struct MigrationTransaction {
+    txid: TxId,
+    fee_amount: Zatoshis,
+}
+
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+impl MigrationTransaction {
+    /// Returns the ID of the created transaction.
+    pub fn txid(&self) -> TxId {
+        self.txid
+    }
+
+    /// Returns the fee paid by the created transaction.
+    pub fn fee_amount(&self) -> Zatoshis {
+        self.fee_amount
+    }
+}
+
+/// Construct, prove, sign, and persist one Orchard-funded Ironwood migration transaction.
+///
+/// This is intentionally narrower than [`create_proposed_transactions`]. It spends only Orchard
+/// notes from the provided account and creates one Ironwood output to that account's internal
+/// Orchard receiver. Any excess selected value is returned to Orchard change.
+///
+/// The Ironwood output is not inserted as a received wallet note. Current wallet storage and
+/// scanning APIs do not maintain a separate Ironwood note commitment tree, so callers should track
+/// the returned transaction ID until first-class Ironwood wallet support is added.
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+pub fn create_orchard_to_ironwood_transaction<DbT, ParamsT, FeeRuleT>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    spend_prover: &impl SpendProver,
+    output_prover: &impl OutputProver,
+    spending_keys: &SpendingKeys,
+    ovk_policy: OvkPolicy,
+    amount: Zatoshis,
+    memo: Option<MemoBytes>,
+    fee_rule: &FeeRuleT,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<MigrationTransaction, MigrateToIronwoodErrT<DbT, FeeRuleT>>
+where
+    DbT: WalletWrite
+        + WalletCommitmentTrees
+        + InputSource<AccountId = <DbT as WalletRead>::AccountId, Error = <DbT as WalletRead>::Error>,
+    DbT::NoteRef: Copy + Eq + Ord,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+{
+    let ufvk = spending_keys.usk.to_unified_full_viewing_key();
+    let account_id = wallet_db
+        .get_account_for_ufvk(&ufvk)
+        .map_err(Error::DataSource)?
+        .ok_or(Error::KeyNotRecognized)?
+        .id();
+    let orchard_fvk = ufvk
+        .orchard()
+        .cloned()
+        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+    let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
+    let input_sources =
+        NonEmpty::from_vec(vec![PoolType::ORCHARD]).expect("input sources is nonempty");
+    let internal_ovk = match ovk_policy {
+        OvkPolicy::Sender => Some(
+            ufvk.select_ovk(zip32::Scope::Internal, &input_sources)
+                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
+        ),
+        OvkPolicy::Custom { internal_ovk, .. } => internal_ovk,
+        OvkPolicy::Discard => None,
+    };
+    let memo = memo.unwrap_or_else(MemoBytes::empty);
+
+    let (target_height, anchor_height) = wallet_db
+        .get_target_and_anchor_heights(confirmations_policy.trusted())
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?;
+
+    let mut fee_estimate = Zatoshis::ZERO;
+    let mut last_available = Zatoshis::ZERO;
+    let mut last_required = amount;
+
+    for _ in 0..4 {
+        let required = (amount + fee_estimate).ok_or(BalanceError::Overflow)?;
+        last_required = required;
+        let selected_notes = wallet_db
+            .select_spendable_notes(
+                account_id,
+                TargetValue::AtLeast(required),
+                &[ShieldedProtocol::Orchard],
+                target_height,
+                confirmations_policy,
+                &[],
+            )
+            .map_err(Error::DataSource)?;
+        let selected_value = selected_notes.orchard_value()?;
+        last_available = selected_value;
+
+        if selected_value < required {
+            break;
+        }
+
+        let orchard_notes = selected_notes.take_orchard();
+        let (orchard_anchor, orchard_inputs) = wallet_db
+            .with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|orchard_tree| {
+                let anchor = orchard_tree
+                    .root_at_checkpoint_id(&anchor_height)?
+                    .ok_or(ProposalError::AnchorNotFound(anchor_height))?
+                    .into();
+
+                let inputs: Vec<(orchard::Note, orchard::tree::MerklePath)> = orchard_notes
+                    .iter()
+                    .map(|selected| {
+                        orchard_tree
+                            .witness_at_checkpoint_id_caching(
+                                selected.note_commitment_tree_position(),
+                                &anchor_height,
+                            )
+                            .and_then(|witness| {
+                                witness.ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                            })
+                            .map(|merkle_path| (*selected.note(), merkle_path.into()))
+                            .map_err(Error::from)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok((anchor, inputs))
+            })?;
+
+        let make_builder = |change_value: Option<Zatoshis>| {
+            let mut builder = Builder::new(
+                params.clone(),
+                BlockHeight::from(target_height),
+                BuildConfig::Standard {
+                    sapling_anchor: None,
+                    orchard_anchor: Some(orchard_anchor),
+                    ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                },
+            );
+
+            for (note, merkle_path) in orchard_inputs.iter() {
+                builder.add_orchard_spend(orchard_fvk.clone(), *note, merkle_path.clone())?;
+            }
+
+            builder.add_ironwood_output(
+                internal_ovk.clone().map(Into::into),
+                recipient,
+                amount,
+                memo.clone(),
+            )?;
+
+            if let Some(change_value) = change_value {
+                builder.add_orchard_output(
+                    internal_ovk.clone().map(Into::into),
+                    recipient,
+                    change_value,
+                    MemoBytes::empty(),
+                )?;
+            }
+
+            Ok::<_, zcash_primitives::transaction::builder::Error<FeeRuleT::Error>>(builder)
+        };
+
+        let builder_without_change = make_builder(None)?;
+        let fee_without_change = builder_without_change
+            .get_fee(fee_rule)
+            .map_err(|e| Error::Builder(zcash_primitives::transaction::builder::Error::Fee(e)))?;
+        let required_without_change =
+            (amount + fee_without_change).ok_or(BalanceError::Overflow)?;
+
+        let (builder, fee_amount) = if selected_value == required_without_change {
+            (builder_without_change, fee_without_change)
+        } else if selected_value > required_without_change {
+            let builder_with_placeholder_change = make_builder(Some(Zatoshis::const_from_u64(1)))?;
+            let fee_with_change =
+                builder_with_placeholder_change
+                    .get_fee(fee_rule)
+                    .map_err(|e| {
+                        Error::Builder(zcash_primitives::transaction::builder::Error::Fee(e))
+                    })?;
+            let required_with_change = (amount + fee_with_change).ok_or(BalanceError::Overflow)?;
+
+            if selected_value < required_with_change {
+                fee_estimate = fee_with_change;
+                last_required = required_with_change;
+                continue;
+            }
+
+            let change_value =
+                (selected_value - required_with_change).ok_or(BalanceError::Underflow)?;
+            if change_value.is_zero() {
+                (make_builder(None)?, fee_with_change)
+            } else {
+                (make_builder(Some(change_value))?, fee_with_change)
+            }
+        } else {
+            fee_estimate = fee_without_change;
+            last_required = required_without_change;
+            continue;
+        };
+
+        let transparent_signing_set = TransparentSigningSet::new();
+        #[cfg(not(feature = "transparent-inputs"))]
+        let _ = &transparent_signing_set;
+        let sapling_extsks = &[
+            spending_keys.usk.sapling().clone(),
+            spending_keys.usk.sapling().derive_internal(),
+        ];
+        let orchard_saks = &[spending_keys.usk.orchard().into()];
+        let build_result = builder.build(
+            &transparent_signing_set,
+            sapling_extsks,
+            orchard_saks,
+            OsRng,
+            spend_prover,
+            output_prover,
+            fee_rule,
+        )?;
+        let txid = build_result.transaction().txid();
+        let outputs: Vec<SentTransactionOutput<_>> = Vec::new();
+        #[cfg(feature = "transparent-inputs")]
+        let utxos_spent = Vec::new();
+        let sent_tx = SentTransaction::new(
+            build_result.transaction(),
+            time::OffsetDateTime::now_utc(),
+            target_height,
+            account_id,
+            &outputs,
+            fee_amount,
+            #[cfg(feature = "transparent-inputs")]
+            &utxos_spent,
+        );
+
+        wallet_db
+            .store_transactions_to_be_sent(std::slice::from_ref(&sent_tx))
+            .map_err(Error::DataSource)?;
+
+        return Ok(MigrationTransaction { txid, fee_amount });
+    }
+
+    Err(Error::InsufficientFunds {
+        available: last_available,
+        required: last_required,
+    })
 }
 
 /// Construct, prove, and sign a transaction or series of transactions using the inputs supplied by
