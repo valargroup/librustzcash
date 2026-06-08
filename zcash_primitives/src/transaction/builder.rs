@@ -60,14 +60,6 @@ use crate::{
 
 use super::components::sapling::zip212_enforcement;
 
-#[cfg(zcash_unstable = "nu7")]
-fn orchard_protocol_for_version(version: TxVersion) -> orchard::builder::BundleProtocol {
-    match version {
-        TxVersion::V6_Qr => orchard::builder::BundleProtocol::Ironwood,
-        _ => orchard::builder::BundleProtocol::Orchard,
-    }
-}
-
 /// Since Blossom activation, the default transaction expiry delta should be 40 blocks.
 /// <https://zips.z.cash/zip-0203#changes-for-blossom>
 pub const DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
@@ -107,16 +99,29 @@ pub enum Error<FE> {
     SaplingBuild(sapling::builder::Error),
     /// An error occurred in constructing the Orchard parts of a transaction.
     OrchardBuild(orchard::builder::BuildError),
+    /// An error occurred in constructing the Ironwood parts of a transaction.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodBuild(orchard::builder::BuildError),
     /// An error occurred in adding an Orchard Spend to a transaction.
     OrchardSpend(orchard::builder::SpendError),
     /// An error occurred in adding an Orchard Output to a transaction.
     OrchardRecipient(orchard::builder::OutputError),
+    /// An error occurred in adding an Ironwood Spend to a transaction.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodSpend(orchard::builder::SpendError),
+    /// An error occurred in adding an Ironwood Output to a transaction.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodRecipient(orchard::builder::OutputError),
     /// The builder was constructed without support for the Sapling pool, but a Sapling
     /// spend or output was added.
     SaplingBuilderNotAvailable,
     /// The builder was constructed with a target height before NU5 activation, but an Orchard
     /// spend or output was added.
     OrchardBuilderNotAvailable,
+    /// The builder was constructed with a target height before NU7 activation,
+    /// or without an Ironwood anchor, but an Ironwood spend or output was added.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodBuilderNotAvailable,
     /// An error occurred in constructing a coinbase transaction.
     Coinbase(coinbase::Error),
     /// The proposed transaction version or the consensus branch id for the target height does not
@@ -144,8 +149,16 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
             Error::TransparentBuild(err) => err.fmt(f),
             Error::SaplingBuild(err) => err.fmt(f),
             Error::OrchardBuild(err) => write!(f, "{err:?}"),
+            #[cfg(zcash_unstable = "nu7")]
+            Error::IronwoodBuild(err) => write!(f, "{err:?}"),
             Error::OrchardSpend(err) => write!(f, "Could not add Orchard spend: {err}"),
             Error::OrchardRecipient(err) => write!(f, "Could not add Orchard recipient: {err}"),
+            #[cfg(zcash_unstable = "nu7")]
+            Error::IronwoodSpend(err) => write!(f, "Could not add Ironwood spend: {err}"),
+            #[cfg(zcash_unstable = "nu7")]
+            Error::IronwoodRecipient(err) => {
+                write!(f, "Could not add Ironwood recipient: {err}")
+            }
             Error::SaplingBuilderNotAvailable => write!(
                 f,
                 "Cannot create Sapling transactions without a Sapling anchor"
@@ -153,6 +166,11 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
             Error::OrchardBuilderNotAvailable => write!(
                 f,
                 "Cannot create Orchard transactions without an Orchard anchor, or before NU5 activation"
+            ),
+            #[cfg(zcash_unstable = "nu7")]
+            Error::IronwoodBuilderNotAvailable => write!(
+                f,
+                "Cannot create Ironwood transactions without an Ironwood anchor, or before NU7 activation"
             ),
             Error::Coinbase(err) => write!(
                 f,
@@ -247,6 +265,8 @@ pub enum BuildConfig {
     Standard {
         sapling_anchor: Option<sapling::Anchor>,
         orchard_anchor: Option<orchard::Anchor>,
+        #[cfg(zcash_unstable = "nu7")]
+        ironwood_anchor: Option<orchard::Anchor>,
     },
     Coinbase {
         miner_data: Option<PushValue>,
@@ -284,6 +304,21 @@ impl BuildConfig {
         }
     }
 
+    /// Returns the Ironwood bundle type and anchor for this configuration.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn ironwood_builder_config(
+        &self,
+    ) -> Option<(orchard::builder::BundleType, orchard::Anchor)> {
+        match self {
+            BuildConfig::Standard {
+                ironwood_anchor, ..
+            } => ironwood_anchor
+                .as_ref()
+                .map(|a| (orchard::builder::BundleType::DEFAULT, *a)),
+            BuildConfig::Coinbase { .. } => None,
+        }
+    }
+
     /// Returns `true` if this configuration is for building a coinbase transaction.
     pub fn is_coinbase(&self) -> bool {
         matches!(self, BuildConfig::Coinbase { .. })
@@ -298,6 +333,8 @@ pub struct BuildResult {
     transaction: Transaction,
     sapling_meta: SaplingMetadata,
     orchard_meta: orchard::builder::BundleMetadata,
+    #[cfg(zcash_unstable = "nu7")]
+    ironwood_meta: orchard::builder::BundleMetadata,
 }
 
 impl BuildResult {
@@ -316,6 +353,14 @@ impl BuildResult {
     /// Actions that contain them in the Orchard bundle in the newly constructed transaction.
     pub fn orchard_meta(&self) -> &orchard::builder::BundleMetadata {
         &self.orchard_meta
+    }
+
+    /// Returns the mapping from Ironwood inputs and outputs to the randomized
+    /// positions of the Actions that contain them in the Ironwood bundle in
+    /// the newly constructed transaction.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn ironwood_meta(&self) -> &orchard::builder::BundleMetadata {
+        &self.ironwood_meta
     }
 }
 
@@ -356,6 +401,8 @@ pub struct Builder<'a, P, U> {
     transparent_builder: TransparentBuilder,
     sapling_builder: Option<sapling::builder::Builder>,
     orchard_builder: Option<orchard::builder::Builder>,
+    #[cfg(zcash_unstable = "nu7")]
+    ironwood_builder: Option<orchard::builder::Builder>,
     #[cfg(zcash_unstable = "zfuture")]
     tze_builder: TzeBuilder<'a, TransactionData<Unauthorized>>,
     #[cfg(not(zcash_unstable = "zfuture"))]
@@ -403,6 +450,13 @@ impl<P, U> Builder<'_, P, U> {
             .map_or_else(|| &[][..], |b| b.outputs())
     }
 
+    #[cfg(zcash_unstable = "nu7")]
+    fn ironwood_in_use(&self) -> bool {
+        self.ironwood_builder
+            .as_ref()
+            .is_some_and(|b| !b.spends().is_empty() || !b.outputs().is_empty())
+    }
+
     /// Checks that the given version supports all features required by the inputs and
     /// outputs already added to the builder.
     fn check_version_compatibility<FE>(&self, version: TxVersion) -> Result<(), Error<FE>> {
@@ -438,6 +492,20 @@ impl<P, U> Builder<'_, P, U> {
                 Some(PoolType::ORCHARD),
             ));
         }
+
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            let ironwood_available =
+                version.has_ironwood() && matches!(self.consensus_branch_id, BranchId::Nu7);
+            if !ironwood_available && self.ironwood_in_use() {
+                return Err(Error::TargetIncompatible(
+                    self.consensus_branch_id,
+                    version,
+                    None,
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -451,35 +519,6 @@ impl<P, U> Builder<'_, P, U> {
     /// added after this call.
     pub fn propose_version<FE>(&mut self, version: TxVersion) -> Result<(), Error<FE>> {
         self.check_version_compatibility(version)?;
-        #[cfg(zcash_unstable = "nu7")]
-        if orchard_protocol_for_version(self.tx_version) != orchard_protocol_for_version(version) {
-            if self
-                .orchard_builder
-                .as_ref()
-                .is_some_and(|b| !b.spends().is_empty() || !b.outputs().is_empty())
-            {
-                return Err(Error::TargetIncompatible(
-                    self.consensus_branch_id,
-                    version,
-                    Some(PoolType::ORCHARD),
-                ));
-            }
-
-            self.orchard_builder = if self.orchard_builder.is_some() {
-                self.build_config
-                    .orchard_builder_config()
-                    .map(|(bundle_type, anchor)| {
-                        orchard::builder::Builder::new(
-                            orchard_protocol_for_version(version),
-                            bundle_type,
-                            anchor,
-                        )
-                    })
-            } else {
-                None
-            };
-        }
-
         self.tx_version = version;
         Ok(())
     }
@@ -503,10 +542,22 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
                 .orchard_builder_config()
                 .map(|(bundle_type, anchor)| {
                     orchard::builder::Builder::new(
-                        #[cfg(zcash_unstable = "nu7")]
-                        orchard_protocol_for_version(tx_version),
-                        #[cfg(not(zcash_unstable = "nu7"))]
                         orchard::builder::BundleProtocol::Orchard,
+                        bundle_type,
+                        anchor,
+                    )
+                })
+        } else {
+            None
+        };
+
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood_builder = if params.is_nu_active(NetworkUpgrade::Nu7, target_height) {
+            build_config
+                .ironwood_builder_config()
+                .map(|(bundle_type, anchor)| {
+                    orchard::builder::Builder::new(
+                        orchard::builder::BundleProtocol::Ironwood,
                         bundle_type,
                         anchor,
                     )
@@ -552,6 +603,8 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder,
             orchard_builder,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_builder,
             #[cfg(zcash_unstable = "zfuture")]
             tze_builder: TzeBuilder::empty(),
             #[cfg(not(zcash_unstable = "zfuture"))]
@@ -583,6 +636,8 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
             transparent_builder: self.transparent_builder,
             sapling_builder: self.sapling_builder,
             orchard_builder: self.orchard_builder,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_builder: self.ironwood_builder,
             tze_builder: self.tze_builder,
             _progress_notifier,
         }
@@ -618,25 +673,6 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         value: Zatoshis,
         memo: MemoBytes,
     ) -> Result<(), Error<FE>> {
-        self.add_versioned_orchard_output(
-            ovk,
-            recipient,
-            value,
-            memo,
-            orchard::note::NoteVersion::DEFAULT,
-        )
-    }
-
-    /// Adds an Orchard recipient to the transaction, using the specified note
-    /// plaintext version.
-    pub fn add_versioned_orchard_output<FE>(
-        &mut self,
-        ovk: Option<orchard::keys::OutgoingViewingKey>,
-        recipient: orchard::Address,
-        value: Zatoshis,
-        memo: MemoBytes,
-        note_version: orchard::note::NoteVersion,
-    ) -> Result<(), Error<FE>> {
         self.orchard_builder
             .as_mut()
             .ok_or(Error::OrchardBuilderNotAvailable)?
@@ -645,9 +681,55 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 recipient,
                 orchard::value::NoteValue::from_raw(value.into()),
                 memo.into_bytes(),
-                note_version,
+                orchard::note::NoteVersion::DEFAULT,
             )
             .map_err(Error::OrchardRecipient)
+    }
+
+    /// Adds an Ironwood note to be spent in this bundle.
+    ///
+    /// Returns an error if the given Merkle path does not have the required
+    /// Ironwood anchor for the given note.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn add_ironwood_spend<FE>(
+        &mut self,
+        fvk: orchard::keys::FullViewingKey,
+        note: orchard::Note,
+        merkle_path: orchard::tree::MerklePath,
+    ) -> Result<(), Error<FE>> {
+        if let Some(builder) = self.ironwood_builder.as_mut() {
+            builder
+                .add_spend(fvk, note, merkle_path)
+                .map_err(Error::IronwoodSpend)?;
+            Ok(())
+        } else {
+            Err(Error::IronwoodBuilderNotAvailable)
+        }
+    }
+
+    /// Adds an Ironwood recipient to the transaction.
+    ///
+    /// This uses [`orchard::note::NoteVersion::V3`], the QR/Ironwood note
+    /// plaintext format.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn add_ironwood_output<FE>(
+        &mut self,
+        ovk: Option<orchard::keys::OutgoingViewingKey>,
+        recipient: orchard::Address,
+        value: Zatoshis,
+        memo: MemoBytes,
+    ) -> Result<(), Error<FE>> {
+        self.ironwood_builder
+            .as_mut()
+            .ok_or(Error::IronwoodBuilderNotAvailable)?
+            .add_output_with_version(
+                ovk,
+                recipient,
+                orchard::value::NoteValue::from_raw(value.into()),
+                memo.into_bytes(),
+                orchard::note::NoteVersion::V3,
+            )
+            .map_err(Error::IronwoodRecipient)
     }
 
     /// Adds a Sapling note to be spent in this transaction.
@@ -750,6 +832,15 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                         .map_err(|_| BalanceError::Overflow)
                 },
             )?,
+            #[cfg(zcash_unstable = "nu7")]
+            self.ironwood_builder.as_ref().map_or_else(
+                || Ok(ZatBalance::zero()),
+                |builder| {
+                    builder
+                        .value_balance::<ZatBalance>()
+                        .map_err(|_| BalanceError::Overflow)
+                },
+            )?,
             #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             -ZatBalance::from(self.zip233_amount),
             #[cfg(zcash_unstable = "zfuture")]
@@ -778,6 +869,28 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .as_ref()
             .map_or(0, |builder| builder.inputs().len());
 
+        let orchard_actions = self
+            .orchard_builder
+            .as_ref()
+            .zip(self.build_config.orchard_builder_config())
+            .map_or(Ok(0), |(builder, (bundle_type, _))| {
+                bundle_type
+                    .num_actions(builder.spends().len(), builder.outputs().len())
+                    .map_err(FeeError::Bundle)
+            })?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        let orchard_actions = orchard_actions
+            + self
+                .ironwood_builder
+                .as_ref()
+                .zip(self.build_config.ironwood_builder_config())
+                .map_or(Ok(0), |(builder, (bundle_type, _))| {
+                    bundle_type
+                        .num_actions(builder.spends().len(), builder.outputs().len())
+                        .map_err(FeeError::Bundle)
+                })?;
+
         fee_rule
             .fee_required(
                 &self.params,
@@ -796,14 +909,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                             .num_outputs(sapling_spends, builder.outputs().len())
                             .map_err(FeeError::Bundle)
                     })?,
-                self.orchard_builder
-                    .as_ref()
-                    .zip(self.build_config.orchard_builder_config())
-                    .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                        bundle_type
-                            .num_actions(builder.spends().len(), builder.outputs().len())
-                            .map_err(FeeError::Bundle)
-                    })?,
+                orchard_actions,
             )
             .map_err(FeeError::FeeRule)
     }
@@ -824,6 +930,28 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .as_ref()
             .map_or(0, |builder| builder.inputs().len());
 
+        let orchard_actions = self
+            .orchard_builder
+            .as_ref()
+            .zip(self.build_config.orchard_builder_config())
+            .map_or(Ok(0), |(builder, (bundle_type, _))| {
+                bundle_type
+                    .num_actions(builder.spends().len(), builder.outputs().len())
+                    .map_err(FeeError::Bundle)
+            })?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        let orchard_actions = orchard_actions
+            + self
+                .ironwood_builder
+                .as_ref()
+                .zip(self.build_config.ironwood_builder_config())
+                .map_or(Ok(0), |(builder, (bundle_type, _))| {
+                    bundle_type
+                        .num_actions(builder.spends().len(), builder.outputs().len())
+                        .map_err(FeeError::Bundle)
+                })?;
+
         fee_rule
             .fee_required_zfuture(
                 &self.params,
@@ -842,14 +970,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                             .num_outputs(sapling_spends, builder.outputs().len())
                             .map_err(FeeError::Bundle)
                     })?,
-                self.orchard_builder
-                    .as_ref()
-                    .zip(self.build_config.orchard_builder_config())
-                    .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                        bundle_type
-                            .num_actions(builder.spends().len(), builder.outputs().len())
-                            .map_err(FeeError::Bundle)
-                    })?,
+                orchard_actions,
                 self.tze_builder.inputs(),
                 self.tze_builder.outputs(),
             )
@@ -1134,10 +1255,18 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         };
 
         #[cfg(zcash_unstable = "nu7")]
-        let (orchard_bundle, ironwood_bundle) = if self.tx_version == TxVersion::V6_Qr {
-            (None, orchard_bundle)
-        } else {
-            (orchard_bundle, None)
+        let (ironwood_bundle, ironwood_meta) = match self
+            .ironwood_builder
+            .and_then(|builder| {
+                builder
+                    .build(&mut rng)
+                    .map_err(Error::IronwoodBuild)
+                    .transpose()
+            })
+            .transpose()?
+        {
+            Some((bundle, meta)) => (Some(bundle), meta),
+            None => (None, orchard::builder::BundleMetadata::empty()),
         };
 
         #[cfg(zcash_unstable = "zfuture")]
@@ -1259,6 +1388,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             transaction: authorized_tx.freeze().unwrap(),
             sapling_meta,
             orchard_meta,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_meta,
         })
     }
 }
@@ -1276,6 +1407,15 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
         self.check_version_compatibility::<FR::Error>(self.tx_version)?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        if self.ironwood_in_use() {
+            return Err(Error::TargetIncompatible(
+                self.consensus_branch_id,
+                self.tx_version,
+                None,
+            ));
+        }
 
         //
         // Consistency checks
@@ -1498,6 +1638,8 @@ mod tests {
             build_config: BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             },
             target_height: sapling_activation_height,
             expiry_height: sapling_activation_height + DEFAULT_TX_EXPIRY_DELTA,
@@ -1506,6 +1648,8 @@ mod tests {
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder: None,
             orchard_builder: None,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_builder: None,
             #[cfg(zcash_unstable = "zfuture")]
             tze_builder: TzeBuilder::empty(),
             #[cfg(not(zcash_unstable = "zfuture"))]
@@ -1573,6 +1717,8 @@ mod tests {
         let build_config = BuildConfig::Standard {
             sapling_anchor: Some(witness1.root().into()),
             orchard_anchor: None,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_anchor: None,
         };
         let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
 
@@ -1614,6 +1760,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: None,
                 orchard_anchor: None,
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             assert_matches!(
@@ -1634,6 +1782,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -1657,6 +1807,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -1679,6 +1831,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder.set_zip233_amount(Zatoshis::const_from_u64(50000));
@@ -1705,6 +1859,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -1741,6 +1897,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -1786,6 +1944,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -1834,6 +1994,8 @@ mod tests {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder

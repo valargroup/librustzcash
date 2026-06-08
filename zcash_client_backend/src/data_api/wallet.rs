@@ -1012,9 +1012,7 @@ impl SpendingKeys {
 /// and therefore the required spend proofs for such notes cannot be constructed.
 ///
 /// Under the `unstable` feature, `proposed_version` can be used to request a
-/// particular transaction version. Passing `TxVersion::V6_Qr` constructs
-/// Orchard-style change outputs as quantum-recoverable Ironwood notes. Passing
-/// `TxVersion::V6` preserves the usual v6 Orchard bundle for change outputs.
+/// particular transaction version.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn create_proposed_transactions<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
@@ -1349,6 +1347,8 @@ where
         BuildConfig::Standard {
             sapling_anchor,
             orchard_anchor,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_anchor: None,
         },
     );
 
@@ -1696,24 +1696,13 @@ where
 
                 #[cfg(feature = "orchard")]
                 {
-                    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
-                    let orchard_change_note_version = if proposed_version == Some(TxVersion::V6_Qr)
-                    {
-                        orchard::note::NoteVersion::V3
-                    } else {
-                        orchard::note::NoteVersion::DEFAULT
-                    };
-                    #[cfg(not(all(feature = "unstable", zcash_unstable = "nu7")))]
-                    let orchard_change_note_version = orchard::note::NoteVersion::DEFAULT;
-
-                    builder.add_versioned_orchard_output(
+                    builder.add_orchard_output(
                         internal_ovk.map(|k| k.into()),
                         ufvk.orchard()
                             .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
                             .address_at(0u32, orchard::keys::Scope::Internal),
                         change_value.value(),
                         memo.clone(),
-                        orchard_change_note_version,
                     )?;
                     orchard_output_meta.push((
                         BuildRecipient::InternalAccount {

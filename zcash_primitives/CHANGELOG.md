@@ -12,13 +12,15 @@ workspace.
 
 ### Added
 - `zcash_primitives::transaction`:
-  - `TxVersion::V6_Qr`, a builder-level selector that serializes identically
-    to `TxVersion::V6` but enables quantum-recoverable Ironwood change
-    outputs when used by wallet construction APIs.
+  - `TxVersion::V6`, the NU7 transaction format supporting Transparent,
+    Sapling, Orchard, and Ironwood bundles.
 - `zcash_primitives::transaction::builder`:
-  - `Builder::add_versioned_orchard_output`, enabling callers to explicitly
-    select the [`orchard::note::NoteVersion`] used to construct an Orchard
-    output.
+  - `BuildConfig::Standard::ironwood_anchor`, enabling callers to provide the
+    anchor for the separate Ironwood note commitment tree.
+  - `Builder::add_ironwood_spend` and `Builder::add_ironwood_output`, which
+    build Ironwood actions using the QR/Ironwood note plaintext format.
+  - `BuildResult::ironwood_meta`, which exposes the randomized action
+    positions for Ironwood bundles.
 
 ## [0.28.0] - 2026-06-02
 
