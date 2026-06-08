@@ -1017,6 +1017,7 @@ impl SpendingKeys {
 pub struct MigrationTransaction {
     txid: TxId,
     fee_amount: Zatoshis,
+    migrated_amount: Zatoshis,
 }
 
 #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
@@ -1030,17 +1031,24 @@ impl MigrationTransaction {
     pub fn fee_amount(&self) -> Zatoshis {
         self.fee_amount
     }
+
+    /// Returns the amount moved to Ironwood by the created transaction.
+    pub fn migrated_amount(&self) -> Zatoshis {
+        self.migrated_amount
+    }
 }
 
 /// Construct, prove, sign, and persist one Orchard-funded Ironwood migration transaction.
 ///
 /// This is intentionally narrower than [`create_proposed_transactions`]. It spends only Orchard
 /// notes from the provided account and creates one Ironwood output to that account's internal
-/// Orchard receiver. Any excess selected value is returned to Orchard change.
+/// Orchard receiver. The `amount` argument is a minimum migration amount; the transaction migrates
+/// the full selected Orchard value minus fees so that no Orchard change output is created.
 ///
 /// The Ironwood output is not inserted as a received wallet note. Current wallet storage and
 /// scanning APIs do not maintain a separate Ironwood note commitment tree, so callers should track
-/// the returned transaction ID until first-class Ironwood wallet support is added.
+/// the returned transaction ID and migrated amount until first-class Ironwood wallet support is
+/// added.
 #[allow(clippy::too_many_arguments)]
 #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
 pub fn create_orchard_to_ironwood_transaction<DbT, ParamsT, FeeRuleT>(
@@ -1074,13 +1082,8 @@ where
         .cloned()
         .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
     let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
-    let input_sources =
-        NonEmpty::from_vec(vec![PoolType::ORCHARD]).expect("input sources is nonempty");
     let internal_ovk = match ovk_policy {
-        OvkPolicy::Sender => Some(
-            ufvk.select_ovk(zip32::Scope::Internal, &input_sources)
-                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
-        ),
+        OvkPolicy::Sender => None,
         OvkPolicy::Custom { internal_ovk, .. } => internal_ovk,
         OvkPolicy::Discard => None,
     };
@@ -1093,15 +1096,15 @@ where
 
     let mut fee_estimate = Zatoshis::ZERO;
     let mut last_available = Zatoshis::ZERO;
-    let mut last_required = amount;
+    let mut last_required: Option<Zatoshis>;
 
-    for _ in 0..4 {
-        let required = (amount + fee_estimate).ok_or(BalanceError::Overflow)?;
-        last_required = required;
+    loop {
+        let required_estimate = (amount + fee_estimate).ok_or(BalanceError::Overflow)?;
+        last_required = Some(required_estimate);
         let selected_notes = wallet_db
             .select_spendable_notes(
                 account_id,
-                TargetValue::AtLeast(required),
+                TargetValue::AtLeast(required_estimate),
                 &[ShieldedProtocol::Orchard],
                 target_height,
                 confirmations_policy,
@@ -1109,9 +1112,10 @@ where
             )
             .map_err(Error::DataSource)?;
         let selected_value = selected_notes.orchard_value()?;
+        let previous_available = last_available;
         last_available = selected_value;
 
-        if selected_value < required {
+        if selected_value < required_estimate {
             break;
         }
 
@@ -1142,7 +1146,7 @@ where
                 Ok((anchor, inputs))
             })?;
 
-        let make_builder = |change_value: Option<Zatoshis>| {
+        let make_builder = |ironwood_amount: Zatoshis| {
             let mut builder = Builder::new(
                 params.clone(),
                 BlockHeight::from(target_height),
@@ -1158,60 +1162,35 @@ where
             }
 
             builder.add_ironwood_output(
-                internal_ovk.clone().map(Into::into),
+                internal_ovk.map(Into::into),
                 recipient,
-                amount,
+                ironwood_amount,
                 memo.clone(),
             )?;
-
-            if let Some(change_value) = change_value {
-                builder.add_orchard_output(
-                    internal_ovk.clone().map(Into::into),
-                    recipient,
-                    change_value,
-                    MemoBytes::empty(),
-                )?;
-            }
 
             Ok::<_, zcash_primitives::transaction::builder::Error<FeeRuleT::Error>>(builder)
         };
 
-        let builder_without_change = make_builder(None)?;
-        let fee_without_change = builder_without_change
+        let builder_with_minimum_amount = make_builder(amount)?;
+        let fee_amount = builder_with_minimum_amount
             .get_fee(fee_rule)
             .map_err(|e| Error::Builder(zcash_primitives::transaction::builder::Error::Fee(e)))?;
-        let required_without_change =
-            (amount + fee_without_change).ok_or(BalanceError::Overflow)?;
+        let required = (amount + fee_amount).ok_or(BalanceError::Overflow)?;
 
-        let (builder, fee_amount) = if selected_value == required_without_change {
-            (builder_without_change, fee_without_change)
-        } else if selected_value > required_without_change {
-            let builder_with_placeholder_change = make_builder(Some(Zatoshis::const_from_u64(1)))?;
-            let fee_with_change =
-                builder_with_placeholder_change
-                    .get_fee(fee_rule)
-                    .map_err(|e| {
-                        Error::Builder(zcash_primitives::transaction::builder::Error::Fee(e))
-                    })?;
-            let required_with_change = (amount + fee_with_change).ok_or(BalanceError::Overflow)?;
-
-            if selected_value < required_with_change {
-                fee_estimate = fee_with_change;
-                last_required = required_with_change;
-                continue;
+        if selected_value < required {
+            fee_estimate = fee_amount;
+            last_required = Some(required);
+            if selected_value <= previous_available {
+                break;
             }
-
-            let change_value =
-                (selected_value - required_with_change).ok_or(BalanceError::Underflow)?;
-            if change_value.is_zero() {
-                (make_builder(None)?, fee_with_change)
-            } else {
-                (make_builder(Some(change_value))?, fee_with_change)
-            }
-        } else {
-            fee_estimate = fee_without_change;
-            last_required = required_without_change;
             continue;
+        }
+
+        let migrated_amount = (selected_value - fee_amount).ok_or(BalanceError::Underflow)?;
+        let builder = if migrated_amount == amount {
+            builder_with_minimum_amount
+        } else {
+            make_builder(migrated_amount)?
         };
 
         let transparent_signing_set = TransparentSigningSet::new();
@@ -1232,7 +1211,7 @@ where
             fee_rule,
         )?;
         let txid = build_result.transaction().txid();
-        let outputs: Vec<SentTransactionOutput<_>> = Vec::new();
+        let outputs = Vec::new();
         #[cfg(feature = "transparent-inputs")]
         let utxos_spent = Vec::new();
         let sent_tx = SentTransaction::new(
@@ -1250,12 +1229,16 @@ where
             .store_transactions_to_be_sent(std::slice::from_ref(&sent_tx))
             .map_err(Error::DataSource)?;
 
-        return Ok(MigrationTransaction { txid, fee_amount });
+        return Ok(MigrationTransaction {
+            txid,
+            fee_amount,
+            migrated_amount,
+        });
     }
 
     Err(Error::InsufficientFunds {
         available: last_available,
-        required: last_required,
+        required: last_required.unwrap_or(amount),
     })
 }
 
