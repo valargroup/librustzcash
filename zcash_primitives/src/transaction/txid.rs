@@ -506,7 +506,6 @@ pub(crate) fn to_hash(
     transparent_digest: Blake2bHash,
     sapling_digest: Option<Blake2bHash>,
     orchard_digest: Option<Blake2bHash>,
-    #[cfg(zcash_unstable = "nu7")] ironwood_digest: Option<Blake2bHash>,
     #[cfg(zcash_unstable = "zfuture")] tze_digests: Option<&TzeDigests<Blake2bHash>>,
 ) -> Blake2bHash {
     let mut personal = [0; 16];
@@ -533,18 +532,6 @@ pub(crate) fn to_hash(
     )
     .unwrap();
 
-    #[cfg(zcash_unstable = "nu7")]
-    if _txversion.has_ironwood() {
-        h.write_all(
-            ironwood_digest
-                .unwrap_or_else(|| {
-                    hash_orchard_style_bundle_txid_empty(&IRONWOOD_BUNDLE_PERSONALIZATION)
-                })
-                .as_bytes(),
-        )
-        .unwrap();
-    }
-
     #[cfg(zcash_unstable = "zfuture")]
     if _txversion.has_tze() {
         h.write_all(hash_tze_txid_data(tze_digests).as_bytes())
@@ -554,11 +541,79 @@ pub(crate) fn to_hash(
     h.finalize()
 }
 
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) fn to_hash_v6(
+    consensus_branch_id: BranchId,
+    header_digest: Blake2bHash,
+    transparent_digest: Blake2bHash,
+    sapling_digest: Option<Blake2bHash>,
+    orchard_digest: Option<Blake2bHash>,
+    ironwood_digest: Option<Blake2bHash>,
+) -> Blake2bHash {
+    let mut personal = [0; 16];
+    personal[..12].copy_from_slice(ZCASH_TX_PERSONALIZATION_PREFIX);
+    (&mut personal[12..])
+        .write_u32_le(consensus_branch_id.into())
+        .unwrap();
+
+    let mut h = hasher(&personal);
+    h.write_all(header_digest.as_bytes()).unwrap();
+    h.write_all(transparent_digest.as_bytes()).unwrap();
+    h.write_all(
+        sapling_digest
+            .unwrap_or_else(hash_sapling_txid_empty)
+            .as_bytes(),
+    )
+    .unwrap();
+    h.write_all(
+        orchard_digest
+            .unwrap_or_else(|| {
+                hash_orchard_style_bundle_txid_empty(&ORCHARD_BUNDLE_PERSONALIZATION)
+            })
+            .as_bytes(),
+    )
+    .unwrap();
+    h.write_all(
+        ironwood_digest
+            .unwrap_or_else(|| {
+                hash_orchard_style_bundle_txid_empty(&IRONWOOD_BUNDLE_PERSONALIZATION)
+            })
+            .as_bytes(),
+    )
+    .unwrap();
+
+    h.finalize()
+}
+
 pub fn to_txid(
     txversion: TxVersion,
     consensus_branch_id: BranchId,
     digests: &TxDigests<Blake2bHash>,
 ) -> TxId {
+    #[cfg(zcash_unstable = "nu7")]
+    let txid_digest = if txversion.has_ironwood() {
+        to_hash_v6(
+            consensus_branch_id,
+            digests.header_digest,
+            hash_transparent_txid_data(digests.transparent_digests.as_ref()),
+            digests.sapling_digest,
+            digests.orchard_digest,
+            digests.ironwood_digest,
+        )
+    } else {
+        to_hash(
+            txversion,
+            consensus_branch_id,
+            digests.header_digest,
+            hash_transparent_txid_data(digests.transparent_digests.as_ref()),
+            digests.sapling_digest,
+            digests.orchard_digest,
+            #[cfg(zcash_unstable = "zfuture")]
+            digests.tze_digests.as_ref(),
+        )
+    };
+
+    #[cfg(not(zcash_unstable = "nu7"))]
     let txid_digest = to_hash(
         txversion,
         consensus_branch_id,
@@ -566,8 +621,6 @@ pub fn to_txid(
         hash_transparent_txid_data(digests.transparent_digests.as_ref()),
         digests.sapling_digest,
         digests.orchard_digest,
-        #[cfg(zcash_unstable = "nu7")]
-        digests.ironwood_digest,
         #[cfg(zcash_unstable = "zfuture")]
         digests.tze_digests.as_ref(),
     );
