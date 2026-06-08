@@ -571,9 +571,7 @@ pub(crate) mod tests {
         let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
         st.scan_cached_blocks(height, 1);
 
-        let summary = st
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
-            .unwrap();
+        let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
         let balance = summary.account_balances().get(&account.id()).unwrap();
         assert_eq!(balance.orchard_balance().total(), value);
         assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
@@ -583,9 +581,7 @@ pub(crate) mod tests {
             .execute("UPDATE orchard_received_notes SET note_version = 3", [])
             .unwrap();
 
-        let summary = st
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
-            .unwrap();
+        let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
         let balance = summary.account_balances().get(&account.id()).unwrap();
         assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
         assert_eq!(balance.ironwood_balance().total(), value);

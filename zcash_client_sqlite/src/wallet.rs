@@ -2486,14 +2486,18 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         })
         .collect::<Result<HashMap<AccountUuid, AccountBalance>, _>>()?;
 
+    struct PoolBalanceQuery {
+        protocol: ShieldedProtocol,
+        note_version_filter: Option<i64>,
+    }
+
     fn with_pool_balances<F>(
         tx: &rusqlite::Transaction,
         target_height: TargetHeight,
         anchor_height: Option<BlockHeight>,
         confirmations_policy: ConfirmationsPolicy,
         account_balances: &mut HashMap<AccountUuid, AccountBalance>,
-        protocol: ShieldedProtocol,
-        note_version_filter: Option<i64>,
+        query: PoolBalanceQuery,
         with_pool_balance: F,
     ) -> Result<(), SqliteClientError>
     where
@@ -2505,6 +2509,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             Zatoshis,
         ) -> Result<(), SqliteClientError>,
     {
+        let PoolBalanceQuery {
+            protocol,
+            note_version_filter,
+        } = query;
         let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
         let note_version_clause = note_version_filter
             .map(|note_version| format!("AND rn.note_version = {note_version}"))
@@ -2681,8 +2689,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             anchor_height,
             confirmations_policy,
             &mut account_balances,
-            ShieldedProtocol::Orchard,
-            Some(2),
+            PoolBalanceQuery {
+                protocol: ShieldedProtocol::Orchard,
+                note_version_filter: Some(2),
+            },
             |balances,
              spendable_value,
              change_pending_confirmation,
@@ -2706,8 +2716,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             anchor_height,
             confirmations_policy,
             &mut account_balances,
-            ShieldedProtocol::Orchard,
-            Some(3),
+            PoolBalanceQuery {
+                protocol: ShieldedProtocol::Orchard,
+                note_version_filter: Some(3),
+            },
             |balances,
              spendable_value,
              change_pending_confirmation,
@@ -2732,8 +2744,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         anchor_height,
         confirmations_policy,
         &mut account_balances,
-        ShieldedProtocol::Sapling,
-        None,
+        PoolBalanceQuery {
+            protocol: ShieldedProtocol::Sapling,
+            note_version_filter: None,
+        },
         |balances,
          spendable_value,
          change_pending_confirmation,
