@@ -19,6 +19,8 @@ use pczt::{
 use rand_core::OsRng;
 use shardtree::{ShardTree, store::memory::MemoryShardStore};
 use zcash_note_encryption::try_note_decryption;
+#[cfg(zcash_unstable = "nu7")]
+use zcash_primitives::transaction::{TxVersion, builder::PcztParts};
 use zcash_primitives::transaction::{
     builder::{BuildConfig, Builder, PcztResult},
     fees::zip317,
@@ -27,6 +29,8 @@ use zcash_primitives::transaction::{
     txid::TxIdDigester,
 };
 use zcash_proofs::prover::LocalTxProver;
+#[cfg(zcash_unstable = "nu7")]
+use zcash_protocol::consensus::BranchId;
 use zcash_protocol::{
     consensus::MainNetwork,
     memo::{Memo, MemoBytes},
@@ -43,6 +47,24 @@ fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
 fn check_round_trip(pczt: &Pczt) {
     let encoded = pczt.serialize();
     assert_eq!(encoded, Pczt::parse(&encoded).unwrap().serialize());
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn creator_rejects_v6_pczt_parts() {
+    assert!(
+        Creator::build_from_parts(PcztParts {
+            params: MainNetwork,
+            version: TxVersion::V6,
+            consensus_branch_id: BranchId::Nu7,
+            lock_time: 0,
+            expiry_height: 0u32.into(),
+            transparent: None,
+            sapling: None,
+            orchard: None,
+        })
+        .is_none()
+    );
 }
 
 #[test]
