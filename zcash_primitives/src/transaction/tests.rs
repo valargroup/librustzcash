@@ -11,11 +11,14 @@ use {
         address::Script, sighash::SighashType, sighash::TransparentAuthorizingContext,
     },
     alloc::vec::Vec,
-    blake2b_simd::{Hash as Blake2bHash, Params},
+    blake2b_simd::Hash as Blake2bHash,
     core::ops::Deref,
     zcash_protocol::{consensus::BranchId, value::Zatoshis},
     zcash_script::script,
 };
+
+#[cfg(all(test, zcash_unstable = "nu7"))]
+use blake2b_simd::Params;
 
 #[cfg(all(test, zcash_unstable = "zfuture"))]
 use super::components::tze;
