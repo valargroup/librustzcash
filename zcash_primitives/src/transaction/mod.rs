@@ -84,6 +84,18 @@ pub enum TxVersion {
     /// Transaction version 6, specified in [ZIP 230](https://zips.z.cash/zip-0230).
     #[cfg(zcash_unstable = "nu7")]
     V6,
+    /// Transaction version 6, with Orchard-style change outputs constructed as
+    /// quantum-recoverable Ironwood notes.
+    ///
+    /// This is serialized identically to [`TxVersion::V6`]. It exists as a
+    /// builder-level selector for wallets that want to opt into
+    /// quantum-recoverable Ironwood change notes in the v6 transaction format.
+    ///
+    /// Wallet APIs that accept this selector are exposed behind their
+    /// `unstable` feature flag.
+    #[cfg(zcash_unstable = "nu7")]
+    #[allow(non_camel_case_types)]
+    V6_Qr,
     /// This version is used exclusively for in-development transaction
     /// serialization, and will never be active under the consensus rules.
     /// When new consensus transaction versions are added, all call sites
@@ -137,7 +149,7 @@ impl TxVersion {
                 TxVersion::V4 => V4_TX_VERSION,
                 TxVersion::V5 => V5_TX_VERSION,
                 #[cfg(zcash_unstable = "nu7")]
-                TxVersion::V6 => V6_TX_VERSION,
+                TxVersion::V6 | TxVersion::V6_Qr => V6_TX_VERSION,
                 #[cfg(zcash_unstable = "zfuture")]
                 TxVersion::ZFuture => ZFUTURE_TX_VERSION,
             }
@@ -150,7 +162,7 @@ impl TxVersion {
             TxVersion::V4 => V4_VERSION_GROUP_ID,
             TxVersion::V5 => V5_VERSION_GROUP_ID,
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => V6_VERSION_GROUP_ID,
+            TxVersion::V6 | TxVersion::V6_Qr => V6_VERSION_GROUP_ID,
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => ZFUTURE_VERSION_GROUP_ID,
         }
@@ -171,7 +183,7 @@ impl TxVersion {
             TxVersion::V3 | TxVersion::V4 => true,
             TxVersion::V5 => false,
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => false,
+            TxVersion::V6 | TxVersion::V6_Qr => false,
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => false,
         }
@@ -188,7 +200,7 @@ impl TxVersion {
             TxVersion::V4 => true,
             TxVersion::V5 => true,
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => true,
+            TxVersion::V6 | TxVersion::V6_Qr => true,
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => true,
         }
@@ -200,7 +212,7 @@ impl TxVersion {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => false,
             TxVersion::V5 => true,
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => true,
+            TxVersion::V6 | TxVersion::V6_Qr => true,
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => true,
         }
@@ -209,13 +221,15 @@ impl TxVersion {
     /// Returns `true` if this transaction version supports the Ironwood protocol.
     #[cfg(zcash_unstable = "nu7")]
     pub fn has_ironwood(&self) -> bool {
-        matches!(self, TxVersion::V6)
+        matches!(self, TxVersion::V6 | TxVersion::V6_Qr)
     }
 
     #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
     pub fn has_zip233(&self) -> bool {
         match self {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => false,
+            #[cfg(zcash_unstable = "nu7")]
+            TxVersion::V6 | TxVersion::V6_Qr => true,
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => true,
         }
@@ -271,7 +285,7 @@ impl TxVersion {
                 ZFuture => true,
             },
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => match consensus_branch_id {
+            TxVersion::V6 | TxVersion::V6_Qr => match consensus_branch_id {
                 Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6
                 | Nu6_1 | Nu6_2 => false,
                 Nu7 => true, // ZIP 230 or ZIP 248, whichever is chosen for activation
@@ -799,7 +813,7 @@ impl Transaction {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => Self::from_data_v4(data),
             TxVersion::V5 => Ok(Self::from_data_v5(data)),
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => Ok(Self::from_data_v6(data)),
+            TxVersion::V6 | TxVersion::V6_Qr => Ok(Self::from_data_v6(data)),
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => Ok(Self::from_data_v6(data)),
         }
@@ -855,7 +869,7 @@ impl Transaction {
             }
             TxVersion::V5 => Self::read_v5(reader.into_base_reader(), version),
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => Self::read_v6(reader.into_base_reader(), version),
+            TxVersion::V6 | TxVersion::V6_Qr => Self::read_v6(reader.into_base_reader(), version),
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => Self::read_v6(reader.into_base_reader(), version),
         }
@@ -1119,7 +1133,7 @@ impl Transaction {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => self.write_v4(writer),
             TxVersion::V5 => self.write_v5(writer),
             #[cfg(zcash_unstable = "nu7")]
-            TxVersion::V6 => self.write_v6(writer),
+            TxVersion::V6 | TxVersion::V6_Qr => self.write_v6(writer),
             #[cfg(zcash_unstable = "zfuture")]
             TxVersion::ZFuture => self.write_v6(writer),
         }

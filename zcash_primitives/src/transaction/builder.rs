@@ -60,6 +60,14 @@ use crate::{
 
 use super::components::sapling::zip212_enforcement;
 
+#[cfg(zcash_unstable = "nu7")]
+fn orchard_protocol_for_version(version: TxVersion) -> orchard::builder::BundleProtocol {
+    match version {
+        TxVersion::V6_Qr => orchard::builder::BundleProtocol::Ironwood,
+        _ => orchard::builder::BundleProtocol::Orchard,
+    }
+}
+
 /// Since Blossom activation, the default transaction expiry delta should be 40 blocks.
 /// <https://zips.z.cash/zip-0203#changes-for-blossom>
 pub const DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
@@ -443,6 +451,35 @@ impl<P, U> Builder<'_, P, U> {
     /// added after this call.
     pub fn propose_version<FE>(&mut self, version: TxVersion) -> Result<(), Error<FE>> {
         self.check_version_compatibility(version)?;
+        #[cfg(zcash_unstable = "nu7")]
+        if orchard_protocol_for_version(self.tx_version) != orchard_protocol_for_version(version) {
+            if self
+                .orchard_builder
+                .as_ref()
+                .is_some_and(|b| !b.spends().is_empty() || !b.outputs().is_empty())
+            {
+                return Err(Error::TargetIncompatible(
+                    self.consensus_branch_id,
+                    version,
+                    Some(PoolType::ORCHARD),
+                ));
+            }
+
+            self.orchard_builder = if self.orchard_builder.is_some() {
+                self.build_config
+                    .orchard_builder_config()
+                    .map(|(bundle_type, anchor)| {
+                        orchard::builder::Builder::new(
+                            orchard_protocol_for_version(version),
+                            bundle_type,
+                            anchor,
+                        )
+                    })
+            } else {
+                None
+            };
+        }
+
         self.tx_version = version;
         Ok(())
     }
@@ -457,10 +494,23 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
     /// The expiry height will be set to the given height plus the default transaction
     /// expiry delta (20 blocks).
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
+        // Determine the default transaction version for the consensus branch
+        let consensus_branch_id = BranchId::for_height(&params, target_height);
+        let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
+
         let orchard_builder = if params.is_nu_active(NetworkUpgrade::Nu5, target_height) {
             build_config
                 .orchard_builder_config()
-                .map(|(bundle_type, anchor)| orchard::builder::Builder::new(bundle_type, anchor))
+                .map(|(bundle_type, anchor)| {
+                    orchard::builder::Builder::new(
+                        #[cfg(zcash_unstable = "nu7")]
+                        orchard_protocol_for_version(tx_version),
+                        #[cfg(not(zcash_unstable = "nu7"))]
+                        orchard::builder::BundleProtocol::Orchard,
+                        bundle_type,
+                        anchor,
+                    )
+                })
         } else {
             None
         };
@@ -489,10 +539,6 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
         } else {
             target_height + DEFAULT_TX_EXPIRY_DELTA
         };
-
-        // Determine the default transaction version for the consensus branch
-        let consensus_branch_id = BranchId::for_height(&params, target_height);
-        let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
 
         Builder {
             params,
@@ -563,6 +609,8 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
     }
 
     /// Adds an Orchard recipient to the transaction.
+    ///
+    /// This uses [`orchard::note::NoteVersion::DEFAULT`].
     pub fn add_orchard_output<FE>(
         &mut self,
         ovk: Option<orchard::keys::OutgoingViewingKey>,
@@ -570,14 +618,34 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         value: Zatoshis,
         memo: MemoBytes,
     ) -> Result<(), Error<FE>> {
+        self.add_versioned_orchard_output(
+            ovk,
+            recipient,
+            value,
+            memo,
+            orchard::note::NoteVersion::DEFAULT,
+        )
+    }
+
+    /// Adds an Orchard recipient to the transaction, using the specified note
+    /// plaintext version.
+    pub fn add_versioned_orchard_output<FE>(
+        &mut self,
+        ovk: Option<orchard::keys::OutgoingViewingKey>,
+        recipient: orchard::Address,
+        value: Zatoshis,
+        memo: MemoBytes,
+        note_version: orchard::note::NoteVersion,
+    ) -> Result<(), Error<FE>> {
         self.orchard_builder
             .as_mut()
             .ok_or(Error::OrchardBuilderNotAvailable)?
-            .add_output(
+            .add_output_with_version(
                 ovk,
                 recipient,
                 orchard::value::NoteValue::from_raw(value.into()),
                 memo.into_bytes(),
+                note_version,
             )
             .map_err(Error::OrchardRecipient)
     }
@@ -1065,6 +1133,13 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             None => (None, orchard::builder::BundleMetadata::empty()),
         };
 
+        #[cfg(zcash_unstable = "nu7")]
+        let (orchard_bundle, ironwood_bundle) = if self.tx_version == TxVersion::V6_Qr {
+            (None, orchard_bundle)
+        } else {
+            (orchard_bundle, None)
+        };
+
         #[cfg(zcash_unstable = "zfuture")]
         let (tze_bundle, tze_signers) = build_future(self.tze_builder);
 
@@ -1089,7 +1164,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             sapling_bundle,
             orchard_bundle,
             #[cfg(zcash_unstable = "nu7")]
-            ironwood_bundle: None,
+            ironwood_bundle,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };
@@ -1145,6 +1220,22 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             .transpose()
             .map_err(Error::OrchardBuild)?;
 
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood_bundle = unauthed_tx
+            .ironwood_bundle
+            .map(|b| {
+                b.create_proof(&orchard::circuit::ProvingKey::build(), &mut rng)
+                    .and_then(|b| {
+                        b.apply_signatures(
+                            &mut rng,
+                            *shielded_sig_commitment.as_ref(),
+                            orchard_saks,
+                        )
+                    })
+            })
+            .transpose()
+            .map_err(Error::OrchardBuild)?;
+
         let authorized_tx = TransactionData {
             version: unauthed_tx.version,
             consensus_branch_id: unauthed_tx.consensus_branch_id,
@@ -1157,7 +1248,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             sapling_bundle,
             orchard_bundle,
             #[cfg(zcash_unstable = "nu7")]
-            ironwood_bundle: None,
+            ironwood_bundle,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };

@@ -10,6 +10,16 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_primitives::transaction`:
+  - `TxVersion::V6_Qr`, a builder-level selector that serializes identically
+    to `TxVersion::V6` but enables quantum-recoverable Ironwood change
+    outputs when used by wallet construction APIs.
+- `zcash_primitives::transaction::builder`:
+  - `Builder::add_versioned_orchard_output`, enabling callers to explicitly
+    select the [`orchard::note::NoteVersion`] used to construct an Orchard
+    output.
+
 ## [0.28.0] - 2026-06-02
 
 ### Added
@@ -34,7 +44,6 @@ workspace.
   arbitrary data (GHSA-2x4w-pxqw-58v9). Proof-size enforcement is `Strict` for
   transactions parsed under NU6.2 and later consensus branches, and `Unenforced`
   for earlier branches to preserve the ability to parse historical transactions.
-
 ## [0.27.1] - 2026-05-14
 
 ### Fixed

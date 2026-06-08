@@ -189,6 +189,10 @@ workspace.
     - `{propose_transfer, propose_standard_transfer_to_address}`. When set,
       input selection avoids pools incompatible with the requested transaction
       version.
+    - Passing `Some(TxVersion::V6_Qr)` causes generated Orchard-style change
+      outputs to use quantum-recoverable Ironwood note commitment randomness.
+      Use `Some(TxVersion::V6)` for transaction construction flows that
+      require ordinary v6 Orchard change outputs.
     - `input_selection::InputSelector::propose_transaction` trait method.
   - Trait `Account` has added method `birthday_height`
 - `zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new` now returns
