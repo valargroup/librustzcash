@@ -1363,7 +1363,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
                     })
             })
             .transpose()
-            .map_err(Error::OrchardBuild)?;
+            .map_err(Error::IronwoodBuild)?;
 
         let authorized_tx = TransactionData {
             version: unauthed_tx.version,
