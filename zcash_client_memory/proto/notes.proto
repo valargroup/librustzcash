@@ -10,6 +10,7 @@ message Note {
   uint64 value = 3;
   optional bytes rho = 4;
   RSeed rseed = 5;
+  optional uint32 orchard_note_version = 6;
 }
 
 message RSeed {

@@ -138,6 +138,8 @@ pub struct Note {
     pub rho: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, optional, tag = "5")]
     pub rseed: ::core::option::Option<RSeed>,
+    #[prost(uint32, optional, tag = "6")]
+    pub orchard_note_version: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RSeed {
