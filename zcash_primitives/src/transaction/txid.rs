@@ -637,7 +637,7 @@ pub struct BlockTxCommitmentDigester;
 impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
     /// We use the header digest to pass the transaction ID into
     /// where it needs to be used for personalization string construction.
-    type HeaderDigest = BranchId;
+    type HeaderDigest = (TxVersion, BranchId);
     type TransparentDigest = Blake2bHash;
     type SaplingDigest = Blake2bHash;
     type OrchardDigest = Blake2bHash;
@@ -657,7 +657,7 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         _expiry_height: BlockHeight,
         #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))] _zip233_amount: &Zatoshis,
     ) -> Self::HeaderDigest {
-        consensus_branch_id
+        (_version, consensus_branch_id)
     }
 
     fn digest_transparent(
@@ -732,13 +732,14 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
 
     fn combine(
         &self,
-        consensus_branch_id: Self::HeaderDigest,
+        tx_context: Self::HeaderDigest,
         transparent_digest: Self::TransparentDigest,
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
         #[cfg(zcash_unstable = "nu7")] ironwood_digest: Self::IronwoodDigest,
         #[cfg(zcash_unstable = "zfuture")] tze_digest: Self::TzeDigest,
     ) -> Self::Digest {
+        let (_txversion, consensus_branch_id) = tx_context;
         let mut personal = [0; 16];
         personal[..12].copy_from_slice(ZCASH_AUTH_PERSONALIZATION_PREFIX);
         (&mut personal[12..])
@@ -751,12 +752,12 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         h.write_all(orchard_digest.as_bytes()).unwrap();
 
         #[cfg(zcash_unstable = "nu7")]
-        if TxVersion::suggested_for_branch(consensus_branch_id).has_ironwood() {
+        if _txversion.has_ironwood() {
             h.write_all(ironwood_digest.as_bytes()).unwrap();
         }
 
         #[cfg(zcash_unstable = "zfuture")]
-        if TxVersion::suggested_for_branch(consensus_branch_id).has_tze() {
+        if _txversion.has_tze() {
             h.write_all(tze_digest.as_bytes()).unwrap();
         }
 

@@ -11,7 +11,7 @@ use {
         address::Script, sighash::SighashType, sighash::TransparentAuthorizingContext,
     },
     alloc::vec::Vec,
-    blake2b_simd::Hash as Blake2bHash,
+    blake2b_simd::{Hash as Blake2bHash, Params},
     core::ops::Deref,
     zcash_protocol::{consensus::BranchId, value::Zatoshis},
     zcash_script::script,
@@ -51,6 +51,38 @@ fn suggested_version_for_v5_branches_is_not_qr() {
         TxVersion::suggested_for_branch(BranchId::Nu6_1),
         TxVersion::V5
     );
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn v5_auth_commitment_in_nu7_does_not_include_ironwood_digest() {
+    fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
+        Params::new().hash_length(32).personal(personal).hash(&[])
+    }
+
+    let mut personal = [0; 16];
+    personal[..12].copy_from_slice(b"ZTxAuthHash_");
+    personal[12..].copy_from_slice(&u32::from(BranchId::Nu7).to_le_bytes());
+
+    let mut expected = Params::new().hash_length(32).personal(&personal).to_state();
+    expected.update(empty_hash(b"ZTxAuthTransHash").as_bytes());
+    expected.update(empty_hash(b"ZTxAuthSapliHash").as_bytes());
+    expected.update(empty_hash(b"ZTxAuthOrchaHash").as_bytes());
+
+    let tx = TransactionData::from_parts(
+        TxVersion::V5,
+        BranchId::Nu7,
+        0,
+        0u32.into(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap();
+
+    assert_eq!(tx.auth_commitment(), expected.finalize());
 }
 
 #[cfg(test)]
