@@ -18,6 +18,10 @@ workspace.
   reconstruct Orchard note commitments with the intended note plaintext
   version.
 
+### Changed
+- Bumped the PCZT encoding version to 2 for serialized Orchard note plaintext
+  version fields.
+
 ## [0.7.0] - 2026-06-02
 
 ### Changed

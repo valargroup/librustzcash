@@ -56,7 +56,7 @@ pub mod sapling;
 pub mod transparent;
 
 const MAGIC_BYTES: &[u8] = b"PCZT";
-const PCZT_VERSION_1: u32 = 1;
+const PCZT_VERSION_2: u32 = 2;
 
 /// A partially-created Zcash transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
@@ -91,11 +91,11 @@ impl Pczt {
             return Err(ParseError::NotPczt);
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != PCZT_VERSION_1 {
+        if version != PCZT_VERSION_2 {
             return Err(ParseError::UnknownVersion(version));
         }
 
-        // This is a v1 PCZT.
+        // This is a v2 PCZT.
         postcard::from_bytes(&bytes[8..]).map_err(ParseError::Invalid)
     }
 
@@ -103,7 +103,7 @@ impl Pczt {
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(MAGIC_BYTES);
-        bytes.extend_from_slice(&PCZT_VERSION_1.to_le_bytes());
+        bytes.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
         postcard::to_extend(self, bytes).expect("can serialize into memory")
     }
 
