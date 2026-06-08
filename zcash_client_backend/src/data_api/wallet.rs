@@ -46,11 +46,12 @@ use shardtree::error::{QueryError, ShardTreeError};
 use super::InputSource;
 #[cfg(feature = "transparent-inputs")]
 use super::TransparentOutputFilter;
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+use crate::data_api::TargetValue;
 use crate::{
     data_api::{
-        Account, MaxSpendMode, SentTransaction, SentTransactionOutput, TargetValue,
-        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
-        wallet::input_selection::propose_send_max,
+        Account, MaxSpendMode, SentTransaction, SentTransactionOutput, WalletCommitmentTrees,
+        WalletRead, WalletWrite, error::Error, wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
     fees::{
