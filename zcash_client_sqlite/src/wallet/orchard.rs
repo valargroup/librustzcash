@@ -508,7 +508,7 @@ pub(crate) mod tests {
             AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
             sapling::SaplingPoolTester,
         },
-        wallet::TargetHeight,
+        wallet::{ConfirmationsPolicy, TargetHeight},
     };
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::value::Zatoshis;
@@ -555,6 +555,40 @@ pub(crate) mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].note().version(), NoteVersion::V3);
         assert_eq!(notes[0].note_value().unwrap(), value);
+    }
+
+    #[test]
+    fn wallet_summary_counts_v3_notes_as_ironwood() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let summary = st
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap();
+        let balance = summary.account_balances().get(&account.id()).unwrap();
+        assert_eq!(balance.orchard_balance().total(), value);
+        assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+
+        let summary = st
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap();
+        let balance = summary.account_balances().get(&account.id()).unwrap();
+        assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
+        assert_eq!(balance.ironwood_balance().total(), value);
     }
 
     #[test]

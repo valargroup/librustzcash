@@ -8,6 +8,12 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [0.22.0] - PLANNED
+
+### Changed
+- Wallet summaries now count V3 Orchard-style notes as Ironwood balance instead
+  of Orchard balance.
+
 ## [0.21.0] - 2026-06-02
 
 ### Changed

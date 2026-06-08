@@ -12,6 +12,8 @@ workspace.
 
 ### Added
 - `zcash_client_backend::data_api::error::RewindError`
+- `zcash_client_backend::data_api::AccountBalance::ironwood_balance`, for
+  exposing Ironwood wallet funds separately from Orchard.
 - `zcash_client_backend::wallet::WalletTransparentOutput`:
   - `recipient_account`
   - `recipient_key_scope`

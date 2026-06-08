@@ -2493,6 +2493,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         confirmations_policy: ConfirmationsPolicy,
         account_balances: &mut HashMap<AccountUuid, AccountBalance>,
         protocol: ShieldedProtocol,
+        note_version_filter: Option<i64>,
         with_pool_balance: F,
     ) -> Result<(), SqliteClientError>
     where
@@ -2505,6 +2506,9 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         ) -> Result<(), SqliteClientError>,
     {
         let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
+        let note_version_clause = note_version_filter
+            .map(|note_version| format!("AND rn.note_version = {note_version}"))
+            .unwrap_or_default();
 
         // If the shard containing the anchor height contains any unscanned ranges that start
         // below or including that height, none of our shielded balance is currently spendable.
@@ -2559,6 +2563,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                 ON tt.id_tx = tro.transaction_id
              WHERE ({}) -- the transaction is unexpired
              AND rn.id NOT IN ({}) -- and the received note is unspent
+             {note_version_clause}
              GROUP BY rn.id",
             common::tx_unexpired_condition("t"),
             common::spent_notes_clause(table_prefix)
@@ -2677,6 +2682,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             confirmations_policy,
             &mut account_balances,
             ShieldedProtocol::Orchard,
+            Some(2),
             |balances,
              spendable_value,
              change_pending_confirmation,
@@ -2692,6 +2698,31 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             },
         )?;
         drop(orchard_trace);
+
+        let ironwood_trace = tracing::info_span!("ironwood_balances").entered();
+        with_pool_balances(
+            tx,
+            target_height,
+            anchor_height,
+            confirmations_policy,
+            &mut account_balances,
+            ShieldedProtocol::Orchard,
+            Some(3),
+            |balances,
+             spendable_value,
+             change_pending_confirmation,
+             value_pending_spendability,
+             uneconomic_value| {
+                balances.with_ironwood_balance_mut::<_, SqliteClientError>(|bal| {
+                    bal.add_spendable_value(spendable_value)?;
+                    bal.add_pending_change_value(change_pending_confirmation)?;
+                    bal.add_pending_spendable_value(value_pending_spendability)?;
+                    bal.add_uneconomic_value(uneconomic_value)?;
+                    Ok(())
+                })
+            },
+        )?;
+        drop(ironwood_trace);
     }
 
     let sapling_trace = tracing::info_span!("sapling_balances").entered();
@@ -2702,6 +2733,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         confirmations_policy,
         &mut account_balances,
         ShieldedProtocol::Sapling,
+        None,
         |balances,
          spendable_value,
          change_pending_confirmation,
