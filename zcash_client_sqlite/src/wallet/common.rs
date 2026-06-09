@@ -73,6 +73,13 @@ pub(crate) fn table_constants<E: ErrUnsupportedPool>(
     }
 }
 
+fn spendable_note_version_clause(protocol: ShieldedProtocol) -> &'static str {
+    match protocol {
+        ShieldedProtocol::Sapling => "",
+        ShieldedProtocol::Orchard => "AND rn.note_version = 2",
+    }
+}
+
 /// Generates an SQL condition that a transaction is unexpired.
 ///
 /// # Usage requirements
@@ -218,6 +225,7 @@ where
         note_reconstruction_cols,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
+    let note_version_clause = spendable_note_version_clause(protocol);
 
     let result = conn.query_row_and_then(
         &format!(
@@ -242,6 +250,7 @@ where
              AND rn.recipient_key_scope IS NOT NULL
              AND rn.nf IS NOT NULL
              AND rn.commitment_tree_position IS NOT NULL
+             {note_version_clause}
              AND rn.id NOT IN ({})
              GROUP BY rn.id",
             spent_notes_clause(table_prefix)
@@ -374,6 +383,12 @@ where
         note_reconstruction_cols,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
+    let note_version_clause = match note_request {
+        NoteRequest::Unspent => "",
+        NoteRequest::Spendable { .. } | NoteRequest::UnspentOrError { .. } => {
+            spendable_note_version_clause(protocol)
+        }
+    };
 
     // Select all unspent notes belonging to the given account, ignoring dust notes.
     let mut stmt_select_notes = conn.prepare_cached(&format!(
@@ -405,6 +420,7 @@ where
          AND accounts.ufvk IS NOT NULL
          AND recipient_key_scope IS NOT NULL
          AND nf IS NOT NULL
+         {note_version_clause}
          AND ({})  -- the transaction is unexpired
          AND rn.id NOT IN rarray(:exclude)  -- the note is not excluded
          AND rn.id NOT IN ({})  -- the note is unspent
@@ -532,6 +548,7 @@ where
         note_reconstruction_cols,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
+    let note_version_clause = spendable_note_version_clause(protocol);
 
     // When an anchor exists within an unscanned range, nodes without stabilized witness data will
     // not be reliably constructable. The selection query will use this to filter out such notes.
@@ -582,6 +599,7 @@ where
              AND accounts.ufvk IS NOT NULL
              AND recipient_key_scope IS NOT NULL
              AND nf IS NOT NULL
+             {note_version_clause}
              -- The note must be mined at or below the anchor for the anchor's tree
              -- frontier to witness it
              AND t.block <= :anchor_height
@@ -735,6 +753,7 @@ pub(crate) fn select_unspent_note_meta(
         output_index_col,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
+    let note_version_clause = spendable_note_version_clause(protocol);
 
     // This query is effectively the same as the internal `eligible` subquery
     // used in `select_spendable_notes`.
@@ -749,6 +768,7 @@ pub(crate) fn select_unspent_note_meta(
          AND recipient_key_scope IS NOT NULL
          AND nf IS NOT NULL
          AND commitment_tree_position IS NOT NULL
+         {note_version_clause}
          AND rn.id NOT IN ({})
          AND NOT EXISTS (
             SELECT 1 FROM v_{table_prefix}_shard_unscanned_ranges unscanned
@@ -795,6 +815,7 @@ pub(crate) fn unspent_notes_meta(
     exclude: &[ReceivedNoteId],
 ) -> Result<Option<PoolMeta>, SqliteClientError> {
     let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
+    let note_version_clause = spendable_note_version_clause(protocol);
 
     let excluded: Vec<Value> = exclude
         .iter()
@@ -826,6 +847,7 @@ pub(crate) fn unspent_notes_meta(
                  AND rn.value > :min_value
                  AND transactions.mined_height IS NOT NULL
                  AND rn.id NOT IN rarray(:exclude)
+                 {note_version_clause}
                  AND rn.id NOT IN ({})",
                 spent_notes_clause(table_prefix)
             ),

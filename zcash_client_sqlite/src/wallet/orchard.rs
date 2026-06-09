@@ -503,7 +503,7 @@ pub(crate) mod tests {
 
     use orchard::note::NoteVersion;
     use zcash_client_backend::data_api::{
-        Account as _,
+        Account as _, TargetValue,
         testing::{
             AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
             sapling::SaplingPoolTester,
@@ -555,6 +555,55 @@ pub(crate) mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].note().version(), NoteVersion::V3);
         assert_eq!(notes[0].note_value().unwrap(), value);
+    }
+
+    #[test]
+    fn spendable_selection_excludes_v3_notes() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let target_height = TargetHeight::from(height + 1);
+        let spendable = OrchardPoolTester::select_spendable_notes(
+            &st,
+            account.id(),
+            TargetValue::AtLeast(value),
+            target_height,
+            ConfirmationsPolicy::MIN,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(spendable.len(), 1);
+        assert_eq!(spendable[0].note().version(), NoteVersion::V2);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+
+        let spendable = OrchardPoolTester::select_spendable_notes(
+            &st,
+            account.id(),
+            TargetValue::AtLeast(value),
+            target_height,
+            ConfirmationsPolicy::MIN,
+            &[],
+        )
+        .unwrap();
+        assert!(spendable.is_empty());
+
+        let unspent =
+            OrchardPoolTester::select_unspent_notes(&st, account.id(), target_height, &[]).unwrap();
+        assert_eq!(unspent.len(), 1);
+        assert_eq!(unspent[0].note().version(), NoteVersion::V3);
     }
 
     #[test]

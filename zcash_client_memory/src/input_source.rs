@@ -29,6 +29,26 @@ use {
 
 use crate::{AccountId, MemoryWalletDb, error::Error, to_spendable_notes};
 
+fn note_matches_spendable_protocol(
+    note: &zcash_client_backend::wallet::Note,
+    protocol: ShieldedProtocol,
+) -> bool {
+    if note.protocol() != protocol {
+        return false;
+    }
+
+    #[cfg(feature = "orchard")]
+    if protocol == Orchard {
+        return matches!(
+            note,
+            zcash_client_backend::wallet::Note::Orchard(note)
+                if note.version() == orchard::note::NoteVersion::V2
+        );
+    }
+
+    true
+}
+
 impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
     type Error = crate::error::Error;
     type AccountId = AccountId;
@@ -50,7 +70,9 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         Self::Error,
     > {
         let note = self.received_notes.iter().find(|rn| {
-            &rn.txid == txid && rn.note.protocol() == protocol && rn.output_index == index
+            &rn.txid == txid
+                && note_matches_spendable_protocol(&rn.note, protocol)
+                && rn.output_index == index
         });
 
         Ok(if let Some(note) = note {
@@ -271,7 +293,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .received_notes
             .iter()
             .filter(|note| note.account_id == account)
-            .filter(|note| note.note.protocol() == *pool)
+            .filter(|note| note_matches_spendable_protocol(&note.note, *pool))
             .filter(|note| {
                 self.note_is_spendable(
                     note,
@@ -377,7 +399,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .received_notes
             .iter()
             .filter(|note| note.account_id == account)
-            .filter(|note| note.note.protocol() == protocol)
+            .filter(|note| note_matches_spendable_protocol(&note.note, protocol))
             .filter(|note| {
                 self.note_is_spendable(
                     note,
