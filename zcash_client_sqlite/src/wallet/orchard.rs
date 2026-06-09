@@ -501,27 +501,37 @@ pub(crate) fn mark_orchard_note_spent(
 #[cfg(test)]
 pub(crate) mod tests {
 
+    #[cfg(zcash_unstable = "nu7")]
     use std::convert::Infallible;
 
+    #[cfg(zcash_unstable = "nu7")]
     use assert_matches::assert_matches;
     use orchard::note::NoteVersion;
+    use zcash_client_backend::data_api::{
+        Account as _, TargetValue,
+        testing::{
+            AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+            sapling::SaplingPoolTester,
+        },
+        wallet::{ConfirmationsPolicy, TargetHeight},
+    };
+    #[cfg(zcash_unstable = "nu7")]
     use zcash_client_backend::{
         data_api::{
-            Account as _, TargetValue, WalletRead,
-            testing::{
-                AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
-                sapling::SaplingPoolTester,
-            },
+            WalletRead,
             wallet::{
-                ConfirmationsPolicy, SpendingKeys, TargetHeight,
-                create_orchard_to_ironwood_transaction, input_selection::GreedyInputSelector,
+                SpendingKeys, create_orchard_to_ironwood_transaction,
+                input_selection::GreedyInputSelector,
             },
         },
         fees::{DustOutputPolicy, StandardFeeRule, standard},
         wallet::OvkPolicy,
     };
     use zcash_primitives::block::BlockHash;
-    use zcash_protocol::{ShieldedProtocol, consensus::BlockHeight, value::Zatoshis};
+    use zcash_protocol::value::Zatoshis;
+    #[cfg(zcash_unstable = "nu7")]
+    use zcash_protocol::{ShieldedProtocol, consensus::BlockHeight};
+    #[cfg(zcash_unstable = "nu7")]
     use zip321::{Payment, TransactionRequest};
 
     use super::{decode_note_version, encode_note_version};
