@@ -88,6 +88,67 @@ fn v5_auth_commitment_in_nu7_does_not_include_ironwood_digest() {
     assert_eq!(tx.auth_commitment(), expected.finalize());
 }
 
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn v6_branch_reconstruction_preserves_ironwood_bundle() {
+    use proptest::{strategy::ValueTree, test_runner::TestRunner};
+
+    let mut runner = TestRunner::default();
+    let ironwood_bundle = crate::transaction::components::orchard::testing::arb_bundle(1)
+        .new_tree(&mut runner)
+        .unwrap()
+        .current();
+    let tx = TransactionData::from_parts_v6(
+        BranchId::Nu7,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(ironwood_bundle),
+    )
+    .freeze()
+    .unwrap();
+
+    let original_txid = tx.txid();
+    let mut tx_bytes = vec![];
+    tx.write(&mut tx_bytes).unwrap();
+
+    let tx_data = Transaction::read(&tx_bytes[..], BranchId::Sprout)
+        .unwrap()
+        .into_data();
+
+    let legacy_rebuilt = TransactionData::from_parts(
+        tx_data.version(),
+        tx_data.consensus_branch_id(),
+        tx_data.lock_time(),
+        tx_data.expiry_height(),
+        tx_data.transparent_bundle().cloned(),
+        tx_data.sprout_bundle().cloned(),
+        tx_data.sapling_bundle().cloned(),
+        tx_data.orchard_bundle().cloned(),
+    )
+    .freeze()
+    .unwrap();
+    assert!(legacy_rebuilt.ironwood_bundle().is_none());
+    assert_ne!(legacy_rebuilt.txid(), original_txid);
+
+    let rebuilt = TransactionData::from_parts_v6(
+        tx_data.consensus_branch_id(),
+        tx_data.lock_time(),
+        tx_data.expiry_height(),
+        tx_data.transparent_bundle().cloned(),
+        tx_data.sapling_bundle().cloned(),
+        tx_data.orchard_bundle().cloned(),
+        tx_data.ironwood_bundle().cloned(),
+    )
+    .freeze()
+    .unwrap();
+
+    assert!(rebuilt.ironwood_bundle().is_some());
+    assert_eq!(rebuilt.txid(), original_txid);
+}
+
 #[cfg(test)]
 fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
     let mut txn_bytes = vec![];

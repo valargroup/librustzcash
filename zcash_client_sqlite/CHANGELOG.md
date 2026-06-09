@@ -14,6 +14,10 @@ workspace.
 - Wallet summaries now count V3 Orchard-style notes as Ironwood balance instead
   of Orchard balance.
 
+### Fixed
+- V6 transaction reconstruction now preserves Ironwood bundles when deriving the
+  consensus branch from the serialized expiry height.
+
 ## [0.21.0] - 2026-06-02
 
 ### Changed

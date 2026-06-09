@@ -24,6 +24,8 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::{address::UnifiedAddress, keys::UnifiedIncomingViewingKey};
+#[cfg(zcash_unstable = "nu7")]
+use zcash_primitives::transaction::TxVersion;
 use zcash_primitives::{
     block::BlockHash,
     transaction::{Transaction, TransactionData, TxId},
@@ -543,9 +545,38 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
                 let expiry_height = tx_data.expiry_height();
                 if expiry_height > BlockHeight::from(0) {
-                    Ok(TransactionData::from_parts(
+                    let consensus_branch_id = BranchId::for_height(&self.params, expiry_height);
+                    #[cfg(zcash_unstable = "nu7")]
+                    let tx = if tx_data.version() == TxVersion::V6 {
+                        TransactionData::from_parts_v6(
+                            consensus_branch_id,
+                            tx_data.lock_time(),
+                            expiry_height,
+                            tx_data.transparent_bundle().cloned(),
+                            tx_data.sapling_bundle().cloned(),
+                            tx_data.orchard_bundle().cloned(),
+                            tx_data.ironwood_bundle().cloned(),
+                        )
+                        .freeze()
+                    } else {
+                        TransactionData::from_parts(
+                            tx_data.version(),
+                            consensus_branch_id,
+                            tx_data.lock_time(),
+                            expiry_height,
+                            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
+                            tx_data.zip233_amount(),
+                            tx_data.transparent_bundle().cloned(),
+                            tx_data.sprout_bundle().cloned(),
+                            tx_data.sapling_bundle().cloned(),
+                            tx_data.orchard_bundle().cloned(),
+                        )
+                        .freeze()
+                    };
+                    #[cfg(not(zcash_unstable = "nu7"))]
+                    let tx = TransactionData::from_parts(
                         tx_data.version(),
-                        BranchId::for_height(&self.params, expiry_height),
+                        consensus_branch_id,
                         tx_data.lock_time(),
                         expiry_height,
                         #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
@@ -555,7 +586,9 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                         tx_data.sapling_bundle().cloned(),
                         tx_data.orchard_bundle().cloned(),
                     )
-                        .freeze()?)
+                    .freeze();
+
+                    Ok(tx?)
                 } else {
                     Err(Self::Error::CorruptedData(
                         "Consensus branch ID not known, cannot parse this transaction until it is mined"
