@@ -1211,32 +1211,7 @@ where
             fee_rule,
         )?;
         let txid = build_result.transaction().txid();
-        let output_index = build_result
-            .ironwood_meta()
-            .output_action_index(0)
-            .expect("An action should exist in the transaction for the Ironwood output.");
-        let orchard_internal_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::Internal);
-        let note = build_result
-            .transaction()
-            .ironwood_bundle()
-            .and_then(|bundle| {
-                bundle
-                    .decrypt_output_with_key(output_index, &orchard_internal_ivk)
-                    .map(|(note, _, _)| note)
-            })
-            .expect(
-                "The wallet-internal Ironwood output must be decryptable with the wallet's IVK",
-            );
-        let outputs = vec![SentTransactionOutput::from_parts(
-            output_index,
-            Recipient::InternalAccount {
-                receiving_account: account_id,
-                external_address: None,
-                note: Box::new(Note::Orchard(note)),
-            },
-            migrated_amount,
-            Some(memo.clone()),
-        )];
+        let outputs: &[SentTransactionOutput<<DbT as WalletRead>::AccountId>] = &[];
         #[cfg(feature = "transparent-inputs")]
         let utxos_spent = Vec::new();
         let sent_tx = SentTransaction::new(
