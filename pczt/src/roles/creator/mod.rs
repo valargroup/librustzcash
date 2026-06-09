@@ -232,7 +232,9 @@ impl Creator {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(zcash_unstable = "nu7")]
     use super::*;
+    #[cfg(zcash_unstable = "nu7")]
     use zcash_protocol::consensus::BranchId;
 
     #[cfg(zcash_unstable = "nu7")]
