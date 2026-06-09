@@ -91,8 +91,43 @@ pub struct Pczt {
     #[getset(get = "pub")]
     orchard: orchard::Bundle,
     #[cfg(zcash_unstable = "nu7")]
+    #[serde(default = "empty_ironwood_bundle")]
     #[getset(get = "pub")]
     ironwood: orchard::Bundle,
+}
+
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) fn empty_ironwood_bundle() -> orchard::Bundle {
+    orchard::Bundle {
+        actions: vec![],
+        flags: 0b0000_0011,
+        value_sum: (0, true),
+        anchor: [0; 32],
+        zkproof: None,
+        bsk: None,
+    }
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[derive(Serialize, Deserialize)]
+struct PcztWithoutIronwood {
+    global: common::Global,
+    transparent: transparent::Bundle,
+    sapling: sapling::Bundle,
+    orchard: orchard::Bundle,
+}
+
+#[cfg(zcash_unstable = "nu7")]
+impl From<PcztWithoutIronwood> for Pczt {
+    fn from(pczt: PcztWithoutIronwood) -> Self {
+        Self {
+            global: pczt.global,
+            transparent: pczt.transparent,
+            sapling: pczt.sapling,
+            orchard: pczt.orchard,
+            ironwood: empty_ironwood_bundle(),
+        }
+    }
 }
 
 mod v1 {
@@ -266,9 +301,25 @@ impl Pczt {
             PCZT_VERSION_1 => postcard::from_bytes::<v1::Pczt>(&bytes[8..])
                 .map(Into::into)
                 .map_err(ParseError::Invalid),
-            PCZT_VERSION_2 => postcard::from_bytes(&bytes[8..]).map_err(ParseError::Invalid),
+            PCZT_VERSION_2 => Self::parse_v2_payload(&bytes[8..]),
             _ => Err(ParseError::UnknownVersion(version)),
         }
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    fn parse_v2_payload(bytes: &[u8]) -> Result<Self, ParseError> {
+        postcard::from_bytes(bytes)
+            .or_else(|err| {
+                postcard::from_bytes::<PcztWithoutIronwood>(bytes)
+                    .map(Into::into)
+                    .map_err(|_| err)
+            })
+            .map_err(ParseError::Invalid)
+    }
+
+    #[cfg(not(zcash_unstable = "nu7"))]
+    fn parse_v2_payload(bytes: &[u8]) -> Result<Self, ParseError> {
+        postcard::from_bytes(bytes).map_err(ParseError::Invalid)
     }
 
     /// Serializes this PCZT.
@@ -624,5 +675,29 @@ mod tests {
             u32::from_le_bytes(parsed.serialize()[4..8].try_into().unwrap()),
             PCZT_VERSION_2
         );
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn parse_v2_pczt_without_ironwood_bundle() {
+        let pczt =
+            roles::creator::Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+                .build();
+        let legacy_pczt = PcztWithoutIronwood {
+            global: pczt.global,
+            transparent: pczt.transparent,
+            sapling: pczt.sapling,
+            orchard: pczt.orchard,
+        };
+
+        let mut bytes = vec![];
+        bytes.extend_from_slice(MAGIC_BYTES);
+        bytes.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
+        let bytes = postcard::to_extend(&legacy_pczt, bytes).unwrap();
+
+        let parsed = Pczt::parse(&bytes).unwrap();
+        assert!(parsed.ironwood.actions.is_empty());
+        assert_eq!(parsed.ironwood.flags, 0b0000_0011);
+        assert_eq!(parsed.ironwood.value_sum, (0, true));
     }
 }
