@@ -1405,17 +1405,28 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         mut rng: R,
         fee_rule: &FR,
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
-        let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
-        self.check_version_compatibility::<FR::Error>(self.tx_version)?;
-
         #[cfg(zcash_unstable = "nu7")]
-        if matches!(self.tx_version, TxVersion::V6) || self.ironwood_in_use() {
-            return Err(Error::TargetIncompatible(
-                self.consensus_branch_id,
-                self.tx_version,
-                None,
-            ));
-        }
+        let pczt_tx_version = {
+            if self.ironwood_in_use() {
+                return Err(Error::TargetIncompatible(
+                    self.consensus_branch_id,
+                    self.tx_version,
+                    None,
+                ));
+            } else if matches!(self.tx_version, TxVersion::V6) {
+                TxVersion::V5
+            } else {
+                self.tx_version
+            }
+        };
+        #[cfg(not(zcash_unstable = "nu7"))]
+        let pczt_tx_version = self.tx_version;
+
+        self.check_version_compatibility::<FR::Error>(pczt_tx_version)?;
+        #[cfg(zcash_unstable = "nu7")]
+        debug_assert!(!pczt_tx_version.has_ironwood());
+
+        let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
 
         //
         // Consistency checks
@@ -1465,7 +1476,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         Ok(PcztResult {
             pczt_parts: PcztParts {
                 params: self.params,
-                version: self.tx_version,
+                version: pczt_tx_version,
                 consensus_branch_id: self.consensus_branch_id,
                 lock_time: 0,
                 expiry_height: self.expiry_height,
@@ -2040,8 +2051,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
-    fn build_for_pczt_rejects_v6() {
+    #[cfg(all(
+        feature = "circuits",
+        feature = "transparent-inputs",
+        zcash_unstable = "nu7"
+    ))]
+    fn build_for_pczt_uses_v5_for_default_nu7_without_ironwood() {
+        use ::transparent::keys::NonHardenedChildIndex;
+
         #[derive(Clone, Copy, Debug)]
         struct Nu7Network;
 
@@ -2061,7 +2078,7 @@ mod tests {
             }
         }
 
-        let builder = Builder::new(
+        let mut builder = Builder::new(
             Nu7Network,
             10u32.into(),
             BuildConfig::Standard {
@@ -2071,16 +2088,43 @@ mod tests {
             },
         );
 
-        assert_matches!(
-            builder.build_for_pczt(
+        let mut transparent_signing_set = TransparentSigningSet::new();
+        let tsk = AccountPrivKey::from_seed(&TEST_NETWORK, &[0u8; 32], AccountId::ZERO).unwrap();
+        let sk = tsk
+            .derive_external_secret_key(NonHardenedChildIndex::ZERO)
+            .unwrap();
+        let pubkey = transparent_signing_set.add_key(sk);
+        let prev_coin = TxOut::new(
+            Zatoshis::const_from_u64(50000),
+            tsk.to_account_pubkey()
+                .derive_external_ivk()
+                .unwrap()
+                .derive_address(NonHardenedChildIndex::ZERO)
+                .unwrap()
+                .script()
+                .into(),
+        );
+
+        builder
+            .add_transparent_p2pkh_input(pubkey, OutPoint::fake(), prev_coin)
+            .unwrap();
+        builder
+            .add_transparent_output(
+                &TransparentAddress::PublicKeyHash([0; 20]),
+                Zatoshis::const_from_u64(40000),
+            )
+            .unwrap();
+
+        let res = builder
+            .build_for_pczt(
                 OsRng,
-                &crate::transaction::fees::zip317::FeeRule::standard()
-            ),
-            Err(Error::TargetIncompatible(
-                zcash_protocol::consensus::BranchId::Nu7,
-                crate::transaction::TxVersion::V6,
-                None
-            ))
+                &crate::transaction::fees::zip317::FeeRule::standard(),
+            )
+            .unwrap();
+        assert_eq!(res.pczt_parts.version, TxVersion::V5);
+        assert_eq!(
+            res.pczt_parts.consensus_branch_id,
+            zcash_protocol::consensus::BranchId::Nu7
         );
     }
 }
