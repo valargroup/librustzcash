@@ -3349,16 +3349,18 @@ pub(crate) fn get_target_and_anchor_heights(
     }
 }
 
+type BlockMetadataRow = (
+    BlockHeight,
+    Vec<u8>,
+    Option<u32>,
+    Vec<u8>,
+    Option<u32>,
+    Option<u32>,
+);
+
 fn parse_block_metadata<P: consensus::Parameters>(
     _params: &P,
-    row: (
-        BlockHeight,
-        Vec<u8>,
-        Option<u32>,
-        Vec<u8>,
-        Option<u32>,
-        Option<u32>,
-    ),
+    row: BlockMetadataRow,
 ) -> Result<BlockMetadata, SqliteClientError> {
     let (
         block_height,

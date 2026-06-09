@@ -263,9 +263,9 @@ CREATE TABLE blocks (
     sapling_tree BLOB NOT NULL ,
     sapling_commitment_tree_size INTEGER,
     orchard_commitment_tree_size INTEGER,
-    ironwood_commitment_tree_size INTEGER,
     sapling_output_count INTEGER,
     orchard_action_count INTEGER,
+    ironwood_commitment_tree_size INTEGER,
     ironwood_action_count INTEGER)";
 
 /// Stores the wallet's transactions.
@@ -1480,7 +1480,6 @@ pub(super) fn view_ironwood_shard_scan_ranges<P: Parameters>(params: &P) -> Stri
         FROM ironwood_tree_shards shard
         LEFT OUTER JOIN ironwood_tree_shards prev_shard
             ON shard.shard_index = prev_shard.shard_index + 1
-        -- Join with scan ranges that overlap with the subtree's involved blocks.
         INNER JOIN scan_queue ON (
             subtree_start_height < scan_queue.block_range_end AND
             (

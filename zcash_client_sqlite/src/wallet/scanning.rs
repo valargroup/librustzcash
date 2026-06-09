@@ -26,9 +26,6 @@ use {
     zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT,
 };
 
-#[cfg(not(feature = "orchard"))]
-use zcash_protocol::PoolType;
-
 pub(crate) fn priority_code(priority: &ScanPriority) -> i64 {
     use ScanPriority::*;
     match priority {
@@ -401,6 +398,22 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
     conn: &rusqlite::Transaction<'_>,
     params: &P,
 ) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "orchard")]
+    fn table_has_column(
+        conn: &rusqlite::Transaction<'_>,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<bool, SqliteClientError> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+        let column_exists = stmt
+            .query_map([], |row| row.get::<_, String>("name"))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == column_name);
+
+        Ok(column_exists)
+    }
+
     fn mark_pool(
         conn: &rusqlite::Transaction<'_>,
         notes_table: &str,
@@ -446,22 +459,30 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
         )?;
         #[cfg(feature = "orchard")]
         {
+            let orchard_notes_have_version =
+                table_has_column(conn, "orchard_received_notes", "note_version")?;
             mark_pool(
                 conn,
                 "orchard_received_notes",
                 "orchard",
-                "AND note_version = 2",
+                if orchard_notes_have_version {
+                    "AND note_version = 2"
+                } else {
+                    ""
+                },
                 ORCHARD_SHARD_HEIGHT,
                 pruning_floor,
             )?;
-            mark_pool(
-                conn,
-                "orchard_received_notes",
-                "ironwood",
-                "AND note_version = 3",
-                ORCHARD_SHARD_HEIGHT,
-                pruning_floor,
-            )?;
+            if orchard_notes_have_version {
+                mark_pool(
+                    conn,
+                    "orchard_received_notes",
+                    "ironwood",
+                    "AND note_version = 3",
+                    ORCHARD_SHARD_HEIGHT,
+                    pruning_floor,
+                )?;
+            }
         }
     }
 

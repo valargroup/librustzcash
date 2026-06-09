@@ -2431,6 +2431,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
 
 /// Create a fake CompactBlock at the given height containing only the given transaction.
 // TODO: `tx` could be a slice and we could add multiple transactions here
+#[allow(clippy::too_many_arguments)]
 fn fake_compact_block_from_tx(
     height: BlockHeight,
     prev_hash: BlockHash,

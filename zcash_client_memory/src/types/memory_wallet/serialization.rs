@@ -191,11 +191,9 @@ impl<P: Parameters> MemoryWalletDb<P> {
         };
 
         #[cfg(feature = "orchard")]
-        {
-            if let Some(ironwood_tree) = proto_wallet.ironwood_tree {
-                wallet.ironwood_tree = tree_from_protobuf(ironwood_tree, 100, 16.into())?;
-            }
-        };
+        if let Some(ironwood_tree) = proto_wallet.ironwood_tree {
+            wallet.ironwood_tree = tree_from_protobuf(ironwood_tree, 100, 16.into())?;
+        }
 
         #[cfg(feature = "orchard")]
         {
