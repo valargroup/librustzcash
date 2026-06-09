@@ -622,11 +622,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
 
             #[cfg(feature = "orchard")]
             let orchard_inputs = if use_orchard {
-                shielded_inputs
-                    .orchard()
-                    .iter()
-                    .map(|i| (*i.internal_note_id(), i.note().value()))
-                    .collect()
+                shielded_inputs.orchard().to_vec()
             } else {
                 vec![]
             };
@@ -634,7 +630,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             let selected_input_ids = sapling_inputs.iter().map(|(id, _)| id);
             #[cfg(feature = "orchard")]
             let selected_input_ids =
-                selected_input_ids.chain(orchard_inputs.iter().map(|(id, _)| id));
+                selected_input_ids.chain(orchard_inputs.iter().map(|i| i.internal_note_id()));
 
             let selected_input_ids = selected_input_ids.cloned().collect::<Vec<_>>();
 
@@ -869,9 +865,33 @@ where
         } else {
             0
         };
-        orchard::builder::BundleType::DEFAULT
-            .num_actions(spendable_notes.orchard.len(), requested_orchard_actions)
-            .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?
+
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood_input_count = spendable_notes
+            .orchard()
+            .iter()
+            .filter(|note| note.note().version() == orchard::note::NoteVersion::V3)
+            .count();
+        #[cfg(not(zcash_unstable = "nu7"))]
+        let ironwood_input_count = 0usize;
+
+        let orchard_input_count = spendable_notes.orchard().len() - ironwood_input_count;
+        let orchard_actions = orchard::builder::BundleType::DEFAULT
+            .num_actions(orchard_input_count, requested_orchard_actions)
+            .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            let ironwood_actions = orchard::builder::BundleType::DEFAULT
+                .num_actions(ironwood_input_count, 0)
+                .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
+            orchard_actions + ironwood_actions
+        }
+
+        #[cfg(not(zcash_unstable = "nu7"))]
+        {
+            orchard_actions
+        }
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count: usize = 0;

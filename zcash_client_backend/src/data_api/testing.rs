@@ -1595,6 +1595,16 @@ impl<A, B> TestBuilder<A, B> {
 }
 
 impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
+    /// Overrides the default local consensus network used by the test.
+    ///
+    /// This must be called before configuring an account birthday or initial chain state.
+    pub fn with_network(mut self, network: LocalNetwork) -> Self {
+        assert!(self.initial_chain_state.is_none());
+        assert!(self.account_birthday.is_none());
+        self.network = network;
+        self
+    }
+
     /// Configures the test to start with the given initial chain state.
     ///
     /// # Panics
@@ -2385,6 +2395,13 @@ fn fake_compact_block_from_tx(
 
     #[cfg(feature = "orchard")]
     if let Some(bundle) = tx.orchard_bundle() {
+        for action in bundle.actions() {
+            ctx.actions.push(action.into());
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    if let Some(bundle) = tx.ironwood_bundle() {
         for action in bundle.actions() {
             ctx.actions.push(action.into());
         }

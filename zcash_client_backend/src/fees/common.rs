@@ -114,6 +114,57 @@ where
     })
 }
 
+#[cfg(feature = "orchard")]
+fn orchard_action_count_from_parts<E, NoteRefT>(
+    bundle_type: orchard::builder::BundleType,
+    orchard_inputs: usize,
+    ironwood_inputs: usize,
+    orchard_outputs: usize,
+) -> Result<usize, ChangeError<E, NoteRefT>> {
+    let orchard_actions = bundle_type
+        .num_actions(orchard_inputs, orchard_outputs)
+        .map_err(ChangeError::BundleError)?;
+
+    #[cfg(zcash_unstable = "nu7")]
+    {
+        let ironwood_actions = bundle_type
+            .num_actions(ironwood_inputs, 0)
+            .map_err(ChangeError::BundleError)?;
+
+        orchard_actions
+            .checked_add(ironwood_actions)
+            .ok_or(ChangeError::BundleError("Orchard action count overflowed."))
+    }
+
+    #[cfg(not(zcash_unstable = "nu7"))]
+    {
+        let _ = ironwood_inputs;
+        Ok(orchard_actions)
+    }
+}
+
+#[cfg(feature = "orchard")]
+fn orchard_action_count<NoteRefT: Clone, E>(
+    orchard: &impl orchard_fees::BundleView<NoteRefT>,
+    orchard_output_count: usize,
+) -> Result<usize, ChangeError<E, NoteRefT>> {
+    #[cfg(zcash_unstable = "nu7")]
+    let ironwood_inputs = orchard
+        .inputs()
+        .iter()
+        .filter(|i| orchard_fees::InputView::<NoteRefT>::is_ironwood(*i))
+        .count();
+    #[cfg(not(zcash_unstable = "nu7"))]
+    let ironwood_inputs = 0usize;
+
+    orchard_action_count_from_parts(
+        orchard.bundle_type(),
+        orchard.inputs().len() - ironwood_inputs,
+        ironwood_inputs,
+        orchard_output_count,
+    )
+}
+
 /// Decide which shielded pool change should go to if there is any.
 pub(crate) fn select_change_pool(
     _net_flows: &NetFlows,
@@ -312,13 +363,7 @@ where
 
     #[cfg(feature = "orchard")]
     let orchard_action_count = |change_count| {
-        orchard
-            .bundle_type()
-            .num_actions(
-                orchard.inputs().len(),
-                orchard.outputs().len() + change_count,
-            )
-            .map_err(ChangeError::BundleError)
+        orchard_action_count::<NoteRefT, E>(orchard, orchard.outputs().len() + change_count)
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count = |change_count: usize| -> Result<usize, ChangeError<E, NoteRefT>> {
@@ -607,19 +652,28 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         .collect();
 
     #[cfg(feature = "orchard")]
-    let mut o_dust: Vec<NoteRefT> = orchard
+    let mut o_dust: Vec<(NoteRefT, bool)> = orchard
         .inputs()
         .iter()
         .filter_map(|i| {
             if orchard_fees::InputView::<NoteRefT>::value(i) <= marginal_fee {
-                Some(orchard_fees::InputView::<NoteRefT>::note_id(i).clone())
+                Some((orchard_fees::InputView::<NoteRefT>::note_id(i).clone(), {
+                    #[cfg(zcash_unstable = "nu7")]
+                    {
+                        orchard_fees::InputView::<NoteRefT>::is_ironwood(i)
+                    }
+                    #[cfg(not(zcash_unstable = "nu7"))]
+                    {
+                        false
+                    }
+                }))
             } else {
                 None
             }
         })
         .collect();
     #[cfg(not(feature = "orchard"))]
-    let mut o_dust: Vec<NoteRefT> = vec![];
+    let mut o_dust: Vec<(NoteRefT, bool)> = vec![];
 
     // If we don't have any dust inputs, there is nothing to check.
     if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() {
@@ -635,10 +689,37 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     let (o_inputs_len, o_outputs_len) = (orchard.inputs().len(), orchard.outputs().len());
     #[cfg(not(feature = "orchard"))]
     let (o_inputs_len, o_outputs_len) = (0usize, 0usize);
+    #[cfg(feature = "orchard")]
+    let ironwood_inputs_len = {
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            orchard
+                .inputs()
+                .iter()
+                .filter(|i| orchard_fees::InputView::<NoteRefT>::is_ironwood(*i))
+                .count()
+        }
+        #[cfg(not(zcash_unstable = "nu7"))]
+        {
+            0usize
+        }
+    };
+    #[cfg(not(feature = "orchard"))]
+    let ironwood_inputs_len = 0usize;
+    let orchard_inputs_len = o_inputs_len - ironwood_inputs_len;
 
     let t_non_dust = t_inputs_len.checked_sub(t_dust.len()).unwrap();
     let s_non_dust = s_inputs_len.checked_sub(s_dust.len()).unwrap();
-    let o_non_dust = o_inputs_len.checked_sub(o_dust.len()).unwrap();
+    let o_dust_ironwood_len = o_dust
+        .iter()
+        .filter(|(_, is_ironwood)| *is_ironwood)
+        .count();
+    let o_dust_orchard_len = o_dust.len() - o_dust_ironwood_len;
+    let o_non_dust_orchard = orchard_inputs_len.checked_sub(o_dust_orchard_len).unwrap();
+    let o_non_dust_ironwood = ironwood_inputs_len
+        .checked_sub(o_dust_ironwood_len)
+        .unwrap();
+    let o_non_dust = o_non_dust_orchard + o_non_dust_ironwood;
 
     // Return the number of allowed dust inputs from each pool.
     let allowed_dust = |change: &OutputManifest| {
@@ -671,7 +752,17 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         let t_req_inputs = t_non_dust + t_allowed;
         let s_req_inputs = s_non_dust + s_allowed;
         #[cfg(feature = "orchard")]
-        let o_req_inputs = o_non_dust + o_allowed;
+        let (o_req_orchard_inputs, o_req_ironwood_inputs) = {
+            let o_allowed_ironwood = o_dust
+                .iter()
+                .take(o_allowed)
+                .filter(|(_, is_ironwood)| *is_ironwood)
+                .count();
+            (
+                o_non_dust_orchard + (o_allowed - o_allowed_ironwood),
+                o_non_dust_ironwood + o_allowed_ironwood,
+            )
+        };
 
         // This calculates the hypothetical number of actions with given extra inputs,
         // for ZIP 317 and the padding rules in effect. The padding rules for each
@@ -680,7 +771,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         // whether we can freely add an extra input from a given pool, we need to call
         // them both with and without that input; if the number of actions does not
         // increase, then the input is free to add.
-        let hypothetical_actions = |t_extra, s_extra, _o_extra| {
+        let hypothetical_actions = |t_extra, s_extra, _o_extra: Option<bool>| {
             let s_spend_count = sapling
                 .bundle_type()
                 .num_spends(s_req_inputs + s_extra)
@@ -692,10 +783,12 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
                 .map_err(ChangeError::BundleError)?;
 
             #[cfg(feature = "orchard")]
-            let o_action_count = orchard
-                .bundle_type()
-                .num_actions(o_req_inputs + _o_extra, o_outputs_len + change.orchard)
-                .map_err(ChangeError::BundleError)?;
+            let o_action_count = orchard_action_count_from_parts(
+                orchard.bundle_type(),
+                o_req_orchard_inputs + usize::from(matches!(_o_extra, Some(false))),
+                o_req_ironwood_inputs + usize::from(matches!(_o_extra, Some(true))),
+                o_outputs_len + change.orchard,
+            )?;
             #[cfg(not(feature = "orchard"))]
             let o_action_count = 0;
 
@@ -717,15 +810,17 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         // logical action. (If `grace_actions` were greater than 2 then the code would still
         // be correct, it would just not find all potential extra inputs.)
 
-        let baseline = hypothetical_actions(0, 0, 0)?;
+        let baseline = hypothetical_actions(0, 0, None)?;
 
         let (t_extra, s_extra, o_extra) = if baseline >= grace_actions {
             (0, 0, 0)
-        } else if t_dust.len() > t_allowed && hypothetical_actions(1, 0, 0)? <= baseline {
+        } else if t_dust.len() > t_allowed && hypothetical_actions(1, 0, None)? <= baseline {
             (1, 0, 0)
-        } else if s_dust.len() > s_allowed && hypothetical_actions(0, 1, 0)? <= baseline {
+        } else if s_dust.len() > s_allowed && hypothetical_actions(0, 1, None)? <= baseline {
             (0, 1, 0)
-        } else if o_dust.len() > o_allowed && hypothetical_actions(0, 0, 1)? <= baseline {
+        } else if o_dust.len() > o_allowed
+            && hypothetical_actions(0, 0, Some(o_dust[o_allowed].1))? <= baseline
+        {
             (0, 0, 1)
         } else {
             (0, 0, 0)
@@ -754,7 +849,11 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     // The caller should order the inputs from most to least preferred to spend.
     let t_dust = t_dust.split_off(allowed.transparent);
     let s_dust = s_dust.split_off(allowed.sapling);
-    let o_dust = o_dust.split_off(allowed.orchard);
+    let o_dust = o_dust
+        .split_off(allowed.orchard)
+        .into_iter()
+        .map(|(note_id, _)| note_id)
+        .collect::<Vec<_>>();
 
     if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() {
         Ok(())

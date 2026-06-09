@@ -68,6 +68,11 @@ pub trait InputView<NoteRef> {
     fn note_id(&self) -> &NoteRef;
     /// The value of the input being spent.
     fn value(&self) -> Zatoshis;
+    /// Returns whether this input is an Ironwood note.
+    #[cfg(zcash_unstable = "nu7")]
+    fn is_ironwood(&self) -> bool {
+        false
+    }
 }
 
 impl<N> InputView<N> for Infallible {

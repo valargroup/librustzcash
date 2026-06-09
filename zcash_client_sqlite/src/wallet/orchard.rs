@@ -501,17 +501,28 @@ pub(crate) fn mark_orchard_note_spent(
 #[cfg(test)]
 pub(crate) mod tests {
 
+    use std::convert::Infallible;
+
+    use assert_matches::assert_matches;
     use orchard::note::NoteVersion;
-    use zcash_client_backend::data_api::{
-        Account as _, TargetValue,
-        testing::{
-            AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
-            sapling::SaplingPoolTester,
+    use zcash_client_backend::{
+        data_api::{
+            Account as _, TargetValue, WalletRead,
+            testing::{
+                AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+                sapling::SaplingPoolTester,
+            },
+            wallet::{
+                ConfirmationsPolicy, SpendingKeys, TargetHeight,
+                create_orchard_to_ironwood_transaction, input_selection::GreedyInputSelector,
+            },
         },
-        wallet::{ConfirmationsPolicy, TargetHeight},
+        fees::{DustOutputPolicy, StandardFeeRule, standard},
+        wallet::OvkPolicy,
     };
     use zcash_primitives::block::BlockHash;
-    use zcash_protocol::value::Zatoshis;
+    use zcash_protocol::{ShieldedProtocol, consensus::BlockHeight, value::Zatoshis};
+    use zip321::{Payment, TransactionRequest};
 
     use super::{decode_note_version, encode_note_version};
     use crate::testing::{self, BlockCache, db::TestDbFactory};
@@ -558,7 +569,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn spendable_selection_excludes_v3_notes() {
+    fn spendable_selection_includes_v3_notes() {
         let mut st = TestBuilder::new()
             .with_data_store_factory(TestDbFactory::default())
             .with_block_cache(BlockCache::new())
@@ -598,7 +609,12 @@ pub(crate) mod tests {
             &[],
         )
         .unwrap();
-        assert!(spendable.is_empty());
+        if cfg!(zcash_unstable = "nu7") {
+            assert_eq!(spendable.len(), 1);
+            assert_eq!(spendable[0].note().version(), NoteVersion::V3);
+        } else {
+            assert!(spendable.is_empty());
+        }
 
         let unspent =
             OrchardPoolTester::select_unspent_notes(&st, account.id(), target_height, &[]).unwrap();
@@ -624,6 +640,7 @@ pub(crate) mod tests {
         let balance = summary.account_balances().get(&account.id()).unwrap();
         assert_eq!(balance.orchard_balance().total(), value);
         assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+        assert_eq!(balance.spendable_value(), value);
 
         st.wallet()
             .conn()
@@ -634,6 +651,109 @@ pub(crate) mod tests {
         let balance = summary.account_balances().get(&account.id()).unwrap();
         assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
         assert_eq!(balance.ironwood_balance().total(), value);
+        if cfg!(zcash_unstable = "nu7") {
+            assert_eq!(balance.spendable_value(), value);
+        } else {
+            assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
+        }
+    }
+
+    #[test]
+    #[cfg(zcash_unstable = "nu7")]
+    fn create_proposed_transfer_spends_v3_notes_as_ironwood() {
+        let network = zcash_protocol::local_consensus::LocalNetwork {
+            nu7: Some(BlockHeight::from_u32(100_000)),
+            ..TestBuilder::DEFAULT_NETWORK
+        };
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let prover = zcash_proofs::prover::LocalTxProver::bundled();
+        let network = st.network().clone();
+        let migration = create_orchard_to_ironwood_transaction(
+            st.wallet_mut(),
+            &network,
+            &prover,
+            &prover,
+            &SpendingKeys::from_unified_spending_key(account.usk().clone()),
+            OvkPolicy::Sender,
+            Zatoshis::const_from_u64(30000),
+            None,
+            &StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+        let (migration_height, _) = st.generate_next_block_including(migration.txid());
+        st.scan_cached_blocks(migration_height, 1);
+
+        let target_height = TargetHeight::from(migration_height + 1);
+        let spendable = OrchardPoolTester::select_spendable_notes(
+            &st,
+            account.id(),
+            TargetValue::AtLeast(Zatoshis::const_from_u64(50000)),
+            target_height,
+            ConfirmationsPolicy::MIN,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(spendable.len(), 1);
+        assert_eq!(spendable[0].note().version(), NoteVersion::V3);
+
+        let to_extsk = OrchardPoolTester::sk(&[0xf5; 32]);
+        let to = OrchardPoolTester::sk_default_address(&to_extsk);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10000),
+        )])
+        .unwrap();
+
+        let input_selector = GreedyInputSelector::new();
+        let change_strategy = standard::SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let step = proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(20000)
+        );
+
+        let create_proposed_result = st
+            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+                account.usk(),
+                OvkPolicy::Sender,
+                &proposal,
+            );
+        assert_matches!(&create_proposed_result, Ok(txids) if txids.len() == 1);
+
+        let tx = st
+            .wallet()
+            .get_transaction(create_proposed_result.unwrap()[0])
+            .unwrap()
+            .expect("Created transaction was stored.");
+        assert!(tx.ironwood_bundle().is_some());
+        assert!(tx.orchard_bundle().is_some());
     }
 
     #[test]

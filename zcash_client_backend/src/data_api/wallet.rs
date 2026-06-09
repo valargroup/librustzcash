@@ -1560,11 +1560,17 @@ where
     };
 
     #[cfg(feature = "orchard")]
-    let (orchard_anchor, orchard_inputs) = if proposal_step
+    let (orchard_anchor, orchard_inputs, ironwood_inputs) = if proposal_step
         .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
     {
         proposal_step.shielded_inputs().map_or_else(
-            || Ok((Some(orchard::Anchor::empty_tree()), vec![])),
+            || {
+                Ok((
+                    Some(orchard::Anchor::empty_tree()),
+                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+                ))
+            },
             |inputs| {
                 wallet_db.with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|orchard_tree| {
                     let anchor = orchard_tree
@@ -1572,36 +1578,67 @@ where
                         .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
                         .into();
 
-                    let orchard_inputs = inputs
-                        .notes()
-                        .iter()
-                        .filter_map(|selected| match selected.note() {
-                            #[cfg(feature = "orchard")]
-                            Note::Orchard(note) => orchard_tree
-                                .witness_at_checkpoint_id_caching(
-                                    selected.note_commitment_tree_position(),
-                                    &inputs.anchor_height(),
-                                )
-                                .and_then(|witness| {
-                                    witness
-                                        .ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
-                                })
-                                .map(|merkle_path| Some((note, merkle_path)))
-                                .map_err(Error::from)
-                                .transpose(),
-                            Note::Sapling(_) => None,
-                        })
-                        .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()?;
+                    let mut orchard_inputs =
+                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+                    #[cfg(zcash_unstable = "nu7")]
+                    let mut ironwood_inputs =
+                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+                    #[cfg(not(zcash_unstable = "nu7"))]
+                    let ironwood_inputs = Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
 
-                    Ok((Some(anchor), orchard_inputs))
+                    for orchard_input in inputs.notes().iter().filter_map(|selected| match selected
+                        .note()
+                    {
+                        #[cfg(feature = "orchard")]
+                        Note::Orchard(note) => orchard_tree
+                            .witness_at_checkpoint_id_caching(
+                                selected.note_commitment_tree_position(),
+                                &inputs.anchor_height(),
+                            )
+                            .and_then(|witness| {
+                                witness.ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                            })
+                            .map(|merkle_path| Some((note, merkle_path.into())))
+                            .map_err(Error::from)
+                            .transpose(),
+                        Note::Sapling(_) => None,
+                    }) {
+                        let (note, merkle_path) = orchard_input?;
+
+                        #[cfg(zcash_unstable = "nu7")]
+                        if note.version() == orchard::note::NoteVersion::V3 {
+                            ironwood_inputs.push((note, merkle_path));
+                            continue;
+                        }
+
+                        orchard_inputs.push((note, merkle_path));
+                    }
+
+                    Ok((Some(anchor), orchard_inputs, ironwood_inputs))
                 })
             },
         )?
     } else {
-        (None, vec![])
+        (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_anchor = None;
+
+    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+    let _ = &ironwood_inputs;
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let ironwood_anchor = if ironwood_inputs.is_empty() {
+        None
+    } else {
+        orchard_anchor.clone()
+    };
+    #[cfg(all(not(feature = "orchard"), zcash_unstable = "nu7"))]
+    let ironwood_anchor = None;
 
     // Create the transaction. The type of the proposal ensures that there
     // are no possible transparent inputs, so we ignore those here.
@@ -1612,7 +1649,7 @@ where
             sapling_anchor,
             orchard_anchor,
             #[cfg(zcash_unstable = "nu7")]
-            ironwood_anchor: None,
+            ironwood_anchor,
         },
     );
 
@@ -1624,7 +1661,16 @@ where
     #[cfg(all(feature = "transparent-inputs", not(feature = "orchard")))]
     let has_shielded_inputs = !sapling_inputs.is_empty();
     #[cfg(all(feature = "transparent-inputs", feature = "orchard"))]
-    let has_shielded_inputs = !(sapling_inputs.is_empty() && orchard_inputs.is_empty());
+    let has_shielded_inputs = !(sapling_inputs.is_empty() && orchard_inputs.is_empty() && {
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            ironwood_inputs.is_empty()
+        }
+        #[cfg(not(zcash_unstable = "nu7"))]
+        {
+            true
+        }
+    });
 
     let input_sources = NonEmpty::from_vec({
         let mut sources = vec![];
@@ -1632,7 +1678,16 @@ where
             sources.push(PoolType::SAPLING);
         }
         #[cfg(feature = "orchard")]
-        if !orchard_inputs.is_empty() {
+        if !orchard_inputs.is_empty() || {
+            #[cfg(zcash_unstable = "nu7")]
+            {
+                !ironwood_inputs.is_empty()
+            }
+            #[cfg(not(zcash_unstable = "nu7"))]
+            {
+                false
+            }
+        } {
             sources.push(PoolType::ORCHARD);
         }
         // We assume here that prior step outputs cannot be shielded, due to checks above (and the
@@ -1667,7 +1722,18 @@ where
                 .cloned()
                 .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
             *orchard_note,
-            merkle_path.into(),
+            merkle_path,
+        )?;
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    for (ironwood_note, merkle_path) in ironwood_inputs.into_iter() {
+        builder.add_ironwood_spend(
+            ufvk.orchard()
+                .cloned()
+                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
+            *ironwood_note,
+            merkle_path,
         )?;
     }
 

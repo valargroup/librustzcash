@@ -431,10 +431,22 @@ impl AccountBalance {
         .expect("Account balance cannot overflow MAX_MONEY")
     }
 
-    /// Returns the total value of Sapling and Orchard funds that may immediately be spent.
+    /// Returns the total value of shielded funds that may immediately be spent.
     pub fn spendable_value(&self) -> Zatoshis {
-        (self.sapling_balance.spendable_value + self.orchard_balance.spendable_value)
-            .expect("Account balance cannot overflow MAX_MONEY")
+        let spendable = (self.sapling_balance.spendable_value
+            + self.orchard_balance.spendable_value)
+            .expect("Account balance cannot overflow MAX_MONEY");
+
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            (spendable + self.ironwood_balance.spendable_value)
+                .expect("Account balance cannot overflow MAX_MONEY")
+        }
+
+        #[cfg(not(zcash_unstable = "nu7"))]
+        {
+            spendable
+        }
     }
 
     /// Returns the total value of change and/or shielding transaction outputs that are awaiting

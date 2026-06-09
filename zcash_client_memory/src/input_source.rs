@@ -37,7 +37,7 @@ fn note_matches_spendable_protocol(
         return false;
     }
 
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
     if protocol == Orchard {
         return matches!(
             note,
