@@ -12,9 +12,9 @@ use crate::{
     },
 };
 
-#[cfg(zcash_unstable = "nu7")]
-use zcash_protocol::constants::V6_TX_VERSION;
 use zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID};
+#[cfg(zcash_unstable = "nu7")]
+use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
 
 /// Initial flags allowing any modification.
 const INITIAL_TX_MODIFIABLE: u8 = FLAG_TRANSPARENT_INPUTS_MODIFIABLE
@@ -79,13 +79,21 @@ impl Creator {
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
         self.ironwood_flags = ironwood_flags.to_byte();
+        self.select_v6();
         self
     }
 
     #[cfg(zcash_unstable = "nu7")]
     pub fn with_ironwood_anchor(mut self, ironwood_anchor: [u8; 32]) -> Self {
         self.ironwood_anchor = ironwood_anchor;
+        self.select_v6();
         self
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    fn select_v6(&mut self) {
+        self.tx_version = V6_TX_VERSION;
+        self.version_group_id = V6_VERSION_GROUP_ID;
     }
 
     pub fn build(self) -> Pczt {
@@ -219,5 +227,23 @@ impl Creator {
                     bsk: None,
                 }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_protocol::consensus::BranchId;
+
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn ironwood_anchor_selects_v6() {
+        let pczt = Creator::new(BranchId::Nu7.into(), 10_000_000, 133, [0; 32], [0; 32])
+            .with_ironwood_anchor([1; 32])
+            .build();
+
+        assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
+        assert_eq!(pczt.global.version_group_id, V6_VERSION_GROUP_ID);
+        assert_eq!(pczt.ironwood.anchor, [1; 32]);
     }
 }
