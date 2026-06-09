@@ -848,6 +848,8 @@ pub struct WalletSummary<AccountId: Eq + Hash> {
     next_sapling_subtree_index: u64,
     #[cfg(feature = "orchard")]
     next_orchard_subtree_index: u64,
+    #[cfg(feature = "orchard")]
+    next_ironwood_subtree_index: u64,
 }
 
 impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
@@ -859,6 +861,7 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
         progress: Progress,
         next_sapling_subtree_index: u64,
         #[cfg(feature = "orchard")] next_orchard_subtree_index: u64,
+        #[cfg(feature = "orchard")] next_ironwood_subtree_index: u64,
     ) -> Self {
         Self {
             account_balances,
@@ -868,6 +871,8 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
             next_sapling_subtree_index,
             #[cfg(feature = "orchard")]
             next_orchard_subtree_index,
+            #[cfg(feature = "orchard")]
+            next_ironwood_subtree_index,
         }
     }
 
@@ -917,6 +922,13 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
     #[cfg(feature = "orchard")]
     pub fn next_orchard_subtree_index(&self) -> u64 {
         self.next_orchard_subtree_index
+    }
+
+    /// Returns the Ironwood subtree index that should start the next range of subtree
+    /// roots passed to [`WalletCommitmentTrees::put_ironwood_subtree_roots`].
+    #[cfg(feature = "orchard")]
+    pub fn next_ironwood_subtree_index(&self) -> u64 {
+        self.next_ironwood_subtree_index
     }
 
     /// Returns whether or not wallet scanning is complete.
@@ -2204,6 +2216,8 @@ pub struct BlockMetadata {
     sapling_tree_size: Option<u32>,
     #[cfg(feature = "orchard")]
     orchard_tree_size: Option<u32>,
+    #[cfg(feature = "orchard")]
+    ironwood_tree_size: Option<u32>,
 }
 
 impl BlockMetadata {
@@ -2213,6 +2227,7 @@ impl BlockMetadata {
         block_hash: BlockHash,
         sapling_tree_size: Option<u32>,
         #[cfg(feature = "orchard")] orchard_tree_size: Option<u32>,
+        #[cfg(feature = "orchard")] ironwood_tree_size: Option<u32>,
     ) -> Self {
         Self {
             block_height,
@@ -2220,6 +2235,8 @@ impl BlockMetadata {
             sapling_tree_size,
             #[cfg(feature = "orchard")]
             orchard_tree_size,
+            #[cfg(feature = "orchard")]
+            ironwood_tree_size,
         }
     }
 
@@ -2245,6 +2262,26 @@ impl BlockMetadata {
     pub fn orchard_tree_size(&self) -> Option<u32> {
         self.orchard_tree_size
     }
+
+    /// Returns the size of the Ironwood note commitment tree for the final treestate of the block
+    /// that this [`BlockMetadata`] describes, if available.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_tree_size(&self) -> Option<u32> {
+        self.ironwood_tree_size
+    }
+}
+
+/// Identifies one of the wallet-maintained note commitment trees.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NoteCommitmentTree {
+    /// The Sapling note commitment tree.
+    Sapling,
+    /// The Orchard note commitment tree.
+    #[cfg(feature = "orchard")]
+    Orchard,
+    /// The Ironwood note commitment tree.
+    #[cfg(feature = "orchard")]
+    Ironwood,
 }
 
 /// The protocol-specific note commitment and nullifier data extracted from the per-transaction
@@ -2302,6 +2339,10 @@ pub struct ScannedBlockCommitments {
     /// Present only when the `orchard` feature is enabled.
     #[cfg(feature = "orchard")]
     pub orchard: Vec<(orchard::tree::MerkleHashOrchard, Retention<BlockHeight>)>,
+    /// The ordered vector of note commitments for Ironwood outputs of the block.
+    /// Present only when the `orchard` feature is enabled.
+    #[cfg(feature = "orchard")]
+    pub ironwood: Vec<(orchard::tree::MerkleHashOrchard, Retention<BlockHeight>)>,
 }
 
 /// The subset of information that is relevant to this wallet that has been
@@ -2316,6 +2357,8 @@ pub struct ScannedBlock<A> {
     sapling: ScannedBundles<sapling::Node, sapling::Nullifier>,
     #[cfg(feature = "orchard")]
     orchard: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
+    #[cfg(feature = "orchard")]
+    ironwood: ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier>,
 }
 
 impl<A> ScannedBlock<A> {
@@ -2330,6 +2373,10 @@ impl<A> ScannedBlock<A> {
             orchard::tree::MerkleHashOrchard,
             orchard::note::Nullifier,
         >,
+        #[cfg(feature = "orchard")] ironwood: ScannedBundles<
+            orchard::tree::MerkleHashOrchard,
+            orchard::note::Nullifier,
+        >,
     ) -> Self {
         Self {
             block_height,
@@ -2339,6 +2386,8 @@ impl<A> ScannedBlock<A> {
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(feature = "orchard")]
+            ironwood,
         }
     }
 
@@ -2375,6 +2424,14 @@ impl<A> ScannedBlock<A> {
         &self.orchard
     }
 
+    /// Returns the Ironwood note commitment tree and nullifier data for the block.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(
+        &self,
+    ) -> &ScannedBundles<orchard::tree::MerkleHashOrchard, orchard::note::Nullifier> {
+        &self.ironwood
+    }
+
     /// Consumes `self` and returns the lists of Sapling and Orchard note commitments associated
     /// with the scanned block as an owned value.
     pub fn into_commitments(self) -> ScannedBlockCommitments {
@@ -2382,6 +2439,8 @@ impl<A> ScannedBlock<A> {
             sapling: self.sapling.commitments,
             #[cfg(feature = "orchard")]
             orchard: self.orchard.commitments,
+            #[cfg(feature = "orchard")]
+            ironwood: self.ironwood.commitments,
         }
     }
 
@@ -2393,6 +2452,8 @@ impl<A> ScannedBlock<A> {
             sapling_tree_size: Some(self.sapling.final_tree_size),
             #[cfg(feature = "orchard")]
             orchard_tree_size: Some(self.orchard.final_tree_size),
+            #[cfg(feature = "orchard")]
+            ironwood_tree_size: Some(self.ironwood.final_tree_size),
         }
     }
 }
@@ -2742,6 +2803,16 @@ impl AccountBirthday {
     ) -> &Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>
     {
         self.prior_chain_state.final_orchard_tree()
+    }
+
+    /// Returns the Ironwood note commitment tree frontier as of the end of the block at
+    /// [`Self::height`].
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_frontier(
+        &self,
+    ) -> &Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>
+    {
+        self.prior_chain_state.final_ironwood_tree()
     }
 
     /// Returns the birthday height of the account.
@@ -3402,6 +3473,39 @@ pub trait WalletCommitmentTrees {
     /// containing 2^[`ORCHARD_SHARD_HEIGHT`] note commitments.
     #[cfg(feature = "orchard")]
     fn put_orchard_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>>;
+
+    /// The type of the backing [`ShardStore`] for the Ironwood note commitment tree.
+    #[cfg(feature = "orchard")]
+    type IronwoodShardStore<'a>: ShardStore<
+            H = orchard::tree::MerkleHashOrchard,
+            CheckpointId = BlockHeight,
+            Error = Self::Error,
+        >;
+
+    /// Evaluates the given callback function with a reference to the Ironwood
+    /// note commitment tree maintained by the wallet.
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, callback: F) -> Result<A, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::IronwoodShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>;
+
+    /// Adds a sequence of Ironwood note commitment tree subtree roots to the data store.
+    ///
+    /// Each such value should be the Merkle root of a subtree of the Ironwood note commitment tree
+    /// containing 2^[`ORCHARD_SHARD_HEIGHT`] note commitments.
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
         &mut self,
         start_index: u64,
         roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],

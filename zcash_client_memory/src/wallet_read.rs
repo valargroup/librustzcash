@@ -275,8 +275,26 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                             Note::Orchard(orchard_note)
                                 if orchard_note.version() == orchard::note::NoteVersion::V3 =>
                             {
+                                #[cfg(zcash_unstable = "nu7")]
                                 account_balance
                                     .with_ironwood_balance_mut(update_balance_with_note)?;
+                                #[cfg(not(zcash_unstable = "nu7"))]
+                                account_balance.with_ironwood_balance_mut(
+                                    |b: &mut Balance| -> Result<(), Error> {
+                                        if self.note_is_pending(
+                                            note,
+                                            target_height,
+                                            confirmations_policy,
+                                        )? && note.is_change
+                                        {
+                                            b.add_pending_change_value(note.note.value())?;
+                                        } else {
+                                            b.add_pending_spendable_value(note.note.value())?;
+                                        }
+
+                                        Ok(())
+                                    },
+                                )?;
                             }
                             Note::Orchard(_) => {
                                 account_balance
@@ -321,6 +339,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .map(|s| s.root_addr().index())
             .unwrap_or(0);
 
+        #[cfg(feature = "orchard")]
+        let next_ironwood_subtree_index = self
+            .ironwood_tree
+            .store()
+            .last_shard()?
+            .map(|s| s.root_addr().index())
+            .unwrap_or(0);
+
         // Treat Sapling and Orchard outputs as having the same cost to scan.
         let sapling_scan_progress =
             self.sapling_scan_progress(&birthday_height, &fully_scanned_height, &chain_tip_height)?;
@@ -329,17 +355,31 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             self.orchard_scan_progress(&birthday_height, &fully_scanned_height, &chain_tip_height)?;
         #[cfg(not(feature = "orchard"))]
         let orchard_scan_progress: Option<Ratio<u64>> = None;
+        #[cfg(feature = "orchard")]
+        let ironwood_scan_progress = self.ironwood_scan_progress(
+            &birthday_height,
+            &fully_scanned_height,
+            &chain_tip_height,
+        )?;
+        #[cfg(not(feature = "orchard"))]
+        let ironwood_scan_progress: Option<Ratio<u64>> = None;
 
-        let scan_progress = sapling_scan_progress
-            .zip(orchard_scan_progress)
-            .map(|(s, o)| {
-                Ratio::new(
-                    s.numerator() + o.numerator(),
-                    s.denominator() + o.denominator(),
-                )
-            })
-            .or(sapling_scan_progress)
-            .or(orchard_scan_progress);
+        fn combine_progress(a: Option<Ratio<u64>>, b: Option<Ratio<u64>>) -> Option<Ratio<u64>> {
+            a.zip(b)
+                .map(|(a, b)| {
+                    Ratio::new(
+                        a.numerator() + b.numerator(),
+                        a.denominator() + b.denominator(),
+                    )
+                })
+                .or(a)
+                .or(b)
+        }
+
+        let scan_progress = combine_progress(
+            combine_progress(sapling_scan_progress, orchard_scan_progress),
+            ironwood_scan_progress,
+        );
 
         // TODO: This won't work
         let scan_progress = Progress::new(scan_progress.unwrap(), Some(Ratio::new(0, 0)));
@@ -352,6 +392,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             next_sapling_subtree_index,
             #[cfg(feature = "orchard")]
             next_orchard_subtree_index,
+            #[cfg(feature = "orchard")]
+            next_ironwood_subtree_index,
         );
         Ok(Some(summary))
     }
@@ -385,6 +427,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 sapling_commitment_tree_size,
                 #[cfg(feature = "orchard")]
                 orchard_commitment_tree_size,
+                #[cfg(feature = "orchard")]
+                ironwood_commitment_tree_size,
                 ..
             } = block;
             // TODO: Deal with legacy sapling trees
@@ -394,6 +438,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 *sapling_commitment_tree_size,
                 #[cfg(feature = "orchard")]
                 *orchard_commitment_tree_size,
+                #[cfg(feature = "orchard")]
+                *ironwood_commitment_tree_size,
             )
         }))
     }
@@ -474,20 +520,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         min_confirmations: NonZeroU32,
     ) -> Result<Option<(TargetHeight, BlockHeight)>, Self::Error> {
         if let Some(chain_tip_height) = self.chain_height()? {
-            let sapling_anchor_height =
-                self.get_sapling_max_checkpointed_height(chain_tip_height, min_confirmations)?;
-
-            #[cfg(feature = "orchard")]
-            let orchard_anchor_height =
-                self.get_orchard_max_checkpointed_height(chain_tip_height, min_confirmations)?;
-            #[cfg(not(feature = "orchard"))]
-            let orchard_anchor_height: Option<BlockHeight> = None;
-
-            let anchor_height = sapling_anchor_height
-                .zip(orchard_anchor_height)
-                .map(|(s, o)| std::cmp::min(s, o))
-                .or(sapling_anchor_height)
-                .or(orchard_anchor_height);
+            let anchor_height =
+                self.get_max_shared_checkpointed_height(chain_tip_height, min_confirmations)?;
 
             Ok(anchor_height.map(|h| (TargetHeight::from(chain_tip_height + 1), h)))
         } else {

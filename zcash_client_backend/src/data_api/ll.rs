@@ -20,14 +20,14 @@ use zcash_primitives::{
     transaction::{Transaction, TransactionData},
 };
 use zcash_protocol::{
-    PoolType, ShieldedProtocol, TxId,
+    PoolType, TxId,
     consensus::{BlockHeight, TxIndex},
     memo::MemoBytes,
     value::{BalanceError, Zatoshis},
 };
 use zip32::Scope;
 
-use super::{Account, TransactionStatus, wallet::TargetHeight};
+use super::{Account, NoteCommitmentTree, TransactionStatus, wallet::TargetHeight};
 use crate::{
     DecryptedOutput, TransferType,
     wallet::{Recipient, WalletSaplingOutput, WalletTx},
@@ -95,9 +95,19 @@ impl TxMeta for Transaction {
 
     #[cfg(feature = "orchard")]
     fn orchard_spent_note_nullifiers(&self) -> impl Iterator<Item = &::orchard::note::Nullifier> {
-        self.orchard_bundle()
+        let orchard_nfs = self
+            .orchard_bundle()
             .into_iter()
-            .flat_map(|bundle| bundle.actions().iter().map(|action| action.nullifier()))
+            .flat_map(|bundle| bundle.actions().iter().map(|action| action.nullifier()));
+
+        #[cfg(zcash_unstable = "nu7")]
+        let orchard_nfs = orchard_nfs.chain(
+            self.ironwood_bundle()
+                .into_iter()
+                .flat_map(|bundle| bundle.actions().iter().map(|action| action.nullifier())),
+        );
+
+        orchard_nfs
     }
 
     fn fee_paid<E, F>(&self, get_prevout: F) -> Result<Option<Zatoshis>, E>
@@ -302,6 +312,8 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         sapling_output_count: u32,
         #[cfg(feature = "orchard")] orchard_commitment_tree_size: u32,
         #[cfg(feature = "orchard")] orchard_action_count: u32,
+        #[cfg(feature = "orchard")] ironwood_commitment_tree_size: u32,
+        #[cfg(feature = "orchard")] ironwood_action_count: u32,
     ) -> Result<(), Self::Error>;
 
     /// Add metadata about a transaction to the wallet data store.
@@ -580,7 +592,7 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
     fn notify_scan_complete(
         &mut self,
         range: Range<BlockHeight>,
-        wallet_note_positions: &[(ShieldedProtocol, Position)],
+        wallet_note_positions: &[(NoteCommitmentTree, Position)],
     ) -> Result<(), Self::Error>;
 
     #[cfg(feature = "transparent-inputs")]
@@ -800,5 +812,44 @@ impl<AccountId: Copy> ReceivedShieldedOutput for DecryptedOutput<::orchard::Note
         } else {
             Some(Scope::External)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn transaction_metadata_orchard_nullifiers_include_ironwood() {
+        use proptest::{
+            strategy::{Strategy, ValueTree},
+            test_runner::TestRunner,
+        };
+        use zcash_primitives::transaction::{
+            TransactionData, components::orchard::testing::arb_bundle,
+        };
+        use zcash_protocol::consensus::BranchId;
+
+        use super::TxMeta;
+
+        let mut runner = TestRunner::default();
+        let ironwood_bundle = arb_bundle(1).new_tree(&mut runner).unwrap().current();
+        let expected_nf = *ironwood_bundle.actions()[0].nullifier();
+        let tx = TransactionData::from_parts_v6(
+            BranchId::Nu7,
+            0,
+            1u32.into(),
+            None,
+            None,
+            None,
+            Some(ironwood_bundle),
+        )
+        .freeze()
+        .unwrap();
+
+        let nfs = tx
+            .orchard_spent_note_nullifiers()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(nfs, vec![expected_nf]);
     }
 }

@@ -190,6 +190,29 @@ impl<P: Parameters> MemoryWalletDb<P> {
                 .collect::<Result<_>>()?;
         };
 
+        #[cfg(feature = "orchard")]
+        {
+            if let Some(ironwood_tree) = proto_wallet.ironwood_tree {
+                wallet.ironwood_tree = tree_from_protobuf(ironwood_tree, 100, 16.into())?;
+            }
+        };
+
+        #[cfg(feature = "orchard")]
+        {
+            wallet.ironwood_tree_shard_end_heights = proto_wallet
+                .ironwood_tree_shard_end_heights
+                .into_iter()
+                .map(|proto_end_height| {
+                    let address = Address::from_parts(
+                        Level::from(u8::try_from(proto_end_height.level)?),
+                        proto_end_height.index,
+                    );
+                    let height = proto_end_height.block_height.into();
+                    Ok((address, height))
+                })
+                .collect::<Result<_>>()?;
+        };
+
         wallet.transparent_received_outputs = TransparentReceivedOutputs(
             proto_wallet
                 .transparent_received_outputs
@@ -383,6 +406,25 @@ impl<P: Parameters> From<&MemoryWalletDb<P>> for proto::MemoryWallet {
                 .collect(),
             #[cfg(not(feature = "orchard"))]
             orchard_tree_shard_end_heights: Vec::new(),
+
+            #[cfg(feature = "orchard")]
+            ironwood_tree: tree_to_protobuf(&wallet.ironwood_tree).unwrap(),
+            #[cfg(not(feature = "orchard"))]
+            ironwood_tree: None,
+
+            #[cfg(feature = "orchard")]
+            ironwood_tree_shard_end_heights: wallet
+                .ironwood_tree_shard_end_heights
+                .clone()
+                .into_iter()
+                .map(|(address, height)| proto::TreeEndHeightsRecord {
+                    level: address.level().into(),
+                    index: address.index(),
+                    block_height: height.into(),
+                })
+                .collect(),
+            #[cfg(not(feature = "orchard"))]
+            ironwood_tree_shard_end_heights: Vec::new(),
 
             transparent_received_outputs: wallet
                 .transparent_received_outputs

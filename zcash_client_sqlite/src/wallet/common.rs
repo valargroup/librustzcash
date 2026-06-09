@@ -28,6 +28,8 @@ use crate::{
     },
 };
 
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+use crate::IRONWOOD_TABLES_PREFIX;
 #[cfg(feature = "orchard")]
 use {crate::ORCHARD_TABLES_PREFIX, zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT};
 
@@ -134,26 +136,71 @@ pub(crate) fn spent_notes_clause(table_prefix: &str) -> String {
     )
 }
 
-fn unscanned_tip_exists(
-    conn: &Connection,
-    anchor_height: BlockHeight,
-    table_prefix: &'static str,
-) -> Result<bool, rusqlite::Error> {
-    // v_sapling_shard_unscanned_ranges only returns ranges ending on or after wallet birthday, so
-    // we don't need to refer to the birthday in this query.
-    conn.query_row(
-        &format!(
-            "SELECT EXISTS (
+fn scan_state_sql(table_prefix: &'static str) -> (String, String) {
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    if table_prefix == ORCHARD_TABLES_PREFIX {
+        return (
+            format!(
+                "LEFT OUTER JOIN v_{ORCHARD_TABLES_PREFIX}_shards_scan_state orchard_scan_state
+                    ON rn.commitment_tree_position >= orchard_scan_state.start_position
+                    AND rn.commitment_tree_position < orchard_scan_state.end_position_exclusive
+                 LEFT OUTER JOIN v_{IRONWOOD_TABLES_PREFIX}_shards_scan_state ironwood_scan_state
+                    ON rn.commitment_tree_position >= ironwood_scan_state.start_position
+                    AND rn.commitment_tree_position < ironwood_scan_state.end_position_exclusive"
+            ),
+            "CASE WHEN rn.note_version = 3
+                  THEN ironwood_scan_state.max_priority
+                  ELSE orchard_scan_state.max_priority
+             END"
+            .to_string(),
+        );
+    }
+
+    (
+        format!(
+            "LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
+                ON rn.commitment_tree_position >= scan_state.start_position
+                AND rn.commitment_tree_position < scan_state.end_position_exclusive"
+        ),
+        "scan_state.max_priority".to_string(),
+    )
+}
+
+fn tip_scanned_sql(table_prefix: &'static str) -> String {
+    let tree_tip_scanned_sql = |table_prefix: &'static str| {
+        format!(
+            "NOT EXISTS (
                  SELECT 1 FROM v_{table_prefix}_shard_unscanned_ranges range
                  WHERE range.block_range_start <= :anchor_height
                  AND :anchor_height BETWEEN
                     range.subtree_start_height
                     AND IFNULL(range.subtree_end_height, :anchor_height)
              )"
-        ),
-        named_params![":anchor_height": u32::from(anchor_height),],
-        |row| row.get::<_, bool>(0),
-    )
+        )
+    };
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    if table_prefix == ORCHARD_TABLES_PREFIX {
+        return format!(
+            "CASE WHEN rn.note_version = 3
+                  THEN ({})
+                  ELSE ({})
+             END",
+            tree_tip_scanned_sql(IRONWOOD_TABLES_PREFIX),
+            tree_tip_scanned_sql(ORCHARD_TABLES_PREFIX),
+        );
+    }
+
+    tree_tip_scanned_sql(table_prefix)
+}
+
+fn witness_repair_note_version_clause(protocol: ShieldedProtocol) -> &'static str {
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    if protocol == ShieldedProtocol::Orchard {
+        return "AND rn.note_version = 2";
+    }
+
+    spendable_note_version_clause(protocol)
 }
 
 /// Retrieves the set of nullifiers for "potentially spendable" notes that the wallet is tracking.
@@ -396,6 +443,7 @@ where
             spendable_note_version_clause(protocol)
         }
     };
+    let (scan_state_joins, max_priority_expr) = scan_state_sql(table_prefix);
 
     // Select all unspent notes belonging to the given account, ignoring dust notes.
     let mut stmt_select_notes = conn.prepare_cached(&format!(
@@ -404,7 +452,7 @@ where
              rn.diversifier, rn.value, {note_reconstruction_cols}, rn.commitment_tree_position,
              accounts.ufvk as ufvk, rn.recipient_key_scope,
              t.block AS mined_height,
-             scan_state.max_priority,
+             {max_priority_expr} AS max_priority,
              rn.witness_stabilized,
              IFNULL(t.trust_status, 0) AS trust_status,
              MAX(tt.mined_height) AS max_shielding_input_height,
@@ -412,9 +460,7 @@ where
          FROM {table_prefix}_received_notes rn
          INNER JOIN accounts ON accounts.id = rn.account_id
          INNER JOIN transactions t ON t.id_tx = rn.transaction_id
-         LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
-            ON rn.commitment_tree_position >= scan_state.start_position
-            AND rn.commitment_tree_position < scan_state.end_position_exclusive
+         {scan_state_joins}
          LEFT OUTER JOIN transparent_received_output_spends ros
             ON ros.transaction_id = t.id_tx
          LEFT OUTER JOIN transparent_received_outputs tro
@@ -559,7 +605,8 @@ where
 
     // When an anchor exists within an unscanned range, nodes without stabilized witness data will
     // not be reliably constructable. The selection query will use this to filter out such notes.
-    let tip_unscanned = unscanned_tip_exists(conn, anchor_height, table_prefix)?;
+    let tip_scanned_expr = tip_scanned_sql(table_prefix);
+    let (scan_state_joins, max_priority_expr) = scan_state_sql(table_prefix);
 
     // The goal of this SQL statement is to select the oldest notes until the required
     // value has been reached.
@@ -591,9 +638,7 @@ where
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
-             LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
-                ON rn.commitment_tree_position >= scan_state.start_position
-                AND rn.commitment_tree_position < scan_state.end_position_exclusive
+             {scan_state_joins}
              LEFT OUTER JOIN transparent_received_output_spends ros
                 ON ros.transaction_id = t.id_tx
              LEFT OUTER JOIN transparent_received_outputs tro
@@ -615,8 +660,8 @@ where
              AND (
                  rn.witness_stabilized = 1
                  OR (
-                     :tip_unscanned = 0 -- the tip shard has no unscanned ranges
-                     AND scan_state.max_priority <= :scanned_priority -- the note shard is fully scanned or ignored
+                     {tip_scanned_expr} -- the tip shard has no unscanned ranges
+                     AND {max_priority_expr} <= :scanned_priority -- the note shard is fully scanned or ignored
                  )
              )
              AND rn.id NOT IN rarray(:exclude)
@@ -659,7 +704,6 @@ where
             ":target_value": &u64::from(target_value),
             ":exclude": &excluded_ptr,
             ":scanned_priority": priority_code(&ScanPriority::Scanned),
-            ":tip_unscanned": i64::from(tip_unscanned),
             ":min_value": u64::from(zip317::MARGINAL_FEE)
         ],
         |row| {
@@ -760,8 +804,31 @@ pub(crate) fn select_unspent_note_meta(
         output_index_col,
         ..
     } = table_constants::<SqliteClientError>(protocol)?;
-    let note_version_clause = spendable_note_version_clause(protocol);
+    let note_version_clause = witness_repair_note_version_clause(protocol);
 
+    select_unspent_note_meta_for_tree(
+        conn,
+        protocol,
+        table_prefix,
+        table_prefix,
+        output_index_col,
+        note_version_clause,
+        wallet_birthday,
+        anchor_height,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_unspent_note_meta_for_tree(
+    conn: &rusqlite::Connection,
+    protocol: ShieldedProtocol,
+    table_prefix: &'static str,
+    tree_prefix: &'static str,
+    output_index_col: &'static str,
+    note_version_clause: &'static str,
+    wallet_birthday: BlockHeight,
+    anchor_height: BlockHeight,
+) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
     // This query is effectively the same as the internal `eligible` subquery
     // used in `select_spendable_notes`.
     //
@@ -778,7 +845,7 @@ pub(crate) fn select_unspent_note_meta(
          {note_version_clause}
          AND rn.id NOT IN ({})
          AND NOT EXISTS (
-            SELECT 1 FROM v_{table_prefix}_shard_unscanned_ranges unscanned
+            SELECT 1 FROM v_{tree_prefix}_shard_unscanned_ranges unscanned
             -- select all the unscanned ranges involving the shard containing this note
             WHERE rn.commitment_tree_position >= unscanned.start_position
             AND rn.commitment_tree_position < unscanned.end_position_exclusive

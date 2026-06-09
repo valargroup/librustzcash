@@ -379,7 +379,7 @@ impl service::TreeState {
         }
     }
 
-    /// Deserializes and returns the Sapling note commitment tree field of the tree state.
+    /// Deserializes and returns the Orchard note commitment tree field of the tree state.
     #[cfg(feature = "orchard")]
     pub fn orchard_tree(
         &self,
@@ -399,6 +399,29 @@ impl service::TreeState {
                 _,
                 { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
             >(&orchard_tree_bytes[..])
+        }
+    }
+
+    /// Deserializes and returns the Ironwood note commitment tree field of the tree state.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood_tree(
+        &self,
+    ) -> io::Result<CommitmentTree<MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>>
+    {
+        if self.ironwood_tree.is_empty() {
+            Ok(CommitmentTree::empty())
+        } else {
+            let ironwood_tree_bytes = hex::decode(&self.ironwood_tree).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Hex decoding of Ironwood tree bytes failed: {e:?}"),
+                )
+            })?;
+            read_commitment_tree::<
+                MerkleHashOrchard,
+                _,
+                { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+            >(&ironwood_tree_bytes[..])
         }
     }
 
@@ -425,6 +448,8 @@ impl service::TreeState {
             self.sapling_tree()?.to_frontier(),
             #[cfg(feature = "orchard")]
             self.orchard_tree()?.to_frontier(),
+            #[cfg(feature = "orchard")]
+            self.ironwood_tree()?.to_frontier(),
         ))
     }
 }

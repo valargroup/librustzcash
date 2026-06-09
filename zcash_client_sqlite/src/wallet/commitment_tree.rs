@@ -6,7 +6,6 @@ use std::{
     error, fmt,
     io::{self, Cursor},
     marker::PhantomData,
-    num::NonZeroU32,
     ops::Range,
     sync::Arc,
 };
@@ -19,7 +18,7 @@ use shardtree::{
 };
 
 use zcash_client_backend::{
-    data_api::{chain::CommitmentTreeRoot, wallet::TargetHeight},
+    data_api::chain::CommitmentTreeRoot,
     serialization::shardtree::{read_shard, write_shard},
 };
 use zcash_primitives::merkle_tree::HashSer;
@@ -36,8 +35,6 @@ use zcash_client_backend::data_api::ORCHARD_SHARD_HEIGHT;
 
 #[cfg(feature = "orchard")]
 use crate::{ORCHARD_TABLES_PREFIX, orchard_tree};
-
-use super::common::{TableConstants, table_constants};
 
 /// Errors that can appear in SQLite-back [`ShardStore`] implementation operations.
 #[derive(Debug)]
@@ -804,32 +801,6 @@ pub(crate) fn get_checkpoint(
         .transpose()
 }
 
-pub(crate) fn get_max_checkpointed_height(
-    conn: &rusqlite::Connection,
-    protocol: ShieldedProtocol,
-    target_height: TargetHeight,
-    min_confirmations: NonZeroU32,
-) -> Result<Option<BlockHeight>, SqliteClientError> {
-    let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-    let max_checkpoint_height = target_height - u32::from(min_confirmations);
-
-    // We exclude from consideration all checkpoints having heights greater than the maximum
-    // checkpoint height. The checkpoint depth is the number of excluded checkpoints + 1.
-    conn.query_row(
-        &format!(
-            "SELECT checkpoint_id
-             FROM {table_prefix}_tree_checkpoints
-             WHERE checkpoint_id <= :max_checkpoint_height
-             ORDER BY checkpoint_id DESC
-             LIMIT 1",
-        ),
-        named_params![":max_checkpoint_height": u32::from(max_checkpoint_height)],
-        |row| row.get::<_, u32>(0).map(BlockHeight::from),
-    )
-    .optional()
-    .map_err(SqliteClientError::from)
-}
-
 pub(crate) fn get_checkpoint_at_depth(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,
@@ -1139,6 +1110,9 @@ pub(crate) fn check_witnesses(
             Err(ShardTreeError::Query(QueryError::TreeIncomplete(mut addrs))) => {
                 sapling_incomplete.append(&mut addrs);
             }
+            Err(ShardTreeError::Query(QueryError::NotContained(addr))) => {
+                sapling_incomplete.push(addr);
+            }
             Err(other) => {
                 return Err(SqliteClientError::CommitmentTree(other));
             }
@@ -1162,6 +1136,9 @@ pub(crate) fn check_witnesses(
                 Err(ShardTreeError::Query(QueryError::TreeIncomplete(mut addrs))) => {
                     orchard_incomplete.append(&mut addrs);
                 }
+                Err(ShardTreeError::Query(QueryError::NotContained(addr))) => {
+                    orchard_incomplete.push(addr);
+                }
                 Err(other) => {
                     return Err(SqliteClientError::CommitmentTree(other));
                 }
@@ -1170,6 +1147,36 @@ pub(crate) fn check_witnesses(
 
         for addr in orchard_incomplete {
             let range = super::get_block_range(conn, ShieldedProtocol::Orchard, addr)?;
+            scan_ranges.extend(range);
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    {
+        let unspent_ironwood_note_meta = super::orchard::select_unspent_ironwood_note_meta(
+            conn,
+            wallet_birthday,
+            anchor_height,
+        )?;
+        let mut ironwood_incomplete = vec![];
+        let ironwood_tree = crate::ironwood_tree(conn)?;
+        for m in unspent_ironwood_note_meta.iter() {
+            match ironwood_tree.witness_at_checkpoint_depth(m.commitment_tree_position(), 0) {
+                Ok(_) => {}
+                Err(ShardTreeError::Query(QueryError::TreeIncomplete(mut addrs))) => {
+                    ironwood_incomplete.append(&mut addrs);
+                }
+                Err(ShardTreeError::Query(QueryError::NotContained(addr))) => {
+                    ironwood_incomplete.push(addr);
+                }
+                Err(other) => {
+                    return Err(SqliteClientError::CommitmentTree(other));
+                }
+            }
+        }
+
+        for addr in ironwood_incomplete {
+            let range = super::get_block_range_for_tree(conn, crate::IRONWOOD_TABLES_PREFIX, addr)?;
             scan_ranges.extend(range);
         }
     }

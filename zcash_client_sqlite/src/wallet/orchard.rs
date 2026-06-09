@@ -309,6 +309,24 @@ pub(crate) fn select_unspent_note_meta(
     )
 }
 
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) fn select_unspent_ironwood_note_meta(
+    conn: &Connection,
+    wallet_birthday: BlockHeight,
+    anchor_height: BlockHeight,
+) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
+    super::common::select_unspent_note_meta_for_tree(
+        conn,
+        ShieldedProtocol::Orchard,
+        crate::ORCHARD_TABLES_PREFIX,
+        crate::IRONWOOD_TABLES_PREFIX,
+        "action_index",
+        "AND rn.note_version = 3",
+        wallet_birthday,
+        anchor_height,
+    )
+}
+
 /// Records the specified shielded output as having been received.
 ///
 /// This implementation relies on the facts that:
@@ -342,7 +360,7 @@ pub(crate) fn put_received_note<
             :is_change, :commitment_tree_position,
             :recipient_key_scope
         )
-        ON CONFLICT (transaction_id, action_index) DO UPDATE
+        ON CONFLICT (transaction_id, action_index, note_version) DO UPDATE
         SET account_id = :account_id,
             address_id = :address_id,
             diversifier = :diversifier,
@@ -537,6 +555,35 @@ pub(crate) mod tests {
     use super::{decode_note_version, encode_note_version};
     use crate::testing::{self, BlockCache, db::TestDbFactory};
 
+    #[cfg(zcash_unstable = "nu7")]
+    fn network_with_nu7() -> zcash_protocol::local_consensus::LocalNetwork {
+        zcash_protocol::local_consensus::LocalNetwork {
+            nu7: Some(BlockHeight::from_u32(100_000)),
+            ..TestBuilder::DEFAULT_NETWORK
+        }
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    fn mirror_orchard_tree_state_to_ironwood(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "UPDATE blocks
+             SET ironwood_commitment_tree_size = orchard_commitment_tree_size,
+                 ironwood_action_count = orchard_action_count;
+
+             DELETE FROM ironwood_tree_checkpoint_marks_removed;
+             DELETE FROM ironwood_tree_checkpoints;
+             DELETE FROM ironwood_tree_cap;
+             DELETE FROM ironwood_tree_shards;
+
+             INSERT INTO ironwood_tree_shards SELECT * FROM orchard_tree_shards;
+             INSERT INTO ironwood_tree_cap SELECT * FROM orchard_tree_cap;
+             INSERT INTO ironwood_tree_checkpoints SELECT * FROM orchard_tree_checkpoints;
+             INSERT INTO ironwood_tree_checkpoint_marks_removed
+             SELECT * FROM orchard_tree_checkpoint_marks_removed;",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn orchard_note_version_storage_codes_roundtrip() {
         assert_eq!(encode_note_version(NoteVersion::V2), 2);
@@ -580,7 +627,10 @@ pub(crate) mod tests {
 
     #[test]
     fn spendable_selection_includes_v3_notes() {
-        let mut st = TestBuilder::new()
+        let builder = TestBuilder::new();
+        #[cfg(zcash_unstable = "nu7")]
+        let builder = builder.with_network(network_with_nu7());
+        let mut st = builder
             .with_data_store_factory(TestDbFactory::default())
             .with_block_cache(BlockCache::new())
             .with_account_from_sapling_activation(BlockHash([0; 32]))
@@ -609,6 +659,8 @@ pub(crate) mod tests {
             .conn()
             .execute("UPDATE orchard_received_notes SET note_version = 3", [])
             .unwrap();
+        #[cfg(zcash_unstable = "nu7")]
+        mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
 
         let spendable = OrchardPoolTester::select_spendable_notes(
             &st,
@@ -634,7 +686,10 @@ pub(crate) mod tests {
 
     #[test]
     fn wallet_summary_counts_v3_notes_as_ironwood() {
-        let mut st = TestBuilder::new()
+        let builder = TestBuilder::new();
+        #[cfg(zcash_unstable = "nu7")]
+        let builder = builder.with_network(network_with_nu7());
+        let mut st = builder
             .with_data_store_factory(TestDbFactory::default())
             .with_block_cache(BlockCache::new())
             .with_account_from_sapling_activation(BlockHash([0; 32]))
@@ -656,25 +711,59 @@ pub(crate) mod tests {
             .conn()
             .execute("UPDATE orchard_received_notes SET note_version = 3", [])
             .unwrap();
+        #[cfg(zcash_unstable = "nu7")]
+        mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
 
         let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
         let balance = summary.account_balances().get(&account.id()).unwrap();
         assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
         assert_eq!(balance.ironwood_balance().total(), value);
         if cfg!(zcash_unstable = "nu7") {
+            assert_eq!(balance.ironwood_balance().spendable_value(), value);
             assert_eq!(balance.spendable_value(), value);
         } else {
+            assert_eq!(balance.ironwood_balance().spendable_value(), Zatoshis::ZERO);
+            assert_eq!(
+                balance.ironwood_balance().value_pending_spendability(),
+                value
+            );
             assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
         }
     }
 
     #[test]
     #[cfg(zcash_unstable = "nu7")]
+    fn check_witnesses_repairs_v3_notes_against_ironwood_tree() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "UPDATE orchard_received_notes SET note_version = 3;
+                 UPDATE blocks
+                 SET ironwood_commitment_tree_size = orchard_commitment_tree_size,
+                     ironwood_action_count = orchard_action_count;
+                 DELETE FROM ironwood_tree_shards;",
+            )
+            .unwrap();
+
+        let ranges = st.wallet_mut().db_mut().check_witnesses().unwrap();
+        assert_eq!(ranges, vec![height..(height + 1)]);
+    }
+
+    #[test]
+    #[cfg(zcash_unstable = "nu7")]
     fn create_proposed_transfer_spends_v3_notes_as_ironwood() {
-        let network = zcash_protocol::local_consensus::LocalNetwork {
-            nu7: Some(BlockHeight::from_u32(100_000)),
-            ..TestBuilder::DEFAULT_NETWORK
-        };
+        let network = network_with_nu7();
         let mut st = TestBuilder::new()
             .with_network(network)
             .with_data_store_factory(TestDbFactory::default())

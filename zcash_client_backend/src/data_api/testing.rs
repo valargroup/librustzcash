@@ -267,6 +267,8 @@ pub struct CachedBlock {
     chain_state: ChainState,
     sapling_end_size: u32,
     orchard_end_size: u32,
+    #[cfg(feature = "orchard")]
+    ironwood_end_size: u32,
 }
 
 impl CachedBlock {
@@ -280,6 +282,8 @@ impl CachedBlock {
             chain_state: ChainState::empty(block_height, BlockHash([0; 32])),
             sapling_end_size: 0,
             orchard_end_size: 0,
+            #[cfg(feature = "orchard")]
+            ironwood_end_size: 0,
         }
     }
 
@@ -294,11 +298,15 @@ impl CachedBlock {
             chain_state.final_orchard_tree().tree_size() as u32,
             orchard_end_size
         );
+        #[cfg(feature = "orchard")]
+        let ironwood_end_size = chain_state.final_ironwood_tree().tree_size() as u32;
 
         Self {
             chain_state,
             sapling_end_size,
             orchard_end_size,
+            #[cfg(feature = "orchard")]
+            ironwood_end_size,
         }
     }
 
@@ -324,6 +332,20 @@ impl CachedBlock {
         );
         #[cfg(feature = "orchard")]
         let orchard_end_size = orchard_final_tree.tree_size() as u32;
+        #[cfg(feature = "orchard")]
+        let ironwood_final_tree = cb
+            .vtx
+            .iter()
+            .flat_map(|tx| tx.ironwood_actions.iter())
+            .fold(
+                self.chain_state.final_ironwood_tree().clone(),
+                |mut acc, c_act| {
+                    acc.append(MerkleHashOrchard::from_cmx(&c_act.cmx().unwrap()));
+                    acc
+                },
+            );
+        #[cfg(feature = "orchard")]
+        let ironwood_end_size = ironwood_final_tree.tree_size() as u32;
         #[cfg(not(feature = "orchard"))]
         let orchard_end_size = cb.vtx.iter().fold(self.orchard_end_size, |sz, tx| {
             sz + (tx.actions.len() as u32)
@@ -336,9 +358,13 @@ impl CachedBlock {
                 sapling_final_tree,
                 #[cfg(feature = "orchard")]
                 orchard_final_tree,
+                #[cfg(feature = "orchard")]
+                ironwood_final_tree,
             ),
             sapling_end_size,
             orchard_end_size,
+            #[cfg(feature = "orchard")]
+            ironwood_end_size,
         }
     }
 
@@ -621,6 +647,16 @@ where
         cb.chain_metadata = Some(compact_formats::ChainMetadata {
             sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
             orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
+            ironwood_commitment_tree_size: {
+                #[cfg(feature = "orchard")]
+                {
+                    prior_cached_block.ironwood_end_size
+                }
+                #[cfg(not(feature = "orchard"))]
+                {
+                    0
+                }
+            },
         });
 
         let res = self.cache_block(&prior_cached_block, cb);
@@ -688,6 +724,8 @@ where
                     final_sapling_tree,
                     #[cfg(feature = "orchard")]
                     final_orchard_tree,
+                    #[cfg(feature = "orchard")]
+                    prior_cached_block.chain_state.final_ironwood_tree().clone(),
                 ),
                 initial_sapling_tree_size,
                 initial_orchard_tree_size,
@@ -705,6 +743,8 @@ where
             outputs,
             initial_sapling_tree_size,
             initial_orchard_tree_size,
+            #[cfg(feature = "orchard")]
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -740,6 +780,8 @@ where
             value,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            #[cfg(feature = "orchard")]
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -794,6 +836,8 @@ where
             tx,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            #[cfg(feature = "orchard")]
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -1801,6 +1845,17 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
                         )
                     })
                     .unwrap();
+                wallet_data
+                    .with_ironwood_tree_mut(|t| {
+                        t.insert_frontier(
+                            initial_state.chain_state.final_ironwood_tree().clone(),
+                            Retention::Checkpoint {
+                                id: initial_state.chain_state.block_height(),
+                                marking: Marking::Reference,
+                            },
+                        )
+                    })
+                    .unwrap();
             }
 
             let final_sapling_tree_size =
@@ -1809,6 +1864,9 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
             #[cfg(feature = "orchard")]
             let _final_orchard_tree_size =
                 initial_state.chain_state.final_orchard_tree().tree_size() as u32;
+            #[cfg(feature = "orchard")]
+            let _final_ironwood_tree_size =
+                initial_state.chain_state.final_ironwood_tree().tree_size() as u32;
 
             cached_blocks.insert(
                 initial_state.chain_state.block_height(),
@@ -1816,6 +1874,8 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
                     chain_state: initial_state.chain_state.clone(),
                     sapling_end_size: final_sapling_tree_size,
                     orchard_end_size: _final_orchard_tree_size,
+                    #[cfg(feature = "orchard")]
+                    ironwood_end_size: _final_ironwood_tree_size,
                 },
             );
         };
@@ -2336,6 +2396,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     outputs: &[FakeCompactOutput<Fvk>],
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     mut rng: impl RngCore + CryptoRng,
 ) -> (CompactBlock, Vec<Fvk::Nullifier>) {
     // Create a fake CompactBlock containing the note
@@ -2361,6 +2422,8 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        #[cfg(feature = "orchard")]
+        initial_ironwood_tree_size,
         rng,
     );
     (cb, nfs)
@@ -2375,6 +2438,7 @@ fn fake_compact_block_from_tx(
     tx: &Transaction,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     rng: impl RngCore,
 ) -> CompactBlock {
     // Create a fake CompactTx containing the transaction.
@@ -2403,7 +2467,7 @@ fn fake_compact_block_from_tx(
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     if let Some(bundle) = tx.ironwood_bundle() {
         for action in bundle.actions() {
-            ctx.actions.push(action.into());
+            ctx.ironwood_actions.push(action.into());
         }
     }
 
@@ -2413,6 +2477,8 @@ fn fake_compact_block_from_tx(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        #[cfg(feature = "orchard")]
+        initial_ironwood_tree_size,
         rng,
     )
 }
@@ -2430,6 +2496,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     value: Zatoshis,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     mut rng: impl RngCore + CryptoRng,
 ) -> CompactBlock {
     let mut ctx = fake_compact_tx(&mut rng);
@@ -2518,6 +2585,8 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        #[cfg(feature = "orchard")]
+        initial_ironwood_tree_size,
         rng,
     )
 }
@@ -2528,6 +2597,7 @@ fn fake_compact_block_from_compact_tx(
     prev_hash: BlockHash,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     mut rng: impl RngCore,
 ) -> CompactBlock {
     let mut cb = CompactBlock {
@@ -2546,6 +2616,20 @@ fn fake_compact_block_from_compact_tx(
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
         orchard_commitment_tree_size: initial_orchard_tree_size
             + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
+        ironwood_commitment_tree_size: {
+            #[cfg(feature = "orchard")]
+            {
+                initial_ironwood_tree_size
+                    + cb.vtx
+                        .iter()
+                        .map(|tx| tx.ironwood_actions.len() as u32)
+                        .sum::<u32>()
+            }
+            #[cfg(not(feature = "orchard"))]
+            {
+                0
+            }
+        },
     });
     cb
 }
@@ -2580,6 +2664,8 @@ pub struct NoteCommitments {
     sapling: Vec<::sapling::Node>,
     #[cfg(feature = "orchard")]
     orchard: Vec<MerkleHashOrchard>,
+    #[cfg(feature = "orchard")]
+    ironwood: Vec<MerkleHashOrchard>,
 }
 
 impl NoteCommitments {
@@ -2605,6 +2691,16 @@ impl NoteCommitments {
                         .map(|act| MerkleHashOrchard::from_cmx(&act.cmx().unwrap()))
                 })
                 .collect(),
+            #[cfg(feature = "orchard")]
+            ironwood: cb
+                .vtx
+                .iter()
+                .flat_map(|tx| {
+                    tx.ironwood_actions
+                        .iter()
+                        .map(|act| MerkleHashOrchard::from_cmx(&act.cmx().unwrap()))
+                })
+                .collect(),
         }
     }
 
@@ -2618,6 +2714,12 @@ impl NoteCommitments {
     #[cfg(feature = "orchard")]
     pub fn orchard(&self) -> &[MerkleHashOrchard] {
         self.orchard.as_ref()
+    }
+
+    /// Returns the Ironwood note commitments.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(&self) -> &[MerkleHashOrchard] {
+        self.ironwood.as_ref()
     }
 }
 
@@ -2635,6 +2737,12 @@ pub struct MockWalletDb {
         { ORCHARD_SHARD_HEIGHT * 2 },
         ORCHARD_SHARD_HEIGHT,
     >,
+    #[cfg(feature = "orchard")]
+    pub ironwood_tree: ShardTree<
+        MemoryShardStore<::orchard::tree::MerkleHashOrchard, BlockHeight>,
+        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_SHARD_HEIGHT,
+    >,
     account_ids: Vec<u32>,
     addresses_by_account: HashMap<u32, Vec<AddressInfo>>,
     ufvks_by_account: HashMap<u32, UnifiedFullViewingKey>,
@@ -2648,6 +2756,8 @@ impl MockWalletDb {
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), 100),
             #[cfg(feature = "orchard")]
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), 100),
+            #[cfg(feature = "orchard")]
+            ironwood_tree: ShardTree::new(MemoryShardStore::empty(), 100),
             account_ids: vec![],
             addresses_by_account: HashMap::new(),
             ufvks_by_account: HashMap::new(),
@@ -3161,6 +3271,44 @@ impl WalletCommitmentTrees for MockWalletDb {
         roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>> {
         self.with_orchard_tree_mut(|t| {
+            for (root, i) in roots.iter().zip(0u64..) {
+                let root_addr = incrementalmerkletree::Address::from_parts(
+                    ORCHARD_SHARD_HEIGHT.into(),
+                    start_index + i,
+                );
+                t.insert(root_addr, *root.root_hash())?;
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "orchard")]
+    type IronwoodShardStore<'a> = MemoryShardStore<::orchard::tree::MerkleHashOrchard, BlockHeight>;
+
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::IronwoodShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        callback(&mut self.ironwood_tree)
+    }
+
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_ironwood_tree_mut(|t| {
             for (root, i) in roots.iter().zip(0u64..) {
                 let root_addr = incrementalmerkletree::Address::from_parts(
                     ORCHARD_SHARD_HEIGHT.into(),

@@ -1231,16 +1231,25 @@ where
             fee_rule,
         )?;
         let txid = build_result.transaction().txid();
-        let output_index = build_result
+        let raw_ironwood_output_index = build_result
             .ironwood_meta()
             .output_action_index(0)
             .expect("migration transactions create one Ironwood output");
+        let output_index = build_result
+            .transaction()
+            .orchard_bundle()
+            .map_or(raw_ironwood_output_index, |bundle| {
+                bundle.actions().len() + raw_ironwood_output_index
+            });
         let ironwood_note = build_result
             .transaction()
             .ironwood_bundle()
             .and_then(|bundle| {
                 bundle
-                    .decrypt_output_with_key(output_index, &orchard_fvk.to_ivk(Scope::Internal))
+                    .decrypt_output_with_key(
+                        raw_ironwood_output_index,
+                        &orchard_fvk.to_ivk(Scope::Internal),
+                    )
                     .map(|(note, _, _)| Note::Orchard(note))
             })
             .expect("Wallet-internal Ironwood output must decrypt with the wallet's IVK");
@@ -1581,14 +1590,13 @@ where
     };
 
     #[cfg(feature = "orchard")]
-    let (orchard_anchor, orchard_inputs, ironwood_inputs) = if proposal_step
+    let (orchard_anchor, orchard_inputs) = if proposal_step
         .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
     {
         proposal_step.shielded_inputs().map_or_else(
             || {
                 Ok((
                     Some(orchard::Anchor::empty_tree()),
-                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
                     Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
                 ))
             },
@@ -1601,16 +1609,12 @@ where
 
                     let mut orchard_inputs =
                         Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
-                    #[cfg(zcash_unstable = "nu7")]
-                    let mut ironwood_inputs =
-                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
-                    #[cfg(not(zcash_unstable = "nu7"))]
-                    let ironwood_inputs = Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
 
                     for orchard_input in inputs.notes().iter().filter_map(|selected| match selected
                         .note()
                     {
                         #[cfg(feature = "orchard")]
+                        #[cfg(not(zcash_unstable = "nu7"))]
                         Note::Orchard(note) => orchard_tree
                             .witness_at_checkpoint_id_caching(
                                 selected.note_commitment_tree_position(),
@@ -1622,20 +1626,31 @@ where
                             .map(|merkle_path| Some((note, merkle_path.into())))
                             .map_err(Error::from)
                             .transpose(),
+                        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+                        Note::Orchard(note) if note.version() != orchard::note::NoteVersion::V3 => {
+                            orchard_tree
+                                .witness_at_checkpoint_id_caching(
+                                    selected.note_commitment_tree_position(),
+                                    &inputs.anchor_height(),
+                                )
+                                .and_then(|witness| {
+                                    witness
+                                        .ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                                })
+                                .map(|merkle_path| Some((note, merkle_path.into())))
+                                .map_err(Error::from)
+                                .transpose()
+                        }
+                        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+                        Note::Orchard(_) => None,
                         Note::Sapling(_) => None,
                     }) {
                         let (note, merkle_path) = orchard_input?;
 
-                        #[cfg(zcash_unstable = "nu7")]
-                        if note.version() == orchard::note::NoteVersion::V3 {
-                            ironwood_inputs.push((note, merkle_path));
-                            continue;
-                        }
-
                         orchard_inputs.push((note, merkle_path));
                     }
 
-                    Ok((Some(anchor), orchard_inputs, ironwood_inputs))
+                    Ok((Some(anchor), orchard_inputs))
                 })
             },
         )?
@@ -1643,20 +1658,69 @@ where
         (
             None,
             Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
-            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
         )
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_anchor = None;
 
-    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
-    let _ = &ironwood_inputs;
-
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-    let ironwood_anchor = if ironwood_inputs.is_empty() {
-        None
+    let (ironwood_anchor, ironwood_inputs) = if proposal_step
+        .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
+    {
+        proposal_step.shielded_inputs().map_or_else(
+            || {
+                Ok((
+                    Some(orchard::Anchor::empty_tree()),
+                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+                ))
+            },
+            |inputs| {
+                wallet_db.with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
+                    let anchor = ironwood_tree
+                        .root_at_checkpoint_id(&inputs.anchor_height())?
+                        .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
+                        .into();
+
+                    let mut ironwood_inputs =
+                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+
+                    for ironwood_input in
+                        inputs
+                            .notes()
+                            .iter()
+                            .filter_map(|selected| match selected.note() {
+                                Note::Orchard(note)
+                                    if note.version() == orchard::note::NoteVersion::V3 =>
+                                {
+                                    ironwood_tree
+                                        .witness_at_checkpoint_id_caching(
+                                            selected.note_commitment_tree_position(),
+                                            &inputs.anchor_height(),
+                                        )
+                                        .and_then(|witness| {
+                                            witness.ok_or(ShardTreeError::Query(
+                                                QueryError::CheckpointPruned,
+                                            ))
+                                        })
+                                        .map(|merkle_path| Some((note, merkle_path.into())))
+                                        .map_err(Error::from)
+                                        .transpose()
+                                }
+                                _ => None,
+                            })
+                    {
+                        ironwood_inputs.push(ironwood_input?);
+                    }
+
+                    Ok((Some(anchor), ironwood_inputs))
+                })
+            },
+        )?
     } else {
-        orchard_anchor.clone()
+        (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
     };
     #[cfg(all(not(feature = "orchard"), zcash_unstable = "nu7"))]
     let ironwood_anchor = None;

@@ -659,6 +659,10 @@ struct PositionTracker {
     orchard_tree_position: u32,
     #[cfg(feature = "orchard")]
     orchard_final_tree_size: u32,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    ironwood_tree_position: u32,
+    #[cfg(feature = "orchard")]
+    ironwood_final_tree_size: u32,
 }
 
 impl PositionTracker {
@@ -735,6 +739,7 @@ pub(crate) fn find_received<
     block_height: BlockHeight,
     last_commitments_in_block: bool,
     txid: TxId,
+    output_index: impl Fn(usize) -> usize,
     note_position: impl Fn(usize) -> Position,
     keys: &HashMap<IvkTag, SK>,
     spent_from_accounts: &HashSet<AccountId>,
@@ -824,7 +829,7 @@ pub(crate) fn find_received<
             let nf = key.nf(&note, note_commitment_tree_position);
 
             shielded_outputs.push(WalletOutput::from_parts(
-                output_idx,
+                output_index(output_idx),
                 output.ephemeral_key(),
                 note,
                 is_change,
@@ -982,6 +987,11 @@ pub mod testing {
                         + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
                     orchard_commitment_tree_size: initial_orchard_tree_size
                         + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
+                    ironwood_commitment_tree_size: cb
+                        .vtx
+                        .iter()
+                        .map(|tx| tx.ironwood_actions.len() as u32)
+                        .sum::<u32>(),
                 }
             });
 

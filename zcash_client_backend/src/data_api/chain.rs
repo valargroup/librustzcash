@@ -511,6 +511,9 @@ pub struct ChainState {
     #[cfg(feature = "orchard")]
     final_orchard_tree:
         Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>,
+    #[cfg(feature = "orchard")]
+    final_ironwood_tree:
+        Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>,
 }
 
 impl ChainState {
@@ -522,6 +525,8 @@ impl ChainState {
             final_sapling_tree: Frontier::empty(),
             #[cfg(feature = "orchard")]
             final_orchard_tree: Frontier::empty(),
+            #[cfg(feature = "orchard")]
+            final_ironwood_tree: Frontier::empty(),
         }
     }
 
@@ -534,6 +539,10 @@ impl ChainState {
             orchard::tree::MerkleHashOrchard,
             { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
         >,
+        #[cfg(feature = "orchard")] final_ironwood_tree: Frontier<
+            orchard::tree::MerkleHashOrchard,
+            { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+        >,
     ) -> Self {
         Self {
             block_height,
@@ -541,6 +550,8 @@ impl ChainState {
             final_sapling_tree,
             #[cfg(feature = "orchard")]
             final_orchard_tree,
+            #[cfg(feature = "orchard")]
+            final_ironwood_tree,
         }
     }
 
@@ -570,6 +581,16 @@ impl ChainState {
     ) -> &Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>
     {
         &self.final_orchard_tree
+    }
+
+    /// Returns the frontier of the Ironwood note commitment tree as of the end of the block at
+    /// [`Self::block_height`].
+    #[cfg(feature = "orchard")]
+    pub fn final_ironwood_tree(
+        &self,
+    ) -> &Frontier<orchard::tree::MerkleHashOrchard, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }>
+    {
+        &self.final_ironwood_tree
     }
 }
 

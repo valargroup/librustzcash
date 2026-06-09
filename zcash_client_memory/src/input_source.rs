@@ -288,6 +288,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 return Ok(Vec::new());
             }
         };
+        let Some(anchor_height) = self.get_max_shared_checkpointed_height(
+            target_height.saturating_sub(1),
+            confirmations_policy.trusted(),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
         // First grab all eligible (unspent, spendable, fully scanned) notes into a vec.
         let mut eligible_notes = self
             .received_notes
@@ -299,6 +307,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     note,
                     birthday_height,
                     target_height,
+                    anchor_height,
                     confirmations_policy,
                     exclude,
                 )
@@ -395,6 +404,14 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 return Ok(None);
             }
         };
+        let Some(anchor_height) = self.get_max_shared_checkpointed_height(
+            target_height.saturating_sub(1),
+            confirmations_policy.trusted(),
+        )?
+        else {
+            return Ok(Some(PoolMeta::new(0, Zatoshis::ZERO)));
+        };
+
         let (count, total) = self
             .received_notes
             .iter()
@@ -405,6 +422,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                     note,
                     birthday_height,
                     target_height,
+                    anchor_height,
                     confirmations_policy,
                     exclude,
                 )

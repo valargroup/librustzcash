@@ -1,7 +1,72 @@
 use crate::testing;
 
+use orchard::note::NoteVersion;
 use zcash_client_backend::data_api::testing::orchard::OrchardPoolTester;
 use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
+use zcash_client_backend::{
+    data_api::{
+        Account as _,
+        testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        wallet::ConfirmationsPolicy,
+    },
+    wallet::Note,
+};
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::value::Zatoshis;
+
+use crate::testing::{MemBlockCache, TestMemDbFactory};
+
+#[test]
+fn wallet_summary_counts_v3_notes_as_ironwood() {
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(TestMemDbFactory::new())
+        .with_block_cache(MemBlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = OrchardPoolTester::test_account_fvk(&st);
+    let value = Zatoshis::const_from_u64(50000);
+    let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks(height, 1);
+
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account.id()).unwrap();
+    assert_eq!(balance.orchard_balance().total(), value);
+    assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+    assert_eq!(balance.spendable_value(), value);
+
+    let received_note = st
+        .wallet_mut()
+        .received_notes
+        .0
+        .iter_mut()
+        .find(|note| matches!(note.note, Note::Orchard(_)))
+        .unwrap();
+    if let Note::Orchard(note) = received_note.note {
+        received_note.note = Note::Orchard(
+            orchard::Note::from_parts_with_version(
+                note.recipient(),
+                note.value(),
+                note.rho(),
+                *note.rseed(),
+                NoteVersion::V3,
+            )
+            .into_option()
+            .unwrap(),
+        );
+    }
+
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account.id()).unwrap();
+    assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
+    assert_eq!(balance.ironwood_balance().total(), value);
+    if cfg!(zcash_unstable = "nu7") {
+        assert_eq!(balance.spendable_value(), value);
+    } else {
+        assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
+    }
+}
 
 #[test]
 fn send_single_step_proposed_transfer() {

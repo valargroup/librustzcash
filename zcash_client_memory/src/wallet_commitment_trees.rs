@@ -98,6 +98,51 @@ impl<P: consensus::Parameters> WalletCommitmentTrees for MemoryWalletDb<P> {
 
         Ok(())
     }
+
+    #[cfg(feature = "orchard")]
+    type IronwoodShardStore<'a> = MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>;
+
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::IronwoodShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        tracing::debug!("with_ironwood_tree_mut");
+        callback(&mut self.ironwood_tree)
+    }
+
+    /// Adds a sequence of note commitment tree subtree roots to the data store.
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        tracing::debug!("put_ironwood_subtree_roots");
+        self.with_ironwood_tree_mut(|t| {
+            for (root, i) in roots.iter().zip(0u64..) {
+                let root_addr = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), start_index + i);
+                t.insert(root_addr, *root.root_hash())?;
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        // store the end block heights for each shard as well
+        for (root, i) in roots.iter().zip(0u64..) {
+            let root_addr = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), start_index + i);
+            self.ironwood_tree_shard_end_heights
+                .insert(root_addr, root.subtree_end_height());
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) mod serialization {
