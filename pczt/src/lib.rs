@@ -97,12 +97,15 @@ pub struct Pczt {
 }
 
 #[cfg(zcash_unstable = "nu7")]
+pub(crate) const EMPTY_IRONWOOD_ANCHOR: [u8; 32] = [0; 32];
+
+#[cfg(zcash_unstable = "nu7")]
 pub(crate) fn empty_ironwood_bundle() -> orchard::Bundle {
     orchard::Bundle {
         actions: vec![],
         flags: 0b0000_0011,
         value_sum: (0, true),
-        anchor: [0; 32],
+        anchor: EMPTY_IRONWOOD_ANCHOR,
         zkproof: None,
         bsk: None,
     }
@@ -214,7 +217,7 @@ mod v1 {
                     actions: vec![],
                     flags: 0,
                     value_sum: (0, false),
-                    anchor: ::orchard::Anchor::empty_tree().to_bytes(),
+                    anchor: crate::EMPTY_IRONWOOD_ANCHOR,
                     zkproof: None,
                     bsk: None,
                 },

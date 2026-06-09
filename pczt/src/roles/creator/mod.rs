@@ -61,7 +61,7 @@ impl Creator {
             sapling_anchor,
             orchard_anchor,
             #[cfg(zcash_unstable = "nu7")]
-            ironwood_anchor: orchard::Anchor::empty_tree().to_bytes(),
+            ironwood_anchor: crate::EMPTY_IRONWOOD_ANCHOR,
         }
     }
 
