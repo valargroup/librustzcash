@@ -1097,21 +1097,43 @@ where
     let mut fee_estimate = Zatoshis::ZERO;
     let mut last_available = Zatoshis::ZERO;
     let mut last_required: Option<Zatoshis>;
+    let mut excluded_ironwood_notes = Vec::new();
 
     loop {
         let required_estimate = (amount + fee_estimate).ok_or(BalanceError::Overflow)?;
         last_required = Some(required_estimate);
-        let selected_notes = wallet_db
-            .select_spendable_notes(
-                account_id,
-                TargetValue::AtLeast(required_estimate),
-                &[ShieldedProtocol::Orchard],
-                target_height,
-                confirmations_policy,
-                &[],
-            )
-            .map_err(Error::DataSource)?;
-        let selected_value = selected_notes.orchard_value()?;
+        let (orchard_notes, selected_value) = loop {
+            let selected_notes = wallet_db
+                .select_spendable_notes(
+                    account_id,
+                    TargetValue::AtLeast(required_estimate),
+                    &[ShieldedProtocol::Orchard],
+                    target_height,
+                    confirmations_policy,
+                    &excluded_ironwood_notes,
+                )
+                .map_err(Error::DataSource)?;
+
+            let mut orchard_notes = Vec::new();
+            let mut selected_value = Zatoshis::ZERO;
+            let excluded_count = excluded_ironwood_notes.len();
+
+            for selected in selected_notes.take_orchard() {
+                if selected.note().version() == orchard::note::NoteVersion::V3 {
+                    excluded_ironwood_notes.push(*selected.internal_note_id());
+                } else {
+                    selected_value =
+                        (selected_value + selected.note_value()?).ok_or(BalanceError::Overflow)?;
+                    orchard_notes.push(selected);
+                }
+            }
+
+            if selected_value >= required_estimate
+                || excluded_ironwood_notes.len() == excluded_count
+            {
+                break (orchard_notes, selected_value);
+            }
+        };
         let previous_available = last_available;
         last_available = selected_value;
 
@@ -1119,7 +1141,6 @@ where
             break;
         }
 
-        let orchard_notes = selected_notes.take_orchard();
         let (orchard_anchor, orchard_inputs) = wallet_db
             .with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|orchard_tree| {
                 let anchor = orchard_tree
