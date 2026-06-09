@@ -1409,7 +1409,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         self.check_version_compatibility::<FR::Error>(self.tx_version)?;
 
         #[cfg(zcash_unstable = "nu7")]
-        if self.ironwood_in_use() {
+        if matches!(self.tx_version, TxVersion::V6) || self.ironwood_in_use() {
             return Err(Error::TargetIncompatible(
                 self.consensus_branch_id,
                 self.tx_version,
@@ -2037,5 +2037,50 @@ mod tests {
                 Some(Zatoshis::const_from_u64(15_000))
             );
         }
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    fn build_for_pczt_rejects_v6() {
+        #[derive(Clone, Copy, Debug)]
+        struct Nu7Network;
+
+        impl Parameters for Nu7Network {
+            fn network_type(&self) -> zcash_protocol::consensus::NetworkType {
+                zcash_protocol::consensus::NetworkType::Test
+            }
+
+            fn activation_height(
+                &self,
+                nu: NetworkUpgrade,
+            ) -> Option<zcash_protocol::consensus::BlockHeight> {
+                match nu {
+                    NetworkUpgrade::Nu7 => Some(10u32.into()),
+                    _ => TEST_NETWORK.activation_height(nu),
+                }
+            }
+        }
+
+        let builder = Builder::new(
+            Nu7Network,
+            10u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: None,
+            },
+        );
+
+        assert_matches!(
+            builder.build_for_pczt(
+                OsRng,
+                &crate::transaction::fees::zip317::FeeRule::standard()
+            ),
+            Err(Error::TargetIncompatible(
+                zcash_protocol::consensus::BranchId::Nu7,
+                crate::transaction::TxVersion::V6,
+                None
+            ))
+        );
     }
 }
