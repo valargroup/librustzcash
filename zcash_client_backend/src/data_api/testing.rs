@@ -1724,6 +1724,8 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     ///                 sapling_initial_tree,
     ///                 #[cfg(feature = "orchard")]
     ///                 orchard_initial_tree,
+    ///                 #[cfg(feature = "orchard")]
+    ///                 Frontier::empty(),
     ///             ),
     ///             prior_sapling_roots,
     ///             #[cfg(feature = "orchard")]
