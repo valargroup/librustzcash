@@ -652,7 +652,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         .collect();
 
     #[cfg(feature = "orchard")]
-    let mut o_dust: Vec<(NoteRefT, bool)> = orchard
+    let o_dust: Vec<(NoteRefT, bool)> = orchard
         .inputs()
         .iter()
         .filter_map(|i| {
@@ -673,7 +673,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         })
         .collect();
     #[cfg(not(feature = "orchard"))]
-    let mut o_dust: Vec<(NoteRefT, bool)> = vec![];
+    let o_dust: Vec<(NoteRefT, bool)> = vec![];
 
     // If we don't have any dust inputs, there is nothing to check.
     if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() {
@@ -719,7 +719,13 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     let o_non_dust_ironwood = ironwood_inputs_len
         .checked_sub(o_dust_ironwood_len)
         .unwrap();
-    let o_non_dust = o_non_dust_orchard + o_non_dust_ironwood;
+    #[derive(Clone, Copy)]
+    struct AllowedDust {
+        transparent: usize,
+        sapling: usize,
+        orchard: usize,
+        ironwood: usize,
+    }
 
     // Return the number of allowed dust inputs from each pool.
     let allowed_dust = |change: &OutputManifest| {
@@ -743,25 +749,41 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
             s_dust.len(),
             (s_outputs_len + change.sapling).saturating_sub(s_non_dust),
         );
-        let o_allowed = min(
-            o_dust.len(),
-            (o_outputs_len + change.orchard).saturating_sub(o_non_dust),
+        let o_allowed_orchard = min(
+            o_dust_orchard_len,
+            (o_outputs_len + change.orchard).saturating_sub(o_non_dust_orchard),
         );
+        // There are no Ironwood outputs to pair with here. Ironwood dust can
+        // only be allowed below if grace or padding makes the extra action free.
+        let o_allowed_ironwood = 0;
 
         // We'll be spending the non-dust and allowed dust in each pool.
         let t_req_inputs = t_non_dust + t_allowed;
         let s_req_inputs = s_non_dust + s_allowed;
         #[cfg(feature = "orchard")]
-        let (o_req_orchard_inputs, o_req_ironwood_inputs) = {
-            let o_allowed_ironwood = o_dust
-                .iter()
-                .take(o_allowed)
-                .filter(|(_, is_ironwood)| *is_ironwood)
-                .count();
-            (
-                o_non_dust_orchard + (o_allowed - o_allowed_ironwood),
-                o_non_dust_ironwood + o_allowed_ironwood,
-            )
+        let (o_req_orchard_inputs, o_req_ironwood_inputs) = (
+            o_non_dust_orchard + o_allowed_orchard,
+            o_non_dust_ironwood + o_allowed_ironwood,
+        );
+
+        let next_orchard_dust = |allowed_orchard: usize, allowed_ironwood: usize| {
+            let mut remaining_orchard = allowed_orchard;
+            let mut remaining_ironwood = allowed_ironwood;
+            o_dust.iter().find_map(|(_, is_ironwood)| {
+                if *is_ironwood {
+                    if remaining_ironwood == 0 {
+                        Some(true)
+                    } else {
+                        remaining_ironwood -= 1;
+                        None
+                    }
+                } else if remaining_orchard == 0 {
+                    Some(false)
+                } else {
+                    remaining_orchard -= 1;
+                    None
+                }
+            })
         };
 
         // This calculates the hypothetical number of actions with given extra inputs,
@@ -812,23 +834,26 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
 
         let baseline = hypothetical_actions(0, 0, None)?;
 
-        let (t_extra, s_extra, o_extra) = if baseline >= grace_actions {
-            (0, 0, 0)
+        let (t_extra, s_extra, o_extra_orchard, o_extra_ironwood) = if baseline >= grace_actions {
+            (0, 0, 0, 0)
         } else if t_dust.len() > t_allowed && hypothetical_actions(1, 0, None)? <= baseline {
-            (1, 0, 0)
+            (1, 0, 0, 0)
         } else if s_dust.len() > s_allowed && hypothetical_actions(0, 1, None)? <= baseline {
-            (0, 1, 0)
-        } else if o_dust.len() > o_allowed
-            && hypothetical_actions(0, 0, Some(o_dust[o_allowed].1))? <= baseline
-        {
-            (0, 0, 1)
+            (0, 1, 0, 0)
+        } else if let Some(is_ironwood) = next_orchard_dust(o_allowed_orchard, o_allowed_ironwood) {
+            if hypothetical_actions(0, 0, Some(is_ironwood))? <= baseline {
+                (0, 0, usize::from(!is_ironwood), usize::from(is_ironwood))
+            } else {
+                (0, 0, 0, 0)
+            }
         } else {
-            (0, 0, 0)
+            (0, 0, 0, 0)
         };
-        Ok(OutputManifest {
+        Ok(AllowedDust {
             transparent: t_allowed + t_extra,
             sapling: s_allowed + s_extra,
-            orchard: o_allowed + o_extra,
+            orchard: o_allowed_orchard + o_extra_orchard,
+            ironwood: o_allowed_ironwood + o_extra_ironwood,
         })
     };
 
@@ -838,10 +863,11 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
         .map(allowed_dust)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .reduce(|l, r| OutputManifest {
+        .reduce(|l, r| AllowedDust {
             transparent: min(l.transparent, r.transparent),
             sapling: min(l.sapling, r.sapling),
             orchard: min(l.orchard, r.orchard),
+            ironwood: min(l.ironwood, r.ironwood),
         })
         .expect("possible_change is nonempty");
 
@@ -849,10 +875,25 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     // The caller should order the inputs from most to least preferred to spend.
     let t_dust = t_dust.split_off(allowed.transparent);
     let s_dust = s_dust.split_off(allowed.sapling);
+    let mut allowed_orchard = allowed.orchard;
+    let mut allowed_ironwood = allowed.ironwood;
     let o_dust = o_dust
-        .split_off(allowed.orchard)
         .into_iter()
-        .map(|(note_id, _)| note_id)
+        .filter_map(|(note_id, is_ironwood)| {
+            if is_ironwood {
+                if allowed_ironwood > 0 {
+                    allowed_ironwood -= 1;
+                    None
+                } else {
+                    Some(note_id)
+                }
+            } else if allowed_orchard > 0 {
+                allowed_orchard -= 1;
+                None
+            } else {
+                Some(note_id)
+            }
+        })
         .collect::<Vec<_>>();
 
     if t_dust.is_empty() && s_dust.is_empty() && o_dust.is_empty() {

@@ -277,6 +277,8 @@ mod tests {
     };
 
     use super::SingleOutputChangeStrategy;
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    use crate::fees::tests::TestOrchardInput;
     use crate::{
         data_api::{
             AccountMeta, PoolMeta, testing::MockWalletDb, wallet::input_selection::SaplingPayment,
@@ -909,6 +911,55 @@ mod tests {
         assert_matches!(
             result,
             Err(ChangeError::DustInputs { sapling, .. }) if sapling == vec![2]
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn change_with_disallowed_ironwood_dust() {
+        use crate::fees::sapling as sapling_fees;
+
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+
+        // The Ironwood dust input would add a separate action. An Orchard output
+        // must not allow that Ironwood dust input to be spent for free.
+        let result = change_strategy.compute_balance::<_, u32>(
+            &Network::TestNetwork,
+            Network::TestNetwork
+                .activation_height(NetworkUpgrade::Nu5)
+                .unwrap()
+                .into(),
+            &[] as &[TestTransparentInput],
+            &[] as &[TxOut],
+            &sapling_fees::EmptyBundleView,
+            &(
+                orchard::builder::BundleType::DEFAULT,
+                &[
+                    TestOrchardInput {
+                        note_id: 0,
+                        value: Zatoshis::const_from_u64(1000),
+                        is_ironwood: true,
+                    },
+                    TestOrchardInput {
+                        note_id: 1,
+                        value: Zatoshis::const_from_u64(59000),
+                        is_ironwood: false,
+                    },
+                ][..],
+                &[OrchardPayment::new(Zatoshis::const_from_u64(30000))][..],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Err(ChangeError::DustInputs { orchard, .. }) if orchard == vec![0]
         );
     }
 }
