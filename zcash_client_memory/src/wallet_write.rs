@@ -942,6 +942,9 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
             #[cfg(feature = "orchard")]
             let detectable_via_scanning =
                 detectable_via_scanning | d_tx.tx().orchard_bundle().is_some();
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            let detectable_via_scanning =
+                detectable_via_scanning | d_tx.tx().ironwood_bundle().is_some();
 
             if d_tx.mined_height().is_none() && !detectable_via_scanning {
                 self.transaction_data_request_queue
@@ -1158,6 +1161,20 @@ Instead derive the ufvk in the calling code and import it using `import_account_
 
                 #[cfg(not(feature = "orchard"))]
                 panic!("Sent a transaction with Orchard Actions without `orchard` enabled?");
+            }
+            // Mark ironwood notes as spent
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            if let Some(bundle) = sent_tx.tx().ironwood_bundle() {
+                detectable_via_scanning = true;
+                for action in bundle.actions() {
+                    match self.mark_orchard_note_spent(*action.nullifier(), sent_tx.tx().txid()) {
+                        Ok(()) => {}
+                        Err(Error::NoteNotFound) => {
+                            // Some actions may be new outputs we don't have notes for.
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
             }
             // Mark transparent UTXOs as spent
             #[cfg(feature = "transparent-inputs")]

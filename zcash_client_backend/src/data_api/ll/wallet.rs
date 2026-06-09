@@ -286,6 +286,8 @@ where
                 tx.sapling_spends().iter().map(|spend| spend.nf()),
                 #[cfg(feature = "orchard")]
                 tx.orchard_spends().iter().map(|spend| spend.nf()),
+                #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+                std::iter::empty(),
             )
             .map_err(PutBlocksError::Storage)?;
 
@@ -658,6 +660,12 @@ where
             .iter()
             .flat_map(|b| b.actions().iter())
             .map(|action| action.nullifier()),
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        d_tx.tx()
+            .ironwood_bundle()
+            .iter()
+            .flat_map(|b| b.actions().iter())
+            .map(|action| action.nullifier()),
     )?;
 
     // A flag used to determine whether it is necessary to query for transactions that
@@ -775,6 +783,9 @@ where
         #[cfg(feature = "orchard")]
         let detectable_via_scanning =
             detectable_via_scanning | d_tx.tx().orchard_bundle().is_some();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let detectable_via_scanning =
+            detectable_via_scanning | d_tx.tx().ironwood_bundle().is_some();
 
         if d_tx.mined_height().is_none() && !detectable_via_scanning {
             wallet_db.queue_tx_retrieval(std::iter::once(d_tx.tx().txid()), None)?
@@ -895,6 +906,9 @@ fn mark_notes_spent<'a, DbT>(
     >,
     sapling_nfs: impl Iterator<Item = &'a sapling::Nullifier>,
     #[cfg(feature = "orchard")] orchard_nfs: impl Iterator<Item = &'a orchard::note::Nullifier>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))] ironwood_nfs: impl Iterator<
+        Item = &'a orchard::note::Nullifier,
+    >,
 ) -> Result<(), <DbT as LowLevelWalletRead>::Error>
 where
     DbT: LowLevelWalletWrite,
@@ -913,6 +927,12 @@ where
     // Mark Orchard notes as spent when we observe their nullifiers.
     #[cfg(feature = "orchard")]
     for nf in orchard_nfs {
+        wallet_db.mark_orchard_note_spent(nf, tx_ref)?;
+    }
+
+    // Mark Ironwood notes as spent when we observe their nullifiers.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    for nf in ironwood_nfs {
         wallet_db.mark_orchard_note_spent(nf, tx_ref)?;
     }
 

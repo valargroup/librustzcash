@@ -3418,6 +3418,13 @@ pub(crate) fn store_transaction_to_be_sent<P: consensus::Parameters>(
         #[cfg(not(feature = "orchard"))]
         panic!("Sent a transaction with Orchard Actions without `orchard` enabled?");
     }
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    if let Some(bundle) = sent_tx.tx().ironwood_bundle() {
+        detectable_via_scanning = true;
+        for action in bundle.actions() {
+            orchard::mark_orchard_note_spent(conn, tx_ref, action.nullifier())?;
+        }
+    }
 
     #[cfg(feature = "transparent-inputs")]
     for utxo_outpoint in sent_tx.utxos_spent() {
