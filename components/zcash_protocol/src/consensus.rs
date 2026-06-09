@@ -757,6 +757,7 @@ impl TryFrom<u32> for BranchId {
             0x4dec_4df0 => Ok(BranchId::Nu6_1),
             0x5437_f330 => Ok(BranchId::Nu6_2),
             #[cfg(zcash_unstable = "nu7")]
+            // TODO: Replace this placeholder once the Valar NU7 consensus branch ID is chosen.
             0xffff_ffff => Ok(BranchId::Nu7),
             #[cfg(zcash_unstable = "zfuture")]
             0xffff_ffff => Ok(BranchId::ZFuture),
@@ -779,6 +780,7 @@ impl From<BranchId> for u32 {
             BranchId::Nu6_1 => 0x4dec_4df0,
             BranchId::Nu6_2 => 0x5437_f330,
             #[cfg(zcash_unstable = "nu7")]
+            // TODO: Replace this placeholder once the Valar NU7 consensus branch ID is chosen.
             BranchId::Nu7 => 0xffff_ffff,
             #[cfg(zcash_unstable = "zfuture")]
             BranchId::ZFuture => 0xffff_ffff,
