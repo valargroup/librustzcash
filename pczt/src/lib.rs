@@ -56,6 +56,7 @@ pub mod sapling;
 pub mod transparent;
 
 const MAGIC_BYTES: &[u8] = b"PCZT";
+const PCZT_VERSION_1: u32 = 1;
 const PCZT_VERSION_2: u32 = 2;
 
 /// A partially-created Zcash transaction.
@@ -81,6 +82,154 @@ pub struct Pczt {
     orchard: orchard::Bundle,
 }
 
+mod v1 {
+    use alloc::{collections::BTreeMap, string::String, vec::Vec};
+
+    use serde::{Deserialize, Serialize};
+    use serde_with::serde_as;
+
+    use crate::{common, orchard, sapling, transparent};
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub(super) struct Pczt {
+        pub(super) global: common::Global,
+        pub(super) transparent: transparent::Bundle,
+        pub(super) sapling: sapling::Bundle,
+        pub(super) orchard: Bundle,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub(super) struct Bundle {
+        pub(super) actions: Vec<Action>,
+        pub(super) flags: u8,
+        pub(super) value_sum: (u64, bool),
+        pub(super) anchor: [u8; 32],
+        pub(super) zkproof: Option<Vec<u8>>,
+        pub(super) bsk: Option<[u8; 32]>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub(super) struct Action {
+        pub(super) cv_net: [u8; 32],
+        pub(super) spend: Spend,
+        pub(super) output: Output,
+        pub(super) rcv: Option<[u8; 32]>,
+    }
+
+    #[serde_as]
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub(super) struct Spend {
+        pub(super) nullifier: [u8; 32],
+        pub(super) rk: [u8; 32],
+        #[serde_as(as = "Option<[_; 64]>")]
+        pub(super) spend_auth_sig: Option<[u8; 64]>,
+        #[serde_as(as = "Option<[_; 43]>")]
+        pub(super) recipient: Option<[u8; 43]>,
+        pub(super) value: Option<u64>,
+        pub(super) rho: Option<[u8; 32]>,
+        pub(super) rseed: Option<[u8; 32]>,
+        #[serde_as(as = "Option<[_; 96]>")]
+        pub(super) fvk: Option<[u8; 96]>,
+        pub(super) witness: Option<(u32, [[u8; 32]; 32])>,
+        pub(super) alpha: Option<[u8; 32]>,
+        pub(super) zip32_derivation: Option<common::Zip32Derivation>,
+        pub(super) dummy_sk: Option<[u8; 32]>,
+        pub(super) proprietary: BTreeMap<String, Vec<u8>>,
+    }
+
+    #[serde_as]
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub(super) struct Output {
+        pub(super) cmx: [u8; 32],
+        pub(super) ephemeral_key: [u8; 32],
+        pub(super) enc_ciphertext: Vec<u8>,
+        pub(super) out_ciphertext: Vec<u8>,
+        #[serde_as(as = "Option<[_; 43]>")]
+        pub(super) recipient: Option<[u8; 43]>,
+        pub(super) value: Option<u64>,
+        pub(super) rseed: Option<[u8; 32]>,
+        pub(super) ock: Option<[u8; 32]>,
+        pub(super) zip32_derivation: Option<common::Zip32Derivation>,
+        pub(super) user_address: Option<String>,
+        pub(super) proprietary: BTreeMap<String, Vec<u8>>,
+    }
+
+    impl From<Pczt> for crate::Pczt {
+        fn from(pczt: Pczt) -> Self {
+            Self {
+                global: pczt.global,
+                transparent: pczt.transparent,
+                sapling: pczt.sapling,
+                orchard: pczt.orchard.into(),
+            }
+        }
+    }
+
+    impl From<Bundle> for orchard::Bundle {
+        fn from(bundle: Bundle) -> Self {
+            Self {
+                actions: bundle.actions.into_iter().map(Into::into).collect(),
+                flags: bundle.flags,
+                value_sum: bundle.value_sum,
+                anchor: bundle.anchor,
+                zkproof: bundle.zkproof,
+                bsk: bundle.bsk,
+            }
+        }
+    }
+
+    impl From<Action> for orchard::Action {
+        fn from(action: Action) -> Self {
+            Self {
+                cv_net: action.cv_net,
+                spend: action.spend.into(),
+                output: action.output.into(),
+                rcv: action.rcv,
+            }
+        }
+    }
+
+    impl From<Spend> for orchard::Spend {
+        fn from(spend: Spend) -> Self {
+            Self {
+                nullifier: spend.nullifier,
+                rk: spend.rk,
+                spend_auth_sig: spend.spend_auth_sig,
+                recipient: spend.recipient,
+                value: spend.value,
+                rho: spend.rho,
+                rseed: spend.rseed,
+                note_version: orchard::NotePlaintextVersion::V2,
+                fvk: spend.fvk,
+                witness: spend.witness,
+                alpha: spend.alpha,
+                zip32_derivation: spend.zip32_derivation,
+                dummy_sk: spend.dummy_sk,
+                proprietary: spend.proprietary,
+            }
+        }
+    }
+
+    impl From<Output> for orchard::Output {
+        fn from(output: Output) -> Self {
+            Self {
+                cmx: output.cmx,
+                note_version: orchard::NotePlaintextVersion::V2,
+                ephemeral_key: output.ephemeral_key,
+                enc_ciphertext: output.enc_ciphertext,
+                out_ciphertext: output.out_ciphertext,
+                recipient: output.recipient,
+                value: output.value,
+                rseed: output.rseed,
+                ock: output.ock,
+                zip32_derivation: output.zip32_derivation,
+                user_address: output.user_address,
+                proprietary: output.proprietary,
+            }
+        }
+    }
+}
+
 impl Pczt {
     /// Parses a PCZT from its encoding.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
@@ -91,12 +240,13 @@ impl Pczt {
             return Err(ParseError::NotPczt);
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != PCZT_VERSION_2 {
-            return Err(ParseError::UnknownVersion(version));
+        match version {
+            PCZT_VERSION_1 => postcard::from_bytes::<v1::Pczt>(&bytes[8..])
+                .map(Into::into)
+                .map_err(ParseError::Invalid),
+            PCZT_VERSION_2 => postcard::from_bytes(&bytes[8..]).map_err(ParseError::Invalid),
+            _ => Err(ParseError::UnknownVersion(version)),
         }
-
-        // This is a v2 PCZT.
-        postcard::from_bytes(&bytes[8..]).map_err(ParseError::Invalid)
     }
 
     /// Serializes this PCZT.
@@ -287,4 +437,103 @@ pub enum ParseError {
     TooShort,
     /// The PCZT has an unknown version.
     UnknownVersion(u32),
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::collections::BTreeMap;
+
+    use zcash_protocol::{
+        consensus::BranchId,
+        constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID},
+    };
+
+    use super::*;
+
+    #[test]
+    fn parse_v1_defaults_orchard_note_versions() {
+        let legacy = v1::Pczt {
+            global: common::Global {
+                tx_version: V5_TX_VERSION,
+                version_group_id: V5_VERSION_GROUP_ID,
+                consensus_branch_id: u32::from(BranchId::Nu5),
+                fallback_lock_time: None,
+                expiry_height: 0,
+                coin_type: 1,
+                tx_modifiable: 0,
+                proprietary: BTreeMap::new(),
+            },
+            transparent: transparent::Bundle {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            sapling: sapling::Bundle {
+                spends: vec![],
+                outputs: vec![],
+                value_sum: 0,
+                anchor: [0; 32],
+                bsk: None,
+            },
+            orchard: v1::Bundle {
+                actions: vec![v1::Action {
+                    cv_net: [1; 32],
+                    spend: v1::Spend {
+                        nullifier: [2; 32],
+                        rk: [3; 32],
+                        spend_auth_sig: None,
+                        recipient: None,
+                        value: Some(1000),
+                        rho: Some([4; 32]),
+                        rseed: Some([5; 32]),
+                        fvk: None,
+                        witness: None,
+                        alpha: None,
+                        zip32_derivation: None,
+                        dummy_sk: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    output: v1::Output {
+                        cmx: [6; 32],
+                        ephemeral_key: [7; 32],
+                        enc_ciphertext: vec![8; 580],
+                        out_ciphertext: vec![9; 80],
+                        recipient: None,
+                        value: Some(1000),
+                        rseed: Some([10; 32]),
+                        ock: None,
+                        zip32_derivation: None,
+                        user_address: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    rcv: None,
+                }],
+                flags: 0,
+                value_sum: (0, false),
+                anchor: [0; 32],
+                zkproof: None,
+                bsk: None,
+            },
+        };
+
+        let mut encoded = vec![];
+        encoded.extend_from_slice(MAGIC_BYTES);
+        encoded.extend_from_slice(&PCZT_VERSION_1.to_le_bytes());
+        let encoded = postcard::to_extend(&legacy, encoded).unwrap();
+
+        let parsed = Pczt::parse(&encoded).unwrap();
+        let action = &parsed.orchard().actions()[0];
+        assert_eq!(
+            *action.spend().note_version(),
+            orchard::NotePlaintextVersion::V2
+        );
+        assert_eq!(
+            *action.output().note_version(),
+            orchard::NotePlaintextVersion::V2
+        );
+
+        assert_eq!(
+            u32::from_le_bytes(parsed.serialize()[4..8].try_into().unwrap()),
+            PCZT_VERSION_2
+        );
+    }
 }
