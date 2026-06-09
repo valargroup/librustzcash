@@ -530,7 +530,7 @@ impl<P, U> Builder<'_, P, U> {
     }
 }
 
-impl<P: consensus::Parameters> Builder<'_, P, ()> {
+impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
     /// Creates a new `Builder` targeted for inclusion in the block with the given height,
     /// using default values for general transaction fields.
     ///
