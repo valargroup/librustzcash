@@ -15,6 +15,8 @@ use zcash_client_backend::data_api::{
 };
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::{TransparentBalances, TransparentKeyOrigin};
+#[cfg(feature = "orchard")]
+use zcash_client_backend::wallet::Note;
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBalance, AccountSource, Balance, Progress, Ratio, SeedRelevance,
@@ -267,7 +269,26 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                     account_balance.with_sapling_balance_mut(update_balance_with_note)?;
                 }
                 PoolType::ORCHARD => {
-                    account_balance.with_orchard_balance_mut(update_balance_with_note)?;
+                    #[cfg(feature = "orchard")]
+                    {
+                        match &note.note {
+                            Note::Orchard(orchard_note)
+                                if orchard_note.version() == orchard::note::NoteVersion::V3 =>
+                            {
+                                account_balance
+                                    .with_ironwood_balance_mut(update_balance_with_note)?;
+                            }
+                            Note::Orchard(_) => {
+                                account_balance
+                                    .with_orchard_balance_mut(update_balance_with_note)?;
+                            }
+                            _ => unimplemented!("Unknown pool type"),
+                        }
+                    }
+                    #[cfg(not(feature = "orchard"))]
+                    {
+                        unimplemented!("Unknown pool type")
+                    }
                 }
                 _ => unimplemented!("Unknown pool type"),
             }
