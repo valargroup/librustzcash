@@ -373,6 +373,8 @@ pub struct PcztResult<P: Parameters> {
     pub pczt_parts: PcztParts<P>,
     pub sapling_meta: SaplingMetadata,
     pub orchard_meta: orchard::builder::BundleMetadata,
+    #[cfg(zcash_unstable = "nu7")]
+    pub ironwood_meta: orchard::builder::BundleMetadata,
 }
 
 /// The components of a PCZT.
@@ -386,6 +388,8 @@ pub struct PcztParts<P: Parameters> {
     pub transparent: Option<transparent::pczt::Bundle>,
     pub sapling: Option<sapling::pczt::Bundle>,
     pub orchard: Option<orchard::pczt::Bundle>,
+    #[cfg(zcash_unstable = "nu7")]
+    pub ironwood: Option<orchard::pczt::Bundle>,
 }
 
 /// Generates a [`Transaction`] from its inputs and outputs.
@@ -1408,11 +1412,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         #[cfg(zcash_unstable = "nu7")]
         let pczt_tx_version = {
             if self.ironwood_in_use() {
-                return Err(Error::TargetIncompatible(
-                    self.consensus_branch_id,
-                    self.tx_version,
-                    None,
-                ));
+                TxVersion::V6
             } else if matches!(self.tx_version, TxVersion::V6) {
                 TxVersion::V5
             } else {
@@ -1424,7 +1424,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
 
         self.check_version_compatibility::<FR::Error>(pczt_tx_version)?;
         #[cfg(zcash_unstable = "nu7")]
-        debug_assert!(!pczt_tx_version.has_ironwood());
+        debug_assert_eq!(pczt_tx_version.has_ironwood(), self.ironwood_in_use());
 
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
 
@@ -1473,6 +1473,20 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             None => (None, orchard::builder::BundleMetadata::empty()),
         };
 
+        #[cfg(zcash_unstable = "nu7")]
+        let (ironwood_bundle, ironwood_meta) = match self
+            .ironwood_builder
+            .map(|builder| {
+                builder
+                    .build_for_pczt(&mut rng)
+                    .map_err(Error::IronwoodBuild)
+            })
+            .transpose()?
+        {
+            Some((bundle, meta)) => (Some(bundle), meta),
+            None => (None, orchard::builder::BundleMetadata::empty()),
+        };
+
         Ok(PcztResult {
             pczt_parts: PcztParts {
                 params: self.params,
@@ -1483,9 +1497,13 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 transparent: transparent_bundle,
                 sapling: sapling_bundle,
                 orchard: orchard_bundle,
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood: ironwood_bundle,
             },
             sapling_meta,
             orchard_meta,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_meta,
         })
     }
 }
@@ -2058,7 +2076,6 @@ mod tests {
     ))]
     fn build_for_pczt_uses_v5_for_default_nu7_without_ironwood() {
         use ::transparent::keys::NonHardenedChildIndex;
-
         #[derive(Clone, Copy, Debug)]
         struct Nu7Network;
 
@@ -2125,6 +2142,59 @@ mod tests {
         assert_eq!(
             res.pczt_parts.consensus_branch_id,
             zcash_protocol::consensus::BranchId::Nu7
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    fn build_for_pczt_accepts_v6_when_ironwood_is_used() {
+        #[derive(Clone, Copy, Debug)]
+        struct Nu7Network;
+
+        impl Parameters for Nu7Network {
+            fn network_type(&self) -> zcash_protocol::consensus::NetworkType {
+                zcash_protocol::consensus::NetworkType::Test
+            }
+
+            fn activation_height(
+                &self,
+                nu: NetworkUpgrade,
+            ) -> Option<zcash_protocol::consensus::BlockHeight> {
+                match nu {
+                    NetworkUpgrade::Nu7 => Some(10u32.into()),
+                    _ => TEST_NETWORK.activation_height(nu),
+                }
+            }
+        }
+
+        let mut builder = Builder::new(
+            Nu7Network,
+            10u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+            },
+        );
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+        builder
+            .add_ironwood_output::<crate::transaction::fees::zip317::FeeRule>(
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+
+        assert_matches!(
+            builder.build_for_pczt(
+                OsRng,
+                &crate::transaction::fees::zip317::FeeRule::standard(),
+            ),
+            Err(Error::InsufficientFunds(_))
         );
     }
 }

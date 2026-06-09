@@ -29,6 +29,8 @@ pub struct TransactionExtractor<'a> {
         &'a ::sapling::circuit::OutputVerifyingKey,
     )>,
     orchard_vk: Option<&'a ::orchard::circuit::VerifyingKey>,
+    #[cfg(zcash_unstable = "nu7")]
+    ironwood_vk: Option<&'a ::orchard::circuit::VerifyingKey>,
     _unused: PhantomData<&'a ()>,
 }
 
@@ -39,6 +41,8 @@ impl<'a> TransactionExtractor<'a> {
             pczt,
             sapling_vk: None,
             orchard_vk: None,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_vk: None,
             _unused: PhantomData,
         }
     }
@@ -67,12 +71,25 @@ impl<'a> TransactionExtractor<'a> {
         self
     }
 
+    /// Provides an existing Orchard verifying key for validating the Ironwood proof (if
+    /// any).
+    ///
+    /// If not provided, and the PCZT has an Ironwood bundle, an Orchard verifying key will
+    /// be generated on the fly.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn with_ironwood(mut self, ironwood_vk: &'a ::orchard::circuit::VerifyingKey) -> Self {
+        self.ironwood_vk = Some(ironwood_vk);
+        self
+    }
+
     /// Attempts to extract a valid transaction from the PCZT.
     pub fn extract(self) -> Result<Transaction, Error> {
         let Self {
             pczt,
             sapling_vk,
             orchard_vk,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_vk,
             _unused,
         } = self;
 
@@ -88,6 +105,11 @@ impl<'a> TransactionExtractor<'a> {
             |o| {
                 o.extract()
                     .map_err(|e| Error::Orchard(OrchardError::Extract(e)))
+            },
+            #[cfg(zcash_unstable = "nu7")]
+            |i| {
+                i.extract()
+                    .map_err(|e| Error::Ironwood(OrchardError::Extract(e)))
             },
         )?;
 
@@ -129,6 +151,11 @@ impl<'a> TransactionExtractor<'a> {
             orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
                 .map_err(Error::Orchard)?;
         }
+        #[cfg(zcash_unstable = "nu7")]
+        if let Some(bundle) = tx.ironwood_bundle() {
+            orchard::verify_bundle(bundle, ironwood_vk, *shielded_sighash.as_ref())
+                .map_err(Error::Ironwood)?;
+        }
 
         Ok(tx)
     }
@@ -148,6 +175,8 @@ impl Authorization for Unbound {
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
+    #[cfg(zcash_unstable = "nu7")]
+    Ironwood(OrchardError),
     Orchard(OrchardError),
     Sapling(SaplingError),
     SaplingRequired,

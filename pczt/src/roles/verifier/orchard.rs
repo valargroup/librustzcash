@@ -11,6 +11,8 @@ impl super::Verifier {
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood,
         } = self.pczt;
 
         let bundle = orchard.into_parsed().map_err(OrchardError::Parse)?;
@@ -23,6 +25,37 @@ impl super::Verifier {
                 transparent,
                 sapling,
                 orchard: crate::orchard::Bundle::serialize_from(bundle),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood,
+            },
+        })
+    }
+
+    /// Parses the Ironwood bundle and then verifies it in the given closure.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn with_ironwood<E, F>(self, f: F) -> Result<Self, OrchardError<E>>
+    where
+        F: FnOnce(&orchard::pczt::Bundle) -> Result<(), OrchardError<E>>,
+    {
+        let Pczt {
+            global,
+            transparent,
+            sapling,
+            orchard,
+            ironwood,
+        } = self.pczt;
+
+        let bundle = ironwood.into_parsed().map_err(OrchardError::Parse)?;
+
+        f(&bundle)?;
+
+        Ok(Self {
+            pczt: Pczt {
+                global,
+                transparent,
+                sapling,
+                orchard,
+                ironwood: crate::orchard::Bundle::serialize_from(bundle),
             },
         })
     }

@@ -12,6 +12,8 @@ use crate::{
     },
 };
 
+#[cfg(zcash_unstable = "nu7")]
+use zcash_protocol::constants::V6_TX_VERSION;
 use zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID};
 
 /// Initial flags allowing any modification.
@@ -29,8 +31,12 @@ pub struct Creator {
     expiry_height: u32,
     coin_type: u32,
     orchard_flags: u8,
+    #[cfg(zcash_unstable = "nu7")]
+    ironwood_flags: u8,
     sapling_anchor: [u8; 32],
     orchard_anchor: [u8; 32],
+    #[cfg(zcash_unstable = "nu7")]
+    ironwood_anchor: [u8; 32],
 }
 
 impl Creator {
@@ -50,8 +56,12 @@ impl Creator {
             expiry_height,
             coin_type,
             orchard_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
             sapling_anchor,
             orchard_anchor,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_anchor: orchard::Anchor::empty_tree().to_bytes(),
         }
     }
 
@@ -63,6 +73,18 @@ impl Creator {
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
         self.orchard_flags = orchard_flags.to_byte();
+        self
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
+        self.ironwood_flags = ironwood_flags.to_byte();
+        self
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn with_ironwood_anchor(mut self, ironwood_anchor: [u8; 32]) -> Self {
+        self.ironwood_anchor = ironwood_anchor;
         self
     }
 
@@ -97,6 +119,15 @@ impl Creator {
                 zkproof: None,
                 bsk: None,
             },
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood: crate::orchard::Bundle {
+                actions: vec![],
+                flags: self.ironwood_flags,
+                value_sum: (0, true),
+                anchor: self.ironwood_anchor,
+                zkproof: None,
+                bsk: None,
+            },
         }
     }
 
@@ -120,7 +151,7 @@ impl Creator {
             zcash_primitives::transaction::TxVersion::V4 => Some(V4_TX_VERSION),
             zcash_primitives::transaction::TxVersion::V5 => Some(V5_TX_VERSION),
             #[cfg(zcash_unstable = "nu7")]
-            zcash_primitives::transaction::TxVersion::V6 => None,
+            zcash_primitives::transaction::TxVersion::V6 => Some(V6_TX_VERSION),
             #[cfg(zcash_unstable = "zfuture")]
             zcash_primitives::transaction::TxVersion::ZFuture => None,
         }?;
@@ -166,6 +197,18 @@ impl Creator {
                 }),
             orchard: parts
                 .orchard
+                .map(crate::orchard::Bundle::serialize_from)
+                .unwrap_or_else(|| crate::orchard::Bundle {
+                    actions: vec![],
+                    flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+                    value_sum: (0, true),
+                    anchor: orchard::Anchor::empty_tree().to_bytes(),
+                    zkproof: None,
+                    bsk: None,
+                }),
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood: parts
+                .ironwood
                 .map(crate::orchard::Bundle::serialize_from)
                 .unwrap_or_else(|| crate::orchard::Bundle {
                     actions: vec![],

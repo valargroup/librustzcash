@@ -28,6 +28,11 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(all(
     any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"),
+    zcash_unstable = "nu7"
+))]
+use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
+#[cfg(all(
+    any(feature = "io-finalizer", feature = "signer", feature = "tx-extractor"),
     zcash_unstable = "zfuture",
     feature = "zip-233",
 ))]
@@ -40,6 +45,11 @@ use {
     zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID},
 };
 
+#[cfg(all(
+    any(feature = "io-finalizer", feature = "signer"),
+    zcash_unstable = "nu7"
+))]
+use zcash_primitives::transaction::sighash_v6::v6_signature_hash;
 #[cfg(any(feature = "io-finalizer", feature = "signer"))]
 use {
     blake2b_simd::Hash as Blake2bHash,
@@ -80,6 +90,9 @@ pub struct Pczt {
     sapling: sapling::Bundle,
     #[getset(get = "pub")]
     orchard: orchard::Bundle,
+    #[cfg(zcash_unstable = "nu7")]
+    #[getset(get = "pub")]
+    ironwood: orchard::Bundle,
 }
 
 mod v1 {
@@ -161,6 +174,15 @@ mod v1 {
                 transparent: pczt.transparent,
                 sapling: pczt.sapling,
                 orchard: pczt.orchard.into(),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood: orchard::Bundle {
+                    actions: vec![],
+                    flags: 0,
+                    value_sum: (0, false),
+                    anchor: ::orchard::Anchor::empty_tree().to_bytes(),
+                    zkproof: None,
+                    bsk: None,
+                },
             }
         }
     }
@@ -284,6 +306,12 @@ impl Pczt {
             Option<::orchard::Bundle<A::OrchardAuth, zcash_protocol::value::ZatBalance>>,
             E,
         >,
+        #[cfg(zcash_unstable = "nu7")] extract_ironwood: impl FnOnce(
+            &::orchard::pczt::Bundle,
+        ) -> Result<
+            Option<::orchard::Bundle<A::OrchardAuth, zcash_protocol::value::ZatBalance>>,
+            E,
+        >,
     ) -> Result<ParsedPczt<A>, E>
     where
         A: Authorization,
@@ -294,6 +322,8 @@ impl Pczt {
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood,
         } = self;
 
         let transparent = transparent
@@ -301,9 +331,15 @@ impl Pczt {
             .map_err(ExtractError::TransparentParse)?;
         let sapling = sapling.into_parsed().map_err(ExtractError::SaplingParse)?;
         let orchard = orchard.into_parsed().map_err(ExtractError::OrchardParse)?;
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood = ironwood
+            .into_parsed()
+            .map_err(ExtractError::IronwoodParse)?;
 
         let version = match (global.tx_version, global.version_group_id) {
             (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
+            #[cfg(zcash_unstable = "nu7")]
+            (V6_TX_VERSION, V6_VERSION_GROUP_ID) => Ok(TxVersion::V6),
             (version, version_group_id) => Err(ExtractError::UnsupportedTxVersion {
                 version,
                 version_group_id,
@@ -319,7 +355,10 @@ impl Pczt {
         let transparent_bundle = extract_transparent(&transparent)?;
         let sapling_bundle = extract_sapling(&sapling)?;
         let orchard_bundle = extract_orchard(&orchard)?;
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood_bundle = extract_ironwood(&ironwood)?;
 
+        #[cfg(not(zcash_unstable = "nu7"))]
         let tx_data = TransactionData::from_parts(
             version,
             consensus_branch_id,
@@ -333,11 +372,45 @@ impl Pczt {
             orchard_bundle,
         );
 
+        #[cfg(zcash_unstable = "nu7")]
+        let tx_data = match version {
+            TxVersion::V5 => {
+                if ironwood_bundle.is_some() {
+                    return Err(ExtractError::IronwoodRequiresV6.into());
+                }
+
+                TransactionData::from_parts(
+                    version,
+                    consensus_branch_id,
+                    lock_time,
+                    global.expiry_height.into(),
+                    #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
+                    Zatoshis::ZERO,
+                    transparent_bundle,
+                    None,
+                    sapling_bundle,
+                    orchard_bundle,
+                )
+            }
+            TxVersion::V6 => TransactionData::from_parts_v6(
+                consensus_branch_id,
+                lock_time,
+                global.expiry_height.into(),
+                transparent_bundle,
+                sapling_bundle,
+                orchard_bundle,
+                ironwood_bundle,
+            ),
+            _ => unreachable!("PCZT extraction only accepts v5 and v6"),
+        };
+
         Ok(ParsedPczt {
             global,
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood,
             tx_data,
         })
     }
@@ -352,6 +425,8 @@ impl Pczt {
             },
             |s| s.extract_effects().map_err(ExtractError::SaplingExtract),
             |o| o.extract_effects().map_err(ExtractError::OrchardExtract),
+            #[cfg(zcash_unstable = "nu7")]
+            |i| i.extract_effects().map_err(ExtractError::IronwoodExtract),
         )
         .map(|parsed| parsed.tx_data)
     }
@@ -368,6 +443,8 @@ pub(crate) struct ParsedPczt<A: Authorization> {
     pub(crate) transparent: ::transparent::pczt::Bundle,
     pub(crate) sapling: ::sapling::pczt::Bundle,
     pub(crate) orchard: ::orchard::pczt::Bundle,
+    #[cfg(zcash_unstable = "nu7")]
+    pub(crate) ironwood: ::orchard::pczt::Bundle,
     pub(crate) tx_data: TransactionData<A>,
 }
 
@@ -385,20 +462,23 @@ impl Authorization for EffectsOnly {
 
 /// Helper to produce the correct sighash for a PCZT.
 ///
-/// At present, only V5 transaction signature hashes are supported, and a version check *MUST* be
-/// performed prior to invoking this function. It is intended for use exclusively for use in the
-/// context of a callback to the `extract_tx_data` function, which performs this check.
+/// This is intended for use exclusively in the context of callbacks to
+/// `extract_tx_data`, which performs the PCZT transaction version check.
 #[cfg(any(feature = "io-finalizer", feature = "signer"))]
 pub(crate) fn sighash(
     tx_data: &TransactionData<EffectsOnly>,
     signable_input: &SignableInput,
     txid_parts: &TxDigests<Blake2bHash>,
 ) -> [u8; 32] {
-    // TODO: Pick sighash based on tx version
-    v5_signature_hash(tx_data, signable_input, txid_parts)
-        .as_ref()
-        .try_into()
-        .expect("correct length")
+    match tx_data.version() {
+        TxVersion::V5 => v5_signature_hash(tx_data, signable_input, txid_parts),
+        #[cfg(zcash_unstable = "nu7")]
+        TxVersion::V6 => v6_signature_hash(tx_data, signable_input, txid_parts),
+        _ => unreachable!("PCZT extraction only accepts v5 and v6"),
+    }
+    .as_ref()
+    .try_into()
+    .expect("correct length")
 }
 
 /// Errors that can occur while parsing PCZT bundles and extracting transaction data.
@@ -408,6 +488,15 @@ pub(crate) fn sighash(
 pub enum ExtractError {
     /// The PCZT's transparent inputs have incompatible lock time requirements.
     IncompatibleLockTimes,
+    /// The PCZT contains an Ironwood bundle but does not specify transaction version 6.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodRequiresV6,
+    /// An error occurred extracting the Ironwood protocol bundle from the Ironwood PCZT bundle.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodExtract(::orchard::pczt::TxExtractorError),
+    /// An error occurred parsing the Ironwood PCZT bundle from the PCZT data.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodParse(::orchard::pczt::ParseError),
     /// An error occurred extracting the Orchard protocol bundle from the Orchard PCZT bundle.
     OrchardExtract(::orchard::pczt::TxExtractorError),
     /// An error occurred parsing the Orchard PCZT bundle from the PCZT data.

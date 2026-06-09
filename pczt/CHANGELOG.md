@@ -11,6 +11,9 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- Ironwood PCZT support under the NU7 unstable cfg, including parsing,
+  creation from builder parts, I/O finalization, proving, signing, extraction,
+  combining, redaction, verification, and updater hooks.
 - `pczt::orchard::NotePlaintextVersion`, representing Orchard note plaintext
   versions in serialized PCZT data.
 - `pczt::orchard::Spend::note_version` and

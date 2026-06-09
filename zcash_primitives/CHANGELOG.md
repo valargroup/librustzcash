@@ -21,6 +21,8 @@ workspace.
     build Ironwood actions using the QR/Ironwood note plaintext format.
   - `BuildResult::ironwood_meta`, which exposes the randomized action
     positions for Ironwood bundles.
+  - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
+    Ironwood PCZT bundle data and randomized action positions.
 
 ## [0.28.0] - 2026-06-02
 

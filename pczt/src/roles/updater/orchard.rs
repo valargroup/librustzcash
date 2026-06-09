@@ -13,6 +13,8 @@ impl super::Updater {
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood,
         } = self.pczt;
 
         let mut bundle = orchard.into_parsed().map_err(OrchardError::Parser)?;
@@ -25,6 +27,37 @@ impl super::Updater {
                 transparent,
                 sapling,
                 orchard: crate::orchard::Bundle::serialize_from(bundle),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood,
+            },
+        })
+    }
+
+    /// Updates the Ironwood bundle with information in the given closure.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn update_ironwood_with<F>(self, f: F) -> Result<Self, OrchardError>
+    where
+        F: FnOnce(Updater<'_>) -> Result<(), UpdaterError>,
+    {
+        let Pczt {
+            global,
+            transparent,
+            sapling,
+            orchard,
+            ironwood,
+        } = self.pczt;
+
+        let mut bundle = ironwood.into_parsed().map_err(OrchardError::Parser)?;
+
+        bundle.update_with(f).map_err(OrchardError::Updater)?;
+
+        Ok(Self {
+            pczt: Pczt {
+                global,
+                transparent,
+                sapling,
+                orchard,
+                ironwood: crate::orchard::Bundle::serialize_from(bundle),
             },
         })
     }

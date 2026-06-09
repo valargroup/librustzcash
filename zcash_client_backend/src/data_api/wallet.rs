@@ -1045,10 +1045,9 @@ impl MigrationTransaction {
 /// Orchard receiver. The `amount` argument is a minimum migration amount; the transaction migrates
 /// the full selected Orchard value minus fees so that no Orchard change output is created.
 ///
-/// The Ironwood output is not inserted as a received wallet note. Current wallet storage and
-/// scanning APIs do not maintain a separate Ironwood note commitment tree, so callers should track
-/// the returned transaction ID and migrated amount until first-class Ironwood wallet support is
-/// added.
+/// The Ironwood output is inserted as a wallet-internal received note using
+/// the wallet's existing Orchard note storage. It is distinguished from
+/// Orchard notes by its `V3` note version.
 #[allow(clippy::too_many_arguments)]
 #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
 pub fn create_orchard_to_ironwood_transaction<DbT, ParamsT, FeeRuleT>(
@@ -1232,7 +1231,29 @@ where
             fee_rule,
         )?;
         let txid = build_result.transaction().txid();
-        let outputs: &[SentTransactionOutput<<DbT as WalletRead>::AccountId>] = &[];
+        let output_index = build_result
+            .ironwood_meta()
+            .output_action_index(0)
+            .expect("migration transactions create one Ironwood output");
+        let ironwood_note = build_result
+            .transaction()
+            .ironwood_bundle()
+            .and_then(|bundle| {
+                bundle
+                    .decrypt_output_with_key(output_index, &orchard_fvk.to_ivk(Scope::Internal))
+                    .map(|(note, _, _)| Note::Orchard(note))
+            })
+            .expect("Wallet-internal Ironwood output must decrypt with the wallet's IVK");
+        let outputs = [SentTransactionOutput::from_parts(
+            output_index,
+            Recipient::InternalAccount {
+                receiving_account: account_id,
+                external_address: None,
+                note: Box::new(ironwood_note),
+            },
+            migrated_amount,
+            Some(memo),
+        )];
         #[cfg(feature = "transparent-inputs")]
         let utxos_spent = Vec::new();
         let sent_tx = SentTransaction::new(
