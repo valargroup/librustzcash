@@ -1475,6 +1475,8 @@ struct BuildState<'a, P, AccountId> {
     transparent_input_addresses: HashMap<TransparentAddress, TransparentAddressMetadata>,
     #[cfg(feature = "orchard")]
     orchard_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    ironwood_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
     sapling_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
     transparent_output_meta: Vec<(
         BuildRecipient<AccountId>,
@@ -1947,6 +1949,8 @@ where
 
     #[cfg(feature = "orchard")]
     let mut orchard_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let mut ironwood_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
     let mut sapling_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
     let mut transparent_output_meta: Vec<(
         BuildRecipient<_>,
@@ -2015,6 +2019,30 @@ where
                 Ok(())
             };
 
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let add_ironwood_output =
+            |builder: &mut Builder<_, _>,
+             ironwood_output_meta: &mut Vec<_>,
+             to: orchard::Address|
+             -> Result<(), CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>> {
+                let memo = payment.memo().map_or_else(MemoBytes::empty, |m| m.clone());
+                builder.add_ironwood_output(
+                    external_ovk.map(|k| k.into()),
+                    to,
+                    payment_amount,
+                    memo.clone(),
+                )?;
+                ironwood_output_meta.push((
+                    BuildRecipient::External {
+                        recipient_address: recipient_address.clone(),
+                        output_pool: PoolType::ORCHARD,
+                    },
+                    payment_amount,
+                    Some(memo),
+                ));
+                Ok(())
+            };
+
         let add_transparent_output =
             |builder: &mut Builder<_, _>,
              transparent_output_meta: &mut Vec<_>,
@@ -2048,6 +2076,16 @@ where
                 #[cfg(feature = "orchard")]
                 PoolType::Shielded(ShieldedProtocol::Orchard) => {
                     let to = *ua.orchard().expect("The mapping between payment pool and receiver is checked in step construction");
+                    #[cfg(zcash_unstable = "nu7")]
+                    if params.is_nu_active(
+                        consensus::NetworkUpgrade::Nu7,
+                        BlockHeight::from(min_target_height),
+                    ) {
+                        add_ironwood_output(&mut builder, &mut ironwood_output_meta, to)?;
+                    } else {
+                        add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
+                    }
+                    #[cfg(not(zcash_unstable = "nu7"))]
                     add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
                 }
                 PoolType::Shielded(ShieldedProtocol::Sapling) => {
@@ -2111,22 +2149,64 @@ where
 
                 #[cfg(feature = "orchard")]
                 {
-                    builder.add_orchard_output(
-                        internal_ovk.map(|k| k.into()),
-                        ufvk.orchard()
-                            .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
-                            .address_at(0u32, orchard::keys::Scope::Internal),
-                        change_value.value(),
-                        memo.clone(),
-                    )?;
-                    orchard_output_meta.push((
-                        BuildRecipient::InternalAccount {
-                            receiving_account: account_id,
-                            external_address: None,
-                        },
-                        change_value.value(),
-                        Some(memo),
-                    ))
+                    let change_address = ufvk
+                        .orchard()
+                        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
+                        .address_at(0u32, orchard::keys::Scope::Internal);
+
+                    #[cfg(zcash_unstable = "nu7")]
+                    if params.is_nu_active(
+                        consensus::NetworkUpgrade::Nu7,
+                        BlockHeight::from(min_target_height),
+                    ) {
+                        builder.add_ironwood_output(
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        ironwood_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    } else {
+                        builder.add_orchard_output(
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        orchard_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    }
+
+                    #[cfg(not(zcash_unstable = "nu7"))]
+                    {
+                        builder.add_orchard_output(
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        orchard_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    }
                 }
             }
             PoolType::Transparent => {
@@ -2183,6 +2263,8 @@ where
         transparent_input_addresses,
         #[cfg(feature = "orchard")]
         orchard_output_meta,
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        ironwood_output_meta,
         sapling_output_meta,
         transparent_output_meta,
         #[cfg(feature = "transparent-inputs")]
@@ -2313,6 +2395,43 @@ where
         },
     );
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let ironwood_outputs = {
+        let orchard_action_count = build_result
+            .transaction()
+            .orchard_bundle()
+            .map_or(0, |bundle| bundle.actions().len());
+
+        build_state
+            .ironwood_output_meta
+            .into_iter()
+            .enumerate()
+            .map(|(i, (recipient, value, memo))| {
+                let raw_output_index = build_result
+                    .ironwood_meta()
+                    .output_action_index(i)
+                    .expect("An action should exist in the transaction for each Ironwood output.");
+                let output_index = orchard_action_count + raw_output_index;
+
+                let recipient = recipient.into_recipient_with_note(|| {
+                    build_result
+                        .transaction()
+                        .ironwood_bundle()
+                        .and_then(|bundle| {
+                            bundle
+                                .decrypt_output_with_key(raw_output_index, &orchard_internal_ivk)
+                                .map(|(note, _, _)| Note::Orchard(note))
+                        })
+                        .expect(
+                            "Wallet-internal Ironwood outputs must be decryptable with the wallet's IVK",
+                        )
+                });
+
+                SentTransactionOutput::from_parts(output_index, recipient, value, memo)
+            })
+            .collect::<Vec<_>>()
+    };
+
     let sapling_dfvk = spending_keys
         .usk
         .sapling()
@@ -2382,6 +2501,8 @@ where
     let mut outputs: Vec<SentTransactionOutput<_>> = vec![];
     #[cfg(feature = "orchard")]
     outputs.extend(orchard_outputs);
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    outputs.extend(ironwood_outputs);
     outputs.extend(sapling_outputs);
     outputs.extend(transparent_outputs);
 

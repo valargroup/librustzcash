@@ -10,9 +10,11 @@ use std::{
 use transparent::bundle::TxOut;
 use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
+#[cfg(feature = "transparent-inputs")]
+use zcash_primitives::transaction::fees::transparent as transparent_fees;
 use zcash_primitives::transaction::fees::{
     FeeRule,
-    transparent::{self as transparent_fees, InputSize},
+    transparent::InputSize,
     zip317::{P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE},
 };
 use zcash_protocol::{
@@ -859,12 +861,26 @@ where
 
     #[cfg(feature = "orchard")]
     let orchard_action_count = {
-        let requested_orchard_actions: usize = if recipient.can_receive_as(PoolType::ORCHARD) {
+        let requested_orchard_output: usize = if recipient.can_receive_as(PoolType::ORCHARD) {
             payment_pools.insert(0, PoolType::ORCHARD);
             1
         } else {
             0
         };
+        #[cfg(zcash_unstable = "nu7")]
+        let orchard_outputs_are_ironwood = params.is_nu_active(
+            consensus::NetworkUpgrade::Nu7,
+            BlockHeight::from(target_height),
+        );
+        #[cfg(zcash_unstable = "nu7")]
+        let (requested_orchard_actions, requested_ironwood_actions) =
+            if orchard_outputs_are_ironwood {
+                (0, requested_orchard_output)
+            } else {
+                (requested_orchard_output, 0)
+            };
+        #[cfg(not(zcash_unstable = "nu7"))]
+        let requested_orchard_actions = requested_orchard_output;
 
         #[cfg(zcash_unstable = "nu7")]
         let ironwood_input_count = spendable_notes
@@ -883,7 +899,7 @@ where
         #[cfg(zcash_unstable = "nu7")]
         {
             let ironwood_actions = orchard::builder::BundleType::DEFAULT
-                .num_actions(ironwood_input_count, 0)
+                .num_actions(ironwood_input_count, requested_ironwood_actions)
                 .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
             orchard_actions + ironwood_actions
         }
