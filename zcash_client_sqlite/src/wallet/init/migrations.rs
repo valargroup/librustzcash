@@ -23,6 +23,7 @@ mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
+mod ironwood_pool_code_views;
 mod ironwood_shardtree;
 mod ivk_item_cache;
 mod nullifier_map;
@@ -239,6 +240,7 @@ pub(super) fn all_migrations<
         Box::new(ironwood_shardtree::Migration {
             params: params.clone(),
         }),
+        Box::new(ironwood_pool_code_views::Migration),
     ]
 }
 
@@ -380,9 +382,8 @@ pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    v_tx_outputs_key_scopes::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
-    ironwood_shardtree::MIGRATION_ID,
+    ironwood_pool_code_views::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(

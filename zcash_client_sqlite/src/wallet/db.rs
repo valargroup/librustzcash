@@ -993,7 +993,10 @@ UNION
     SELECT
         orchard_received_notes.id AS id_within_pool_table,
         orchard_received_notes.transaction_id,
-        3 AS pool,
+        CASE
+            WHEN orchard_received_notes.note_version = 3 THEN 4
+            ELSE 3
+        END AS pool,
         orchard_received_notes.action_index AS output_index,
         account_id,
         orchard_received_notes.value,
@@ -1004,7 +1007,12 @@ UNION
     FROM orchard_received_notes
     LEFT JOIN sent_notes
     ON (sent_notes.transaction_id, sent_notes.output_pool, sent_notes.output_index) =
-       (orchard_received_notes.transaction_id, 3, orchard_received_notes.action_index)
+       (orchard_received_notes.transaction_id,
+        CASE
+            WHEN orchard_received_notes.note_version = 3 THEN 4
+            ELSE 3
+        END,
+        orchard_received_notes.action_index)
 UNION
     SELECT
         u.id AS id_within_pool_table,
@@ -1033,7 +1041,10 @@ FROM sapling_received_note_spends s
 JOIN sapling_received_notes rn ON rn.id = s.sapling_received_note_id
 UNION
 SELECT
-    3 AS pool,
+    CASE
+        WHEN rn.note_version = 3 THEN 4
+        ELSE 3
+    END AS pool,
     s.orchard_received_note_id AS received_output_id,
     s.transaction_id,
     rn.account_id
@@ -1189,9 +1200,11 @@ GROUP BY notes.account_id, notes.transaction_id";
 ///   - 0: Transparent
 ///   - 2: Sapling
 ///   - 3: Orchard
+///   - 4: Ironwood
 /// - `output_index`: The index of the output within the transaction bundle associated with
 ///   the `output_pool` value; that is, within `vout` for transparent, the vector of
-///   Sapling `OutputDescription` values, or the vector of Orchard actions.
+///   Sapling `OutputDescription` values, the vector of Orchard actions, or the vector of
+///   Orchard-shaped actions including Ironwood V3 actions.
 /// - `tx_mined_height`: An optional value identifying the block height at which the transaction that
 ///   produced this output was mined, or NULL if the transaction is unmined.
 /// - `tx_trust_status`: A flag indicating whether the transaction that produced this output

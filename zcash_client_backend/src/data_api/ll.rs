@@ -471,6 +471,8 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
     /// - `recipient`: Information about the address or account that the output is being sent to.
     /// - `value`: The value of the output.
     /// - `memo`: The memo attached to the output, if any.
+    /// - `output_note`: The output note, if known. This is used by backends that need note-format
+    ///   metadata to classify Orchard-shaped outputs.
     fn put_sent_output(
         &mut self,
         from_account_uuid: Self::AccountId,
@@ -479,6 +481,7 @@ pub trait LowLevelWalletWrite: LowLevelWalletRead {
         recipient: &Recipient<Self::AccountId>,
         value: Zatoshis,
         memo: Option<&MemoBytes>,
+        output_note: Option<&crate::wallet::Note>,
     ) -> Result<(), Self::Error>;
 
     /// Updates the wallet's view of a transaction to indicate the miner's fee paid by the

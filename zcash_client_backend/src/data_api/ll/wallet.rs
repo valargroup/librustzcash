@@ -1074,7 +1074,7 @@ where
                     output_pool: Output::POOL_TYPE,
                 };
 
-                Some((output.account_id(), recipient, note.value()))
+                Some((output.account_id(), recipient, note.value(), Some(note)))
             }
             TransferType::AccountInternal => {
                 let spent_in = detect_note_spent_in(wallet_db, output)?;
@@ -1089,7 +1089,7 @@ where
                     note: Box::new(note),
                 };
 
-                Some((output.account_id(), recipient, value))
+                Some((output.account_id(), recipient, value, None))
             }
             TransferType::Incoming => {
                 let spent_in = detect_note_spent_in(wallet_db, output)?;
@@ -1114,7 +1114,7 @@ where
                         note: Box::new(note),
                     };
 
-                    Some((account_id, recipient, value))
+                    Some((account_id, recipient, value, None))
                 } else {
                     None
                 }
@@ -1124,7 +1124,7 @@ where
             ),
         };
 
-        if let Some((from_account_uuid, recipient, value)) = sent_output {
+        if let Some((from_account_uuid, recipient, value, output_note)) = sent_output {
             wallet_db.put_sent_output(
                 from_account_uuid,
                 tx_ref,
@@ -1132,6 +1132,7 @@ where
                 &recipient,
                 value,
                 output.memo(),
+                output_note.as_ref(),
             )?;
         }
     }
@@ -1233,6 +1234,7 @@ where
                 output.index(),
                 &recipient,
                 output.value(),
+                None,
                 None,
             )?;
         }

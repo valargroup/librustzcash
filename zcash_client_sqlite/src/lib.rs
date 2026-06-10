@@ -1011,14 +1011,20 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
         txid: &TxId,
         protocol: ShieldedProtocol,
     ) -> Result<Vec<NoteId>, <Self as WalletRead>::Error> {
-        use crate::wallet::encoding::pool_code;
+        use crate::wallet::encoding::{IRONWOOD_POOL_CODE, ORCHARD_POOL_CODE, pool_code};
 
         let mut stmt_sent_notes = self.conn.borrow().prepare(
             "SELECT output_index
              FROM sent_notes
              JOIN transactions ON transactions.id_tx = sent_notes.transaction_id
              WHERE transactions.txid = :txid
-             AND sent_notes.output_pool = :pool_code",
+             AND (
+                sent_notes.output_pool = :pool_code
+                OR (
+                    :pool_code = :orchard_pool_code
+                    AND sent_notes.output_pool = :ironwood_pool_code
+                )
+             )",
         )?;
 
         let note_ids = stmt_sent_notes
@@ -1026,6 +1032,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
                 named_params! {
                     ":txid": txid.as_ref(),
                     ":pool_code": pool_code(PoolType::Shielded(protocol)),
+                    ":orchard_pool_code": ORCHARD_POOL_CODE,
+                    ":ironwood_pool_code": IRONWOOD_POOL_CODE,
                 },
                 |row| Ok(NoteId::new(*txid, protocol, row.get(0)?)),
             )?
@@ -2105,6 +2113,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         recipient: &zcash_client_backend::wallet::Recipient<Self::AccountId>,
         value: zcash_protocol::value::Zatoshis,
         memo: Option<&zcash_protocol::memo::MemoBytes>,
+        output_note: Option<&zcash_client_backend::wallet::Note>,
     ) -> Result<(), Self::Error> {
         wallet::put_sent_output(
             self.conn.borrow(),
@@ -2115,6 +2124,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             recipient,
             value,
             memo,
+            output_note,
         )
     }
 

@@ -877,12 +877,17 @@ pub(crate) mod tests {
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN rn.note_version = 3 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN sn.id IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN sn.output_pool = 4 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN vto.output_pool = 4 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(rn.value), 0)
              FROM orchard_received_notes rn
              JOIN transactions t ON t.id_tx = rn.transaction_id
              LEFT JOIN sent_notes sn
                ON (sn.transaction_id, sn.output_pool, sn.output_index) =
-                  (rn.transaction_id, 3, rn.action_index)
+                  (rn.transaction_id, 4, rn.action_index)
+             JOIN v_tx_outputs vto
+               ON (vto.transaction_id, vto.output_pool, vto.output_index) =
+                  (rn.transaction_id, 4, rn.action_index)
              WHERE t.txid = :txid",
             rusqlite::named_params! { ":txid": sent_txid.as_ref() },
             |row| {
@@ -891,10 +896,12 @@ pub(crate) mod tests {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         );
-        assert_eq!(received_rows.unwrap(), (2, 2, 2, 70000));
+        assert_eq!(received_rows.unwrap(), (2, 2, 2, 2, 2, 70000));
 
         let send_max_proposal = st
             .propose_send_max_transfer(
@@ -1010,13 +1017,18 @@ pub(crate) mod tests {
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN rn.note_version = 3 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN sn.id IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN sn.output_pool = 4 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN vto.output_pool = 4 THEN 1 ELSE 0 END), 0),
                     COALESCE(MIN(rn.action_index), -1),
                     COALESCE(SUM(rn.value), 0)
              FROM orchard_received_notes rn
              JOIN transactions t ON t.id_tx = rn.transaction_id
              LEFT JOIN sent_notes sn
                ON (sn.transaction_id, sn.output_pool, sn.output_index) =
-                  (rn.transaction_id, 3, rn.action_index)
+                  (rn.transaction_id, 4, rn.action_index)
+             JOIN v_tx_outputs vto
+               ON (vto.transaction_id, vto.output_pool, vto.output_index) =
+                  (rn.transaction_id, 4, rn.action_index)
              WHERE t.txid = :txid",
             rusqlite::named_params! { ":txid": sent_txid.as_ref() },
             |row| {
@@ -1026,14 +1038,30 @@ pub(crate) mod tests {
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         );
-        let (received_count, v3_count, sent_count, min_action_index, value_sum) =
-            received_rows.unwrap();
+        let (
+            received_count,
+            v3_count,
+            sent_count,
+            sent_ironwood_count,
+            view_ironwood_count,
+            min_action_index,
+            value_sum,
+        ) = received_rows.unwrap();
         assert_eq!(
-            (received_count, v3_count, sent_count, value_sum),
-            (1, 1, 1, 80000)
+            (
+                received_count,
+                v3_count,
+                sent_count,
+                sent_ironwood_count,
+                view_ironwood_count,
+                value_sum
+            ),
+            (1, 1, 1, 1, 1, 80000)
         );
         let min_action_index = usize::try_from(min_action_index).unwrap();
         assert!(min_action_index >= orchard_action_count);
