@@ -124,6 +124,11 @@ pub enum Error<FE> {
     IronwoodBuilderNotAvailable,
     /// An error occurred in constructing a coinbase transaction.
     Coinbase(coinbase::Error),
+    /// A coinbase transaction's expiry height does not match its target block height.
+    CoinbaseExpiryHeightMismatch {
+        target_height: BlockHeight,
+        expiry_height: BlockHeight,
+    },
     /// The proposed transaction version or the consensus branch id for the target height does not
     /// support a feature required by the transaction under construction, or the proposed
     /// transaction version is not supported on the given consensus branch.
@@ -175,6 +180,13 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
             Error::Coinbase(err) => write!(
                 f,
                 "An error occurred in constructing a coinbase transaction: {err}"
+            ),
+            Error::CoinbaseExpiryHeightMismatch {
+                target_height,
+                expiry_height,
+            } => write!(
+                f,
+                "Coinbase transaction expiry height {expiry_height} does not match target block height {target_height}"
             ),
             Error::TargetIncompatible(branch_id, version, pool_type) => match pool_type {
                 None => write!(
@@ -426,6 +438,27 @@ impl<P, U> Builder<'_, P, U> {
         self.target_height
     }
 
+    /// Overrides the expiry height for the transaction under construction.
+    ///
+    /// For non-coinbase transactions, setting this to `BlockHeight::from(0)`
+    /// disables transaction expiry. Coinbase builders reject overridden expiry
+    /// heights that do not match the target block height.
+    pub fn with_expiry_height(mut self, expiry_height: BlockHeight) -> Self {
+        self.expiry_height = expiry_height;
+        self
+    }
+
+    fn check_coinbase_expiry_height<FE>(&self) -> Result<(), Error<FE>> {
+        if self.build_config.is_coinbase() && self.expiry_height != self.target_height {
+            Err(Error::CoinbaseExpiryHeightMismatch {
+                target_height: self.target_height,
+                expiry_height: self.expiry_height,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Returns the set of transparent inputs currently committed to be consumed
     /// by the transaction.
     #[cfg(feature = "transparent-inputs")]
@@ -536,8 +569,9 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
     ///
     /// # Default values
     ///
-    /// The expiry height will be set to the given height plus the default transaction
-    /// expiry delta (20 blocks).
+    /// For standard transactions, the expiry height will be set to the given
+    /// height plus the default transaction expiry delta (40 blocks). For
+    /// coinbase transactions, the expiry height will be set to the given height.
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
         // Determine the default transaction version for the consensus branch
         let consensus_branch_id = BranchId::for_height(&params, target_height);
@@ -1194,6 +1228,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         OP: OutputProver,
     {
         self.check_version_compatibility::<FE>(self.tx_version)?;
+        self.check_coinbase_expiry_height::<FE>()?;
 
         //
         // Consistency checks
@@ -1429,6 +1464,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         let pczt_tx_version = self.tx_version;
 
         self.check_version_compatibility::<FR::Error>(pczt_tx_version)?;
+        self.check_coinbase_expiry_height::<FR::Error>()?;
         #[cfg(zcash_unstable = "nu7")]
         debug_assert!(!self.ironwood_in_use() || pczt_tx_version.has_ironwood());
 
@@ -1621,21 +1657,27 @@ mod testing {
 
 #[cfg(test)]
 mod tests {
+    use {
+        super::{BuildConfig, Builder},
+        core::convert::Infallible,
+        rand_core::OsRng,
+        zcash_protocol::{
+            consensus::{BlockHeight, NetworkUpgrade, Parameters, TEST_NETWORK},
+            value::Zatoshis,
+        },
+    };
+
     #[cfg(feature = "circuits")]
     use {
-        super::{Builder, Error},
-        crate::transaction::builder::BuildConfig,
+        super::Error,
         ::sapling::{Node, Rseed, zip32::ExtendedSpendingKey},
         ::transparent::{address::TransparentAddress, builder::TransparentSigningSet},
         assert_matches::assert_matches,
-        core::convert::Infallible,
         ff::Field,
         incrementalmerkletree::{frontier::CommitmentTree, witness::IncrementalWitness},
-        rand_core::OsRng,
         zcash_protocol::{
-            consensus::{NetworkUpgrade, Parameters, TEST_NETWORK},
             memo::MemoBytes,
-            value::{BalanceError, ZatBalance, Zatoshis},
+            value::{BalanceError, ZatBalance},
         },
     };
 
@@ -1650,6 +1692,28 @@ mod tests {
         zcash_protocol::consensus::BranchId,
         zip32::AccountId,
     };
+
+    #[derive(Clone, Copy, Debug)]
+    struct ZeroFeeRule;
+
+    impl crate::transaction::fees::FeeRule for ZeroFeeRule {
+        type Error = Infallible;
+
+        fn fee_required<P: Parameters>(
+            &self,
+            _params: &P,
+            _target_height: BlockHeight,
+            _transparent_input_sizes: impl IntoIterator<
+                Item = crate::transaction::fees::transparent::InputSize,
+            >,
+            _transparent_output_sizes: impl IntoIterator<Item = usize>,
+            _sapling_input_count: usize,
+            _sapling_output_count: usize,
+            _orchard_action_count: usize,
+        ) -> Result<Zatoshis, Self::Error> {
+            Ok(Zatoshis::ZERO)
+        }
+    }
 
     #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
     #[derive(Clone, Copy, Debug)]
@@ -1796,6 +1860,99 @@ mod tests {
             .mock_build(&TransparentSigningSet::new(), &[extsk], &[], OsRng)
             .unwrap();
         assert!(res.transaction().sapling_bundle().is_some());
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", feature = "transparent-inputs"))]
+    fn build_uses_overridden_expiry_height() {
+        use ::transparent::keys::NonHardenedChildIndex;
+
+        let tx_height = TEST_NETWORK
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap();
+        let build_config = BuildConfig::Standard {
+            sapling_anchor: None,
+            orchard_anchor: None,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_anchor: None,
+        };
+        let mut builder =
+            Builder::new(TEST_NETWORK, tx_height, build_config).with_expiry_height(0u32.into());
+
+        let mut transparent_signing_set = TransparentSigningSet::new();
+        let tsk = AccountPrivKey::from_seed(&TEST_NETWORK, &[0u8; 32], AccountId::ZERO).unwrap();
+        let sk = tsk
+            .derive_external_secret_key(NonHardenedChildIndex::ZERO)
+            .unwrap();
+        let pubkey = transparent_signing_set.add_key(sk);
+        let prev_coin = TxOut::new(
+            Zatoshis::const_from_u64(50_000),
+            tsk.to_account_pubkey()
+                .derive_external_ivk()
+                .unwrap()
+                .derive_address(NonHardenedChildIndex::ZERO)
+                .unwrap()
+                .script()
+                .into(),
+        );
+        builder
+            .add_transparent_p2pkh_input(pubkey, OutPoint::fake(), prev_coin)
+            .unwrap();
+        builder
+            .add_transparent_output(
+                &TransparentAddress::PublicKeyHash([0; 20]),
+                Zatoshis::const_from_u64(40_000),
+            )
+            .unwrap();
+
+        let res = builder
+            .mock_build(&transparent_signing_set, &[], &[], OsRng)
+            .unwrap();
+        assert_eq!(res.transaction().expiry_height(), 0u32.into());
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn build_rejects_mismatched_coinbase_expiry_height() {
+        let tx_height = TEST_NETWORK
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap();
+        let build_config = BuildConfig::Coinbase { miner_data: None };
+        let mut builder =
+            Builder::new(TEST_NETWORK, tx_height, build_config).with_expiry_height(0u32.into());
+
+        builder
+            .add_transparent_output(
+                &TransparentAddress::PublicKeyHash([0; 20]),
+                Zatoshis::const_from_u64(50_000),
+            )
+            .unwrap();
+
+        assert_matches!(
+            builder.mock_build(&TransparentSigningSet::new(), &[], &[], OsRng),
+            Err(Error::CoinbaseExpiryHeightMismatch {
+                target_height,
+                expiry_height,
+            }) if target_height == tx_height && expiry_height == 0u32.into()
+        );
+    }
+
+    #[test]
+    fn build_for_pczt_uses_overridden_expiry_height() {
+        let tx_height = TEST_NETWORK
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap();
+        let build_config = BuildConfig::Standard {
+            sapling_anchor: None,
+            orchard_anchor: None,
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood_anchor: None,
+        };
+        let builder =
+            Builder::new(TEST_NETWORK, tx_height, build_config).with_expiry_height(0u32.into());
+
+        let res = builder.build_for_pczt(OsRng, &ZeroFeeRule).unwrap();
+        assert_eq!(res.pczt_parts.expiry_height, 0u32.into());
     }
 
     #[test]

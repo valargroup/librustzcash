@@ -19,6 +19,10 @@ workspace.
     anchor for the separate Ironwood note commitment tree.
   - `Builder::add_ironwood_spend` and `Builder::add_ironwood_output`, which
     build Ironwood actions using the QR/Ironwood note plaintext format.
+  - `Builder::with_expiry_height`, enabling callers to override the default
+    transaction expiry height when constructing transactions or PCZTs.
+  - `Error::CoinbaseExpiryHeightMismatch`, returned when a coinbase builder's
+    expiry height does not match its target block height.
   - `BuildResult::ironwood_meta`, which exposes the randomized action
     positions for Ironwood bundles.
   - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
