@@ -28,7 +28,7 @@ use crate::{
     wallet::{Recipient, WalletTransparentOutput},
 };
 
-use super::{LowLevelWalletRead, LowLevelWalletWrite, TxMeta};
+use super::{LowLevelWalletRead, LowLevelWalletWrite, SentOutput, TxMeta};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -1128,11 +1128,13 @@ where
             wallet_db.put_sent_output(
                 from_account_uuid,
                 tx_ref,
-                output.index(),
-                &recipient,
-                value,
-                output.memo(),
-                output_note.as_ref(),
+                SentOutput {
+                    output_index: output.index(),
+                    recipient: &recipient,
+                    value,
+                    memo: output.memo(),
+                    note: output_note.as_ref(),
+                },
             )?;
         }
     }
@@ -1231,11 +1233,13 @@ where
             wallet_db.put_sent_output(
                 from_account,
                 tx_ref,
-                output.index(),
-                &recipient,
-                output.value(),
-                None,
-                None,
+                SentOutput {
+                    output_index: output.index(),
+                    recipient: &recipient,
+                    value: output.value(),
+                    memo: None,
+                    note: None,
+                },
             )?;
         }
     }

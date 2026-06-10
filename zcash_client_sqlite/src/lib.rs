@@ -64,7 +64,7 @@ use zcash_client_backend::{
         chain::{BlockSource, ChainState, CommitmentTreeRoot},
         error::{FindAccountForAddressError, RewindError},
         ll::{
-            self, LowLevelWalletRead, LowLevelWalletWrite, ReceivedSaplingOutput,
+            self, LowLevelWalletRead, LowLevelWalletWrite, ReceivedSaplingOutput, SentOutput,
             wallet::store_decrypted_tx,
         },
         scanning::{ScanPriority, ScanRange},
@@ -2109,22 +2109,18 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         &mut self,
         from_account_uuid: Self::AccountId,
         tx_ref: Self::TxRef,
-        output_index: usize,
-        recipient: &zcash_client_backend::wallet::Recipient<Self::AccountId>,
-        value: zcash_protocol::value::Zatoshis,
-        memo: Option<&zcash_protocol::memo::MemoBytes>,
-        output_note: Option<&zcash_client_backend::wallet::Note>,
+        output: SentOutput<'_, Self::AccountId>,
     ) -> Result<(), Self::Error> {
         wallet::put_sent_output(
             self.conn.borrow(),
             &self.params,
             from_account_uuid,
             tx_ref,
-            output_index,
-            recipient,
-            value,
-            memo,
-            output_note,
+            output.output_index,
+            output.recipient,
+            output.value,
+            output.memo,
+            output.note,
         )
     }
 
