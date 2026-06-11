@@ -203,16 +203,17 @@ fn witness_repair_note_version_clause(protocol: ShieldedProtocol) -> &'static st
     spendable_note_version_clause(protocol)
 }
 
-/// Retrieves the set of nullifiers for "potentially spendable" notes that the wallet is tracking.
+/// Retrieves the set of nullifiers for notes that the wallet is tracking and that have not been
+/// confirmed spent.
 ///
-/// "Potentially spendable" means:
+/// "Not confirmed spent" means:
 /// - The transaction in which the note was created has been observed as mined.
 /// - No transaction in which the note's nullifier appears has been observed as mined.
 ///
 /// This may over-select nullifiers and return those that have been spent in un-mined transactions
-/// that have not yet expired, or for which the expiry height is unknown. This is fine because
-/// these nullifiers are primarily used to detect the spends of our own notes in scanning; if we
-/// select a few too many nullifiers, it's not a big deal.
+/// regardless of whether they will expire. This is fine because these nullifiers are primarily
+/// used to detect the spends of our own notes in scanning; if we select a few too many nullifiers,
+/// it's not a big deal.
 pub(crate) fn get_nullifiers<N, F: Fn(&[u8]) -> Result<N, SqliteClientError>>(
     conn: &Connection,
     protocol: ShieldedProtocol,
@@ -225,7 +226,7 @@ pub(crate) fn get_nullifiers<N, F: Fn(&[u8]) -> Result<N, SqliteClientError>>(
     let mut stmt_fetch_nullifiers = match query {
         NullifierQuery::Unspent => conn.prepare(&format!(
             // See the method documentation for why this does not use `spent_notes_clause`.
-            // We prefer to be more restrictive in determining whether a note is spent here.
+            // Scan nullifiers should only exclude notes whose spend has been confirmed mined.
             "SELECT a.uuid, rn.nf
                  FROM {table_prefix}_received_notes rn
                  JOIN accounts a ON a.id = rn.account_id
@@ -237,7 +238,6 @@ pub(crate) fn get_nullifiers<N, F: Fn(&[u8]) -> Result<N, SqliteClientError>>(
                    FROM {table_prefix}_received_note_spends rns
                    JOIN transactions stx ON stx.id_tx = rns.transaction_id
                    WHERE stx.mined_height IS NOT NULL  -- the spending tx is mined
-                   OR stx.expiry_height = 0 -- the spending tx will not expire
                  )"
         )),
         NullifierQuery::All => conn.prepare(&format!(

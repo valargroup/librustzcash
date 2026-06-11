@@ -17,6 +17,8 @@ workspace.
 ### Fixed
 - V6 transaction reconstruction now preserves Ironwood bundles when deriving the
   consensus branch from the serialized expiry height.
+- Scanning now recovers internal change from wallet-created shielded spends
+  whose stored transaction has no expiry height.
 
 ## [0.21.0] - 2026-06-02
 
