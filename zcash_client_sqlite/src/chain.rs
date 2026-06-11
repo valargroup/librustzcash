@@ -501,6 +501,21 @@ mod tests {
     }
 
     #[test]
+    fn scan_cached_blocks_recovers_internal_change_for_unmined_non_expiring_sapling_spend() {
+        testing::pool::scan_cached_blocks_recovers_internal_change_for_unmined_non_expiring_spend::<
+            SaplingPoolTester,
+        >()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_cached_blocks_recovers_internal_change_for_unmined_non_expiring_orchard_spend() {
+        testing::pool::scan_cached_blocks_recovers_internal_change_for_unmined_non_expiring_spend::<
+            OrchardPoolTester,
+        >()
+    }
+
+    #[test]
     fn scan_cached_blocks_detects_spends_out_of_order_sapling() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<SaplingPoolTester>()
     }
