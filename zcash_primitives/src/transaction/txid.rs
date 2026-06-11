@@ -61,6 +61,8 @@ const ZCASH_SAPLING_OUTPUTS_MEMOS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdSOutM
 const ZCASH_SAPLING_OUTPUTS_NONCOMPACT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdSOutN__Hash";
 
 const ZCASH_ORCHARD_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrchardHash";
+#[cfg(zcash_unstable = "nu7")]
+const ZCASH_ORCHARD_V6_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrchV6_Hash";
 const ZCASH_ORCHARD_ACTIONS_COMPACT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrcActCHash";
 const ZCASH_ORCHARD_ACTIONS_MEMOS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrcActMHash";
 const ZCASH_ORCHARD_ACTIONS_NONCOMPACT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrcActNHash";
@@ -76,6 +78,8 @@ const ZCASH_AUTH_PERSONALIZATION_PREFIX: &[u8; 12] = b"ZTxAuthHash_";
 const ZCASH_TRANSPARENT_SCRIPTS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthTransHash";
 const ZCASH_SAPLING_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthSapliHash";
 const ZCASH_ORCHARD_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthOrchaHash";
+#[cfg(zcash_unstable = "nu7")]
+const ZCASH_ORCHARD_V6_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthOrcV6Hash";
 #[cfg(zcash_unstable = "nu7")]
 const ZCASH_IRONWOOD_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthIrnwdHash";
 #[cfg(zcash_unstable = "zfuture")]
@@ -99,6 +103,16 @@ const ORCHARD_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
     };
 
 #[cfg(zcash_unstable = "nu7")]
+const ORCHARD_V6_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
+    OrchardStyleBundlePersonalization {
+        txid_bundle: ZCASH_ORCHARD_V6_HASH_PERSONALIZATION,
+        txid_actions_compact: ZCASH_ORCHARD_ACTIONS_COMPACT_HASH_PERSONALIZATION,
+        txid_actions_memos: ZCASH_ORCHARD_ACTIONS_MEMOS_HASH_PERSONALIZATION,
+        txid_actions_noncompact: ZCASH_ORCHARD_ACTIONS_NONCOMPACT_HASH_PERSONALIZATION,
+        auth: ZCASH_ORCHARD_V6_SIGS_HASH_PERSONALIZATION,
+    };
+
+#[cfg(zcash_unstable = "nu7")]
 const IRONWOOD_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
     OrchardStyleBundlePersonalization {
         txid_bundle: ZCASH_IRONWOOD_HASH_PERSONALIZATION,
@@ -107,6 +121,52 @@ const IRONWOOD_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
         txid_actions_noncompact: ZCASH_IRONWOOD_ACTIONS_NONCOMPACT_HASH_PERSONALIZATION,
         auth: ZCASH_IRONWOOD_SIGS_HASH_PERSONALIZATION,
     };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BundleAnchorCommitment {
+    Include,
+    Omit,
+}
+
+fn orchard_txid_personalization(version: TxVersion) -> &'static OrchardStyleBundlePersonalization {
+    #[cfg(zcash_unstable = "nu7")]
+    if matches!(version, TxVersion::V6) {
+        return &ORCHARD_V6_BUNDLE_PERSONALIZATION;
+    }
+
+    let _ = version;
+    &ORCHARD_BUNDLE_PERSONALIZATION
+}
+
+fn orchard_txid_anchor_commitment(version: TxVersion) -> BundleAnchorCommitment {
+    #[cfg(zcash_unstable = "nu7")]
+    if matches!(version, TxVersion::V6) {
+        return BundleAnchorCommitment::Omit;
+    }
+
+    let _ = version;
+    BundleAnchorCommitment::Include
+}
+
+fn orchard_auth_personalization(version: TxVersion) -> &'static OrchardStyleBundlePersonalization {
+    #[cfg(zcash_unstable = "nu7")]
+    if matches!(version, TxVersion::V6) {
+        return &ORCHARD_V6_BUNDLE_PERSONALIZATION;
+    }
+
+    let _ = version;
+    &ORCHARD_BUNDLE_PERSONALIZATION
+}
+
+fn orchard_auth_anchor_commitment(version: TxVersion) -> BundleAnchorCommitment {
+    #[cfg(zcash_unstable = "nu7")]
+    if matches!(version, TxVersion::V6) {
+        return BundleAnchorCommitment::Include;
+    }
+
+    let _ = version;
+    BundleAnchorCommitment::Omit
+}
 
 fn hasher(personal: &[u8; 16]) -> StateWrite {
     StateWrite(Params::new().hash_length(32).personal(personal).to_state())
@@ -326,6 +386,7 @@ fn hash_sapling_txid_empty() -> Blake2bHash {
 fn hash_orchard_style_bundle_txid_data<A: orchard::Authorization>(
     bundle: &orchard::Bundle<A, ZatBalance>,
     personal: &OrchardStyleBundlePersonalization,
+    anchor_commitment: BundleAnchorCommitment,
 ) -> Blake2bHash {
     let mut h = hasher(personal.txid_bundle);
     let mut ch = hasher(personal.txid_actions_compact);
@@ -356,7 +417,9 @@ fn hash_orchard_style_bundle_txid_data<A: orchard::Authorization>(
     h.write_all(&[bundle.flags().to_byte()]).unwrap();
     h.write_all(&bundle.value_balance().to_i64_le_bytes())
         .unwrap();
-    h.write_all(&bundle.anchor().to_bytes()).unwrap();
+    if anchor_commitment == BundleAnchorCommitment::Include {
+        h.write_all(&bundle.anchor().to_bytes()).unwrap();
+    }
     h.finalize()
 }
 
@@ -369,8 +432,14 @@ fn hash_orchard_style_bundle_txid_empty(
 fn hash_orchard_style_auth_data(
     bundle: &orchard::Bundle<orchard::Authorized, ZatBalance>,
     personal: &OrchardStyleBundlePersonalization,
+    anchor_commitment: BundleAnchorCommitment,
 ) -> Blake2bHash {
     let mut h = hasher(personal.auth);
+    if anchor_commitment == BundleAnchorCommitment::Include {
+        // V6 moves the anchor out of the txid/sighash digest and into
+        // the authorizing-data digest before proof and signature data.
+        h.write_all(&bundle.anchor().to_bytes()).unwrap();
+    }
     h.write_all(bundle.authorization().proof().as_ref())
         .unwrap();
     for action in bundle.actions().iter() {
@@ -457,19 +526,31 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
 
     fn digest_orchard(
         &self,
+        version: TxVersion,
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest {
-        orchard_bundle
-            .map(|b| hash_orchard_style_bundle_txid_data(b, &ORCHARD_BUNDLE_PERSONALIZATION))
+        orchard_bundle.map(|b| {
+            hash_orchard_style_bundle_txid_data(
+                b,
+                orchard_txid_personalization(version),
+                orchard_txid_anchor_commitment(version),
+            )
+        })
     }
 
     #[cfg(zcash_unstable = "nu7")]
     fn digest_ironwood(
         &self,
+        _version: TxVersion,
         ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::IronwoodDigest {
-        ironwood_bundle
-            .map(|b| hash_orchard_style_bundle_txid_data(b, &IRONWOOD_BUNDLE_PERSONALIZATION))
+        ironwood_bundle.map(|b| {
+            hash_orchard_style_bundle_txid_data(
+                b,
+                &IRONWOOD_BUNDLE_PERSONALIZATION,
+                BundleAnchorCommitment::Omit,
+            )
+        })
     }
 
     #[cfg(zcash_unstable = "zfuture")]
@@ -568,7 +649,7 @@ pub(crate) fn to_hash_v6(
     h.write_all(
         orchard_digest
             .unwrap_or_else(|| {
-                hash_orchard_style_bundle_txid_empty(&ORCHARD_BUNDLE_PERSONALIZATION)
+                hash_orchard_style_bundle_txid_empty(&ORCHARD_V6_BUNDLE_PERSONALIZATION)
             })
             .as_bytes(),
     )
@@ -700,22 +781,36 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
 
     fn digest_orchard(
         &self,
+        version: TxVersion,
         orchard_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::OrchardDigest {
         orchard_bundle.map_or_else(
-            || hash_orchard_style_auth_empty(&ORCHARD_BUNDLE_PERSONALIZATION),
-            |b| hash_orchard_style_auth_data(b, &ORCHARD_BUNDLE_PERSONALIZATION),
+            || hash_orchard_style_auth_empty(orchard_auth_personalization(version)),
+            |b| {
+                hash_orchard_style_auth_data(
+                    b,
+                    orchard_auth_personalization(version),
+                    orchard_auth_anchor_commitment(version),
+                )
+            },
         )
     }
 
     #[cfg(zcash_unstable = "nu7")]
     fn digest_ironwood(
         &self,
+        _version: TxVersion,
         ironwood_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::IronwoodDigest {
         ironwood_bundle.map_or_else(
             || hash_orchard_style_auth_empty(&IRONWOOD_BUNDLE_PERSONALIZATION),
-            |b| hash_orchard_style_auth_data(b, &IRONWOOD_BUNDLE_PERSONALIZATION),
+            |b| {
+                hash_orchard_style_auth_data(
+                    b,
+                    &IRONWOOD_BUNDLE_PERSONALIZATION,
+                    BundleAnchorCommitment::Include,
+                )
+            },
         )
     }
 

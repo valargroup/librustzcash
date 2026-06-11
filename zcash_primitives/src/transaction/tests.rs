@@ -18,7 +18,13 @@ use {
 };
 
 #[cfg(all(test, zcash_unstable = "nu7"))]
+use crate::transaction::sighash_v6::v6_signature_hash;
+
+#[cfg(all(test, zcash_unstable = "nu7"))]
 use blake2b_simd::Params;
+
+#[cfg(all(test, zcash_unstable = "nu7"))]
+use zcash_protocol::value::ZatBalance;
 
 #[cfg(all(test, zcash_unstable = "zfuture"))]
 use super::components::tze;
@@ -147,6 +153,244 @@ fn v6_branch_reconstruction_preserves_ironwood_bundle() {
 
     assert!(rebuilt.ironwood_bundle().is_some());
     assert_eq!(rebuilt.txid(), original_txid);
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn test_anchor(byte: u8) -> orchard::Anchor {
+    let mut bytes = [0u8; 32];
+    bytes[0] = byte;
+    orchard::Anchor::from_bytes(bytes).unwrap()
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn test_orchard_bundle(
+    runner: &mut proptest::test_runner::TestRunner,
+) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
+    use proptest::strategy::ValueTree;
+
+    crate::transaction::components::orchard::testing::arb_bundle(1)
+        .new_tree(runner)
+        .unwrap()
+        .current()
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn bundle_with_anchor(
+    bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+    anchor: orchard::Anchor,
+) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
+    orchard::Bundle::try_from_parts(
+        bundle.actions().clone(),
+        *bundle.flags(),
+        *bundle.value_balance(),
+        anchor,
+        bundle.authorization().clone(),
+        orchard::bundle::ProofSizeEnforcement::Strict,
+    )
+    .unwrap()
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn tx_bytes(tx: &Transaction) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    tx.write(&mut encoded).unwrap();
+    encoded
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v5_tx_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> Transaction {
+    TransactionData::<crate::transaction::Authorized>::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(orchard_bundle),
+    )
+    .freeze()
+    .unwrap()
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v5_tx_data_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> TransactionData<TestUnauthorized> {
+    TransactionData::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(orchard_bundle),
+    )
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v6_tx_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> Transaction {
+    TransactionData::<crate::transaction::Authorized>::from_parts_v6(
+        BranchId::Nu7,
+        0,
+        1u32.into(),
+        None,
+        None,
+        Some(orchard_bundle),
+        None,
+    )
+    .freeze()
+    .unwrap()
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v6_tx_data_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> TransactionData<TestUnauthorized> {
+    TransactionData::from_parts_v6(
+        BranchId::Nu7,
+        0,
+        1u32.into(),
+        None,
+        None,
+        Some(orchard_bundle),
+        None,
+    )
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v6_tx_with_ironwood_bundle(
+    ironwood_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> Transaction {
+    TransactionData::<crate::transaction::Authorized>::from_parts_v6(
+        BranchId::Nu7,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(ironwood_bundle),
+    )
+    .freeze()
+    .unwrap()
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v6_tx_data_with_ironwood_bundle(
+    ironwood_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> TransactionData<TestUnauthorized> {
+    TransactionData::from_parts_v6(
+        BranchId::Nu7,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(ironwood_bundle),
+    )
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v5_shielded_sighash(tx_data: &TransactionData<TestUnauthorized>) -> Blake2bHash {
+    let txid_parts = tx_data.digest(TxIdDigester);
+    v5_signature_hash(tx_data, &SignableInput::Shielded, &txid_parts)
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn v6_shielded_sighash(tx_data: &TransactionData<TestUnauthorized>) -> Blake2bHash {
+    let txid_parts = tx_data.digest(TxIdDigester);
+    v6_signature_hash(tx_data, &SignableInput::Shielded, &txid_parts)
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn v6_orchard_anchor_changes_auth_commitment_not_txid_or_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let bundle = test_orchard_bundle(&mut runner);
+
+    let bundle_a = bundle_with_anchor(&bundle, test_anchor(1));
+    let bundle_b = bundle_with_anchor(&bundle, test_anchor(2));
+    let tx_data_a = v6_tx_data_with_orchard_bundle(bundle_a.clone());
+    let tx_data_b = v6_tx_data_with_orchard_bundle(bundle_b.clone());
+    let tx_a = v6_tx_with_orchard_bundle(bundle_a);
+    let tx_b = v6_tx_with_orchard_bundle(bundle_b);
+
+    assert_ne!(tx_bytes(&tx_a), tx_bytes(&tx_b));
+    assert_eq!(tx_a.txid(), tx_b.txid());
+    assert_eq!(
+        v6_shielded_sighash(&tx_data_a),
+        v6_shielded_sighash(&tx_data_b)
+    );
+    assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn v6_ironwood_anchor_changes_auth_commitment_not_txid_or_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let bundle = test_orchard_bundle(&mut runner);
+
+    let bundle_a = bundle_with_anchor(&bundle, test_anchor(1));
+    let bundle_b = bundle_with_anchor(&bundle, test_anchor(2));
+    let tx_data_a = v6_tx_data_with_ironwood_bundle(bundle_a.clone());
+    let tx_data_b = v6_tx_data_with_ironwood_bundle(bundle_b.clone());
+    let tx_a = v6_tx_with_ironwood_bundle(bundle_a);
+    let tx_b = v6_tx_with_ironwood_bundle(bundle_b);
+
+    assert_ne!(tx_bytes(&tx_a), tx_bytes(&tx_b));
+    assert_eq!(tx_a.txid(), tx_b.txid());
+    assert_eq!(
+        v6_shielded_sighash(&tx_data_a),
+        v6_shielded_sighash(&tx_data_b)
+    );
+    assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn v5_orchard_anchor_still_changes_txid_and_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let bundle = test_orchard_bundle(&mut runner);
+
+    let bundle_a = bundle_with_anchor(&bundle, test_anchor(1));
+    let bundle_b = bundle_with_anchor(&bundle, test_anchor(2));
+    let tx_data_a = v5_tx_data_with_orchard_bundle(bundle_a.clone());
+    let tx_data_b = v5_tx_data_with_orchard_bundle(bundle_b.clone());
+    let tx_a = v5_tx_with_orchard_bundle(bundle_a);
+    let tx_b = v5_tx_with_orchard_bundle(bundle_b);
+
+    assert_ne!(tx_a.txid(), tx_b.txid());
+    assert_ne!(
+        v5_shielded_sighash(&tx_data_a),
+        v5_shielded_sighash(&tx_data_b)
+    );
+    assert_eq!(tx_a.auth_commitment(), tx_b.auth_commitment());
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn v6_orchard_non_anchor_bundle_data_still_changes_txid_and_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let anchor = test_anchor(1);
+
+    let bundle_a = bundle_with_anchor(&test_orchard_bundle(&mut runner), anchor);
+    let bundle_b = bundle_with_anchor(&test_orchard_bundle(&mut runner), anchor);
+    let tx_data_a = v6_tx_data_with_orchard_bundle(bundle_a.clone());
+    let tx_data_b = v6_tx_data_with_orchard_bundle(bundle_b.clone());
+    let tx_a = v6_tx_with_orchard_bundle(bundle_a);
+    let tx_b = v6_tx_with_orchard_bundle(bundle_b);
+
+    assert_ne!(tx_a.txid(), tx_b.txid());
+    assert_ne!(
+        v6_shielded_sighash(&tx_data_a),
+        v6_shielded_sighash(&tx_data_b)
+    );
+    assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
 #[cfg(test)]

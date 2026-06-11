@@ -616,9 +616,9 @@ impl<A: Authorization> TransactionData<A> {
             ),
             digester.digest_transparent(self.transparent_bundle.as_ref()),
             digester.digest_sapling(self.sapling_bundle.as_ref()),
-            digester.digest_orchard(self.orchard_bundle.as_ref()),
+            digester.digest_orchard(self.version, self.orchard_bundle.as_ref()),
             #[cfg(zcash_unstable = "nu7")]
-            digester.digest_ironwood(self.ironwood_bundle.as_ref()),
+            digester.digest_ironwood(self.version, self.ironwood_bundle.as_ref()),
             #[cfg(zcash_unstable = "zfuture")]
             digester.digest_tze(self.tze_bundle.as_ref()),
         )
@@ -1327,12 +1327,14 @@ pub trait TransactionDigest<A: Authorization> {
 
     fn digest_orchard(
         &self,
+        version: TxVersion,
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest;
 
     #[cfg(zcash_unstable = "nu7")]
     fn digest_ironwood(
         &self,
+        version: TxVersion,
         ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::IronwoodDigest;
 
