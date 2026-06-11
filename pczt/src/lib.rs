@@ -586,12 +586,212 @@ pub enum ParseError {
 mod tests {
     use alloc::collections::BTreeMap;
 
+    #[cfg(zcash_unstable = "nu7")]
+    use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
     use zcash_protocol::{
         consensus::BranchId,
         constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID},
     };
 
     use super::*;
+
+    #[cfg(feature = "orchard")]
+    fn pczt_with_one_orchard_action() -> Pczt {
+        Pczt {
+            global: common::Global {
+                tx_version: V5_TX_VERSION,
+                version_group_id: V5_VERSION_GROUP_ID,
+                consensus_branch_id: u32::from(BranchId::Nu5),
+                fallback_lock_time: None,
+                expiry_height: 0,
+                coin_type: 1,
+                tx_modifiable: 0,
+                proprietary: BTreeMap::new(),
+            },
+            transparent: transparent::Bundle {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            sapling: sapling::Bundle {
+                spends: vec![],
+                outputs: vec![],
+                value_sum: 0,
+                anchor: [0; 32],
+                bsk: None,
+            },
+            orchard: orchard::Bundle {
+                actions: vec![orchard::Action {
+                    cv_net: [1; 32],
+                    spend: orchard::Spend {
+                        nullifier: [2; 32],
+                        rk: [3; 32],
+                        spend_auth_sig: None,
+                        recipient: None,
+                        value: Some(1000),
+                        rho: Some([4; 32]),
+                        rseed: Some([5; 32]),
+                        note_version: orchard::NotePlaintextVersion::V2,
+                        fvk: None,
+                        witness: None,
+                        alpha: None,
+                        zip32_derivation: None,
+                        dummy_sk: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    output: orchard::Output {
+                        cmx: [6; 32],
+                        note_version: orchard::NotePlaintextVersion::V2,
+                        ephemeral_key: [7; 32],
+                        enc_ciphertext: vec![8; 580],
+                        out_ciphertext: vec![9; 80],
+                        recipient: None,
+                        value: Some(1000),
+                        rseed: Some([10; 32]),
+                        ock: None,
+                        zip32_derivation: None,
+                        user_address: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    rcv: None,
+                }],
+                flags: 0,
+                value_sum: (0, false),
+                anchor: [0; 32],
+                zkproof: None,
+                bsk: None,
+            },
+            #[cfg(zcash_unstable = "nu7")]
+            ironwood: empty_ironwood_bundle(),
+        }
+    }
+
+    #[cfg(feature = "orchard")]
+    fn orchard_witness(action_index: usize, position: u32) -> roles::updater::OrchardSpendWitness {
+        roles::updater::OrchardSpendWitness::parse(action_index, position, [[0; 32]; 32]).unwrap()
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn pczt_with_one_v6_orchard_action() -> Pczt {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.global.tx_version = V6_TX_VERSION;
+        pczt.global.version_group_id = V6_VERSION_GROUP_ID;
+        pczt.global.consensus_branch_id = u32::from(BranchId::Nu7);
+        pczt
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn valid_anchor(byte: u8) -> ::orchard::Anchor {
+        let mut bytes = [0; 32];
+        bytes[0] = byte;
+        ::orchard::Anchor::from_bytes(bytes).into_option().unwrap()
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn updater_sets_orchard_witness() {
+        use roles::updater::Updater;
+
+        let updated = Updater::new(pczt_with_one_orchard_action())
+            .set_orchard_spend_witnesses([orchard_witness(0, 7)])
+            .unwrap()
+            .finish();
+
+        assert_eq!(
+            updated.orchard().actions()[0].spend().witness,
+            Some((7, [[0; 32]; 32]))
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn updater_rejects_missing_orchard_witness_action() {
+        use roles::updater::{OrchardSpendWitnessError, Updater};
+
+        let result = Updater::new(pczt_with_one_orchard_action())
+            .set_orchard_spend_witnesses([orchard_witness(1, 7)]);
+
+        assert!(matches!(
+            result,
+            Err(OrchardSpendWitnessError::InvalidActionIndex(1))
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn updater_rejects_invalid_orchard_witness() {
+        use roles::updater::{OrchardSpendWitness, OrchardSpendWitnessError};
+
+        let result = OrchardSpendWitness::parse(0, 7, [[0xff; 32]; 32]);
+
+        assert!(matches!(
+            result,
+            Err(OrchardSpendWitnessError::InvalidWitness)
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn updater_rejects_orchard_witness_after_proof() {
+        use roles::updater::{OrchardSpendWitnessError, Updater};
+
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.orchard.zkproof = Some(vec![0; 192]);
+
+        let result = Updater::new(pczt).set_orchard_spend_witnesses([orchard_witness(0, 7)]);
+
+        assert!(matches!(
+            result,
+            Err(OrchardSpendWitnessError::ProofAlreadyPresent)
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn updater_sets_v6_orchard_anchor() {
+        use roles::updater::Updater;
+
+        let anchor = valid_anchor(1);
+        let updated = Updater::new(pczt_with_one_v6_orchard_action())
+            .set_v6_orchard_anchor(anchor)
+            .unwrap()
+            .finish();
+
+        assert_eq!(*updated.orchard().anchor(), anchor.to_bytes());
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn updater_rejects_v5_orchard_anchor_update() {
+        use roles::updater::{OrchardSpendWitnessError, Updater};
+
+        let result =
+            Updater::new(pczt_with_one_orchard_action()).set_v6_orchard_anchor(valid_anchor(1));
+
+        assert!(matches!(result, Err(OrchardSpendWitnessError::RequiresV6)));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn updater_sets_ironwood_anchor_and_witness() {
+        use roles::updater::Updater;
+
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+
+        let anchor = valid_anchor(2);
+        let updated = Updater::new(pczt)
+            .set_v6_ironwood_anchor(anchor)
+            .unwrap()
+            .set_ironwood_spend_witnesses([orchard_witness(0, 9)])
+            .unwrap()
+            .finish();
+
+        assert_eq!(*updated.ironwood().anchor(), anchor.to_bytes());
+        assert_eq!(
+            updated.ironwood().actions()[0].spend().witness,
+            Some((9, [[0; 32]; 32]))
+        );
+    }
 
     #[test]
     fn parse_v1_defaults_orchard_note_versions() {

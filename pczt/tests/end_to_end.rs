@@ -730,6 +730,146 @@ fn orchard_to_orchard() {
 
 #[cfg(zcash_unstable = "nu7")]
 #[test]
+fn v6_orchard_anchor_can_be_updated_after_signing() {
+    use pczt::roles::updater::OrchardSpendWitness;
+
+    let mut rng = OsRng;
+
+    // Create an Orchard account to receive funds.
+    let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
+    let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
+    let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
+    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
+    let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
+    let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
+
+    // Pretend we already received an Orchard note.
+    let value = orchard::value::NoteValue::from_raw(1_000_000);
+    let note = {
+        let mut orchard_builder = orchard::builder::Builder::new(
+            orchard::builder::BundleProtocol::Orchard,
+            orchard::builder::BundleType::DEFAULT,
+            orchard::Anchor::empty_tree(),
+        );
+        orchard_builder
+            .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
+            .unwrap();
+        let (bundle, meta) = orchard_builder.build::<i64>(&mut rng).unwrap().unwrap();
+        let action = bundle
+            .actions()
+            .get(meta.output_action_index(0).unwrap())
+            .unwrap();
+        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
+        let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
+        note
+    };
+
+    // Use the tree with a single leaf.
+    let (anchor, merkle_path): (orchard::Anchor, orchard::tree::MerklePath) = {
+        let cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+        let leaf = MerkleHashOrchard::from_cmx(&cmx);
+        let mut tree =
+            ShardTree::<_, 32, 16>::new(MemoryShardStore::<MerkleHashOrchard, u32>::empty(), 100);
+        tree.append(leaf, incrementalmerkletree::Retention::Marked)
+            .unwrap();
+        tree.checkpoint(9_999_999).unwrap();
+        let position = 0.into();
+        let merkle_path = tree
+            .witness_at_checkpoint_depth(position, 0)
+            .unwrap()
+            .unwrap();
+        let anchor = merkle_path.root(leaf);
+        (anchor.into(), merkle_path.into())
+    };
+
+    // Build a v6 transaction that spends Orchard and outputs to Ironwood.
+    let dummy = dummy_orchard_merkle_path();
+    let cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+    let dummy_anchor = dummy.root(cmx);
+    assert_eq!(merkle_path.root(cmx), anchor);
+    let mut builder = Builder::new(
+        nu7_network(),
+        10_000_000.into(),
+        BuildConfig::Standard {
+            sapling_anchor: None,
+            orchard_anchor: Some(dummy_anchor),
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+        },
+    );
+    builder
+        .propose_version::<std::convert::Infallible>(TxVersion::V6)
+        .unwrap();
+    builder
+        .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, dummy)
+        .unwrap();
+    builder
+        .add_ironwood_output::<zip317::FeeRule>(
+            Some(orchard_ovk),
+            recipient,
+            Zatoshis::const_from_u64(980_000),
+            MemoBytes::empty(),
+        )
+        .unwrap();
+    let PcztResult {
+        pczt_parts,
+        orchard_meta,
+        ..
+    } = builder
+        .build_for_pczt(OsRng, &zip317::FeeRule::standard())
+        .unwrap();
+
+    let pczt = Creator::build_from_parts(pczt_parts).unwrap();
+    check_round_trip(&pczt);
+
+    let pczt = IoFinalizer::new(pczt).finalize_io().unwrap();
+    check_round_trip(&pczt);
+
+    let index = orchard_meta.spend_action_index(0).unwrap();
+    let mut signer = Signer::new(pczt).unwrap();
+    let shielded_sighash_before = signer.shielded_sighash();
+    signer.sign_orchard(index, &orchard_ask).unwrap();
+    let signed_pczt = signer.finish();
+    check_round_trip(&signed_pczt);
+
+    let updated = Updater::new(signed_pczt)
+        .set_v6_orchard_anchor(anchor)
+        .unwrap()
+        .set_orchard_spend_witnesses([OrchardSpendWitness::from_merkle_path(0, merkle_path)])
+        .unwrap()
+        .finish();
+    check_round_trip(&updated);
+
+    assert_eq!(*updated.orchard().anchor(), anchor.to_bytes());
+    assert_eq!(
+        Signer::new(updated.clone()).unwrap().shielded_sighash(),
+        shielded_sighash_before
+    );
+
+    let pczt = Prover::new(updated)
+        .create_orchard_proof(orchard_proving_key())
+        .unwrap()
+        .create_ironwood_proof(orchard_proving_key())
+        .unwrap()
+        .finish();
+    check_round_trip(&pczt);
+    assert_eq!(
+        Signer::new(pczt.clone()).unwrap().shielded_sighash(),
+        shielded_sighash_before
+    );
+
+    let tx = TransactionExtractor::new(pczt).extract().unwrap();
+    assert_eq!(u32::from(tx.expiry_height()), 10_000_040);
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn dummy_orchard_merkle_path() -> orchard::tree::MerklePath {
+    let zero = Option::<MerkleHashOrchard>::from(MerkleHashOrchard::from_bytes(&[0; 32]))
+        .expect("zero Orchard Merkle hash is valid");
+    orchard::tree::MerklePath::from_parts(0, [zero; 32])
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
 fn ironwood_to_ironwood() {
     let mut rng = OsRng;
 
