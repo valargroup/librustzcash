@@ -14,6 +14,9 @@ workspace.
 - Ironwood PCZT support under the NU7 unstable cfg, including parsing,
   creation from builder parts, I/O finalization, proving, signing, extraction,
   combining, redaction, verification, and updater hooks.
+- `pczt::roles::updater::OrchardSpendWitness` and updater methods for setting
+  Orchard and Ironwood spend witnesses, and for setting v6 Orchard and
+  Ironwood anchors before proof creation.
 - `pczt::orchard::NotePlaintextVersion`, representing Orchard note plaintext
   versions in serialized PCZT data.
 - `pczt::orchard::Spend::note_version` and
