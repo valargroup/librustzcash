@@ -28,14 +28,13 @@ workspace.
   version.
 
 ### Changed
-- Bumped the PCZT encoding version to 2 for serialized Orchard note plaintext
-  version fields.
-
-### Fixed
-- Reject V3 note plaintext versions in Orchard PCZT actions and non-V3 note
-  plaintext versions in Ironwood PCZT actions.
-- Restored parsing for v1 PCZT encodings by defaulting missing Orchard note
-  plaintext versions to V2.
+- Bumped the PCZT encoding version to 2 for serialized Orchard-style note
+  plaintext version fields.
+- Orchard-shaped PCZT bundles are now validated against pool-specific note
+  plaintext versions: Orchard actions require V2 and Ironwood actions require
+  V3.
+- Serialized v1 Orchard PCZT encodings continue to parse by defaulting missing
+  note plaintext versions to V2.
 
 ## [0.7.0] - 2026-06-02
 
