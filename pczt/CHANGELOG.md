@@ -17,8 +17,11 @@ workspace.
 - `pczt::roles::updater::OrchardSpendWitness` and updater methods for setting
   Orchard and Ironwood spend witnesses, and for setting v6 Orchard and
   Ironwood anchors before proof creation.
-- `pczt::orchard::NotePlaintextVersion`, representing Orchard note plaintext
-  versions in serialized PCZT data.
+- `pczt::orchard::NotePlaintextVersion`, representing Orchard-style note
+  plaintext versions in serialized PCZT data.
+- `pczt::orchard::NotePlaintextVersionError` and
+  `pczt::orchard::BundleParseError`, used when an Orchard-shaped PCZT bundle
+  uses a note plaintext version that is invalid for its pool.
 - `pczt::orchard::Spend::note_version` and
   `pczt::orchard::Output::note_version` getters. These fields are used to
   reconstruct Orchard note commitments with the intended note plaintext
@@ -29,6 +32,8 @@ workspace.
   version fields.
 
 ### Fixed
+- Reject V3 note plaintext versions in Orchard PCZT actions and non-V3 note
+  plaintext versions in Ironwood PCZT actions.
 - Restored parsing for v1 PCZT encodings by defaulting missing Orchard note
   plaintext versions to V2.
 
