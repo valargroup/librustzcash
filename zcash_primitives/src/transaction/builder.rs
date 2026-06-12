@@ -408,6 +408,14 @@ pub struct PcztParts<P: Parameters> {
 pub struct Builder<'a, P, U> {
     params: P,
     tx_version: TxVersion,
+    // Distinguishes an explicit `propose_version` call from the branch default
+    // chosen in `Builder::new`. `build_for_pczt` needs this because NU7's
+    // branch default is V6, but a default PCZT that does not use Ironwood
+    // should stay V5 while an explicit V6 request must be preserved.
+    //
+    // A clearer future representation would store version selection as an enum
+    // like `Default(TxVersion)` / `Proposed(TxVersion)` instead of splitting it
+    // across `tx_version` and this bool.
     tx_version_proposed: bool,
     consensus_branch_id: BranchId,
     build_config: BuildConfig,
