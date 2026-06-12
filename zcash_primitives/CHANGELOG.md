@@ -36,6 +36,8 @@ workspace.
     Ironwood PCZT bundle data and randomized action positions.
 
 ### Changed
+- `zcash_primitives::transaction::builder`:
+  - NU7 coinbase builders no longer expose Orchard outputs.
 - `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest
   implementations can distinguish Orchard commitments by transaction format.
 

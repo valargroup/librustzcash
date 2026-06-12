@@ -577,7 +577,15 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
         let consensus_branch_id = BranchId::for_height(&params, target_height);
         let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
 
-        let orchard_builder = if params.is_nu_active(NetworkUpgrade::Nu5, target_height) {
+        #[cfg(zcash_unstable = "nu7")]
+        let orchard_coinbase_disabled =
+            build_config.is_coinbase() && params.is_nu_active(NetworkUpgrade::Nu7, target_height);
+        #[cfg(not(zcash_unstable = "nu7"))]
+        let orchard_coinbase_disabled = false;
+
+        let orchard_builder = if params.is_nu_active(NetworkUpgrade::Nu5, target_height)
+            && !orchard_coinbase_disabled
+        {
             build_config
                 .orchard_builder_config()
                 .map(|(bundle_type, anchor)| {
@@ -1667,6 +1675,13 @@ mod tests {
         },
     };
 
+    #[cfg(all(
+        feature = "circuits",
+        zcash_unstable = "nu7",
+        not(feature = "transparent-inputs")
+    ))]
+    use {crate::transaction::TxVersion, zcash_protocol::consensus::BranchId};
+
     #[cfg(feature = "circuits")]
     use {
         super::Error,
@@ -1934,6 +1949,30 @@ mod tests {
                 target_height,
                 expiry_height,
             }) if target_height == tx_height && expiry_height == 0u32.into()
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    fn nu7_coinbase_builder_has_no_orchard_output_option() {
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+        let mut builder = Builder::new(
+            Nu7Network,
+            10u32.into(),
+            BuildConfig::Coinbase { miner_data: None },
+        );
+
+        assert_matches!(
+            builder.add_orchard_output::<Infallible>(
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            ),
+            Err(Error::OrchardBuilderNotAvailable)
         );
     }
 
