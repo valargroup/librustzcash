@@ -1,4 +1,9 @@
-//! The Orchard fields of a PCZT.
+//! Orchard-shaped bundle fields of a PCZT.
+//!
+//! Under NU7, PCZT uses this module for both the Orchard bundle and the
+//! Ironwood bundle because Ironwood actions reuse Orchard-shaped data
+//! structures. Orchard bundle actions must use V2 note plaintexts, while
+//! Ironwood bundle actions must use V3 note plaintexts.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -16,7 +21,11 @@ use crate::{
     roles::combiner::{merge_map, merge_optional},
 };
 
-/// Orchard note plaintext version.
+/// Orchard-style note plaintext version.
+///
+/// PCZT represents both Orchard and Ironwood bundles using Orchard-shaped
+/// actions. V2 is the Orchard note plaintext version, while V3 is the
+/// quantum-recoverable note plaintext version used by Ironwood actions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotePlaintextVersion {
     /// The [ZIP 212] Orchard note plaintext format, identified by lead byte
@@ -24,11 +33,116 @@ pub enum NotePlaintextVersion {
     ///
     /// [ZIP 212]: https://zips.z.cash/zip-0212
     V2,
-    /// The quantum-recoverable Orchard note plaintext version defined in
-    /// [ZIP 2005].
+    /// The quantum-recoverable Orchard-style note plaintext version defined in
+    /// [ZIP 2005] for Ironwood actions.
     ///
     /// [ZIP 2005]: https://zips.z.cash/zip-2005
     V3,
+}
+
+/// Errors that can occur when an Orchard-shaped PCZT bundle uses a note
+/// plaintext version that is not valid for its pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NotePlaintextVersionError {
+    /// An Orchard action spend used a note plaintext version other than V2.
+    OrchardSpend {
+        /// The action index containing the invalid spend.
+        action_index: usize,
+        /// The invalid note plaintext version.
+        version: NotePlaintextVersion,
+    },
+    /// An Orchard action output used a note plaintext version other than V2.
+    OrchardOutput {
+        /// The action index containing the invalid output.
+        action_index: usize,
+        /// The invalid note plaintext version.
+        version: NotePlaintextVersion,
+    },
+    /// An Ironwood action spend used a note plaintext version other than V3.
+    IronwoodSpend {
+        /// The action index containing the invalid spend.
+        action_index: usize,
+        /// The invalid note plaintext version.
+        version: NotePlaintextVersion,
+    },
+    /// An Ironwood action output used a note plaintext version other than V3.
+    IronwoodOutput {
+        /// The action index containing the invalid output.
+        action_index: usize,
+        /// The invalid note plaintext version.
+        version: NotePlaintextVersion,
+    },
+}
+
+impl core::fmt::Display for NotePlaintextVersionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            NotePlaintextVersionError::OrchardSpend {
+                action_index,
+                version,
+            } => write!(
+                f,
+                "Orchard action {action_index} spend uses {version:?}; expected V2"
+            ),
+            NotePlaintextVersionError::OrchardOutput {
+                action_index,
+                version,
+            } => write!(
+                f,
+                "Orchard action {action_index} output uses {version:?}; expected V2"
+            ),
+            NotePlaintextVersionError::IronwoodSpend {
+                action_index,
+                version,
+            } => write!(
+                f,
+                "Ironwood action {action_index} spend uses {version:?}; expected V3"
+            ),
+            NotePlaintextVersionError::IronwoodOutput {
+                action_index,
+                version,
+            } => write!(
+                f,
+                "Ironwood action {action_index} output uses {version:?}; expected V3"
+            ),
+        }
+    }
+}
+
+/// Errors that can occur while parsing an Orchard-shaped PCZT bundle.
+#[cfg(feature = "orchard")]
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BundleParseError {
+    /// The bundle uses a note plaintext version that is not valid for its pool.
+    NotePlaintextVersion(NotePlaintextVersionError),
+    /// The bundle failed Orchard PCZT parsing.
+    Parse(orchard::pczt::ParseError),
+}
+
+#[cfg(feature = "orchard")]
+impl From<NotePlaintextVersionError> for BundleParseError {
+    fn from(e: NotePlaintextVersionError) -> Self {
+        BundleParseError::NotePlaintextVersion(e)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl From<orchard::pczt::ParseError> for BundleParseError {
+    fn from(e: orchard::pczt::ParseError) -> Self {
+        BundleParseError::Parse(e)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl core::fmt::Display for BundleParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            BundleParseError::NotePlaintextVersion(e) => e.fmt(f),
+            BundleParseError::Parse(_) => write!(f, "invalid Orchard-shaped PCZT bundle"),
+        }
+    }
 }
 
 #[cfg(feature = "orchard")]
@@ -51,10 +165,57 @@ impl From<orchard::note::NoteVersion> for NotePlaintextVersion {
     }
 }
 
-/// PCZT fields that are specific to producing the transaction's Orchard bundle (if any).
+impl Bundle {
+    pub(crate) fn validate_orchard_note_plaintext_versions(
+        &self,
+    ) -> Result<(), NotePlaintextVersionError> {
+        for (action_index, action) in self.actions.iter().enumerate() {
+            if action.spend.note_version != NotePlaintextVersion::V2 {
+                return Err(NotePlaintextVersionError::OrchardSpend {
+                    action_index,
+                    version: action.spend.note_version,
+                });
+            }
+
+            if action.output.note_version != NotePlaintextVersion::V2 {
+                return Err(NotePlaintextVersionError::OrchardOutput {
+                    action_index,
+                    version: action.output.note_version,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    pub(crate) fn validate_ironwood_note_plaintext_versions(
+        &self,
+    ) -> Result<(), NotePlaintextVersionError> {
+        for (action_index, action) in self.actions.iter().enumerate() {
+            if action.spend.note_version != NotePlaintextVersion::V3 {
+                return Err(NotePlaintextVersionError::IronwoodSpend {
+                    action_index,
+                    version: action.spend.note_version,
+                });
+            }
+
+            if action.output.note_version != NotePlaintextVersion::V3 {
+                return Err(NotePlaintextVersionError::IronwoodOutput {
+                    action_index,
+                    version: action.output.note_version,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// PCZT fields that are specific to producing an Orchard-shaped bundle.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
 pub struct Bundle {
-    /// The Orchard actions in this bundle.
+    /// The Orchard-shaped actions in this bundle.
     ///
     /// Entries are added by the Constructor, and modified by an Updater, IO Finalizer,
     /// Signer, Combiner, or Spend Finalizer.
@@ -180,7 +341,7 @@ pub struct Spend {
     /// - This is required by the Prover.
     pub(crate) rseed: Option<[u8; 32]>,
 
-    /// The plaintext version of the note being spent.
+    /// The Orchard-style plaintext version of the note being spent.
     ///
     /// This is set by the Constructor, and is required by Verifiers and
     /// Provers to reconstruct the note commitment.
@@ -236,7 +397,7 @@ pub struct Output {
     //
     #[getset(get = "pub")]
     pub(crate) cmx: [u8; 32],
-    /// The plaintext version of the note being created.
+    /// The Orchard-style plaintext version of the note being created.
     ///
     /// This is set by the Constructor, and is required by Verifiers and
     /// Provers to reconstruct the note commitment.
@@ -458,6 +619,17 @@ impl Bundle {
 
 #[cfg(feature = "orchard")]
 impl Bundle {
+    pub(crate) fn into_parsed_orchard(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
+        self.validate_orchard_note_plaintext_versions()?;
+        self.into_parsed().map_err(BundleParseError::Parse)
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    pub(crate) fn into_parsed_ironwood(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
+        self.validate_ironwood_note_plaintext_versions()?;
+        self.into_parsed().map_err(BundleParseError::Parse)
+    }
+
     pub(crate) fn into_parsed(self) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
         let actions = self
             .actions
