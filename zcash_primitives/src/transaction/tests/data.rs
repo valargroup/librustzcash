@@ -7384,3 +7384,6 @@ pub mod zip_0244 {
         ]
     }
 }
+
+#[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+pub mod zip_0233;
