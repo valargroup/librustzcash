@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use crate::{Pczt, common::Global};
 
-/// An Orchard spend witness to set on a PCZT action.
+/// An Orchard-style spend witness to set on an Orchard or Ironwood PCZT action.
 #[cfg(feature = "orchard")]
 #[derive(Clone, Debug)]
 pub struct OrchardSpendWitness {
@@ -18,7 +18,7 @@ pub struct OrchardSpendWitness {
 
 #[cfg(feature = "orchard")]
 impl OrchardSpendWitness {
-    /// Constructs a witness update from a typed Orchard Merkle path.
+    /// Constructs a witness update from a typed Orchard-style Merkle path.
     pub fn from_merkle_path(action_index: usize, merkle_path: ::orchard::tree::MerklePath) -> Self {
         Self {
             action_index,
@@ -26,7 +26,7 @@ impl OrchardSpendWitness {
         }
     }
 
-    /// Parses and validates a witness update from serialized Orchard Merkle path data.
+    /// Parses and validates a witness update from serialized Orchard-style Merkle path data.
     pub fn parse(
         action_index: usize,
         position: u32,
@@ -240,14 +240,14 @@ impl GlobalUpdater<'_> {
     }
 }
 
-/// Errors that can occur while setting Orchard spend witness data.
+/// Errors that can occur while setting Orchard or Ironwood spend witness data.
 #[cfg(feature = "orchard")]
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OrchardSpendWitnessError {
     /// The requested action index does not exist in the bundle.
     InvalidActionIndex(usize),
-    /// The provided serialized witness contains an invalid Orchard Merkle node.
+    /// The provided serialized witness contains an invalid Orchard-style Merkle node.
     InvalidWitness,
     /// The PCZT must be version 6 for this update.
     #[cfg(zcash_unstable = "nu7")]
@@ -261,15 +261,15 @@ impl core::fmt::Display for OrchardSpendWitnessError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             OrchardSpendWitnessError::InvalidActionIndex(index) => {
-                write!(f, "Orchard action index {index} does not exist")
+                write!(f, "Orchard or Ironwood action index {index} does not exist")
             }
-            OrchardSpendWitnessError::InvalidWitness => write!(f, "invalid Orchard witness"),
+            OrchardSpendWitnessError::InvalidWitness => write!(f, "invalid Orchard-style witness"),
             #[cfg(zcash_unstable = "nu7")]
             OrchardSpendWitnessError::RequiresV6 => {
-                write!(f, "PCZT must be version 6 for this Orchard update")
+                write!(f, "PCZT must be version 6 for this Orchard or Ironwood update")
             }
             OrchardSpendWitnessError::ProofAlreadyPresent => {
-                write!(f, "Orchard proof is already present")
+                write!(f, "Orchard or Ironwood proof is already present")
             }
         }
     }
