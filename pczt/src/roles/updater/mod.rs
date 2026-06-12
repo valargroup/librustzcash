@@ -266,7 +266,10 @@ impl core::fmt::Display for OrchardSpendWitnessError {
             OrchardSpendWitnessError::InvalidWitness => write!(f, "invalid Orchard-style witness"),
             #[cfg(zcash_unstable = "nu7")]
             OrchardSpendWitnessError::RequiresV6 => {
-                write!(f, "PCZT must be version 6 for this Orchard or Ironwood update")
+                write!(
+                    f,
+                    "PCZT must be version 6 for this Orchard or Ironwood update"
+                )
             }
             OrchardSpendWitnessError::ProofAlreadyPresent => {
                 write!(f, "Orchard or Ironwood proof is already present")
