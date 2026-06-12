@@ -10,6 +10,14 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID}` under
+  `zcash_unstable = "nu7"`.
+- `zcash_protocol::consensus::{NetworkUpgrade::Nu7, BranchId::Nu7}` under
+  `zcash_unstable = "nu7"`.
+- `zcash_protocol::local_consensus::LocalNetwork::nu7` under
+  `zcash_unstable = "nu7"`.
+
 ## [0.9.0] - 2026-06-02
 
 ### Changed
