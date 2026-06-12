@@ -11,6 +11,8 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `zcash_primitives::block::Block::from_parts` (behind the `test-dependencies`
+  feature flag).
 - `zcash_primitives::transaction`:
   - `TxVersion::V6`, the NU7 transaction format supporting Transparent,
     Sapling, Orchard, and Ironwood bundles.
