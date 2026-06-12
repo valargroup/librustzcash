@@ -14,6 +14,13 @@ workspace.
 - `zcash_primitives::transaction`:
   - `TxVersion::V6`, the NU7 transaction format supporting Transparent,
     Sapling, Orchard, and Ironwood bundles.
+  - `TransactionData::from_parts_v6`, for constructing v6 transactions with
+    separate Orchard and Ironwood bundles.
+  - `TransactionData::ironwood_bundle`, for accessing the Ironwood bundle on a
+    transaction.
+  - `TxDigests::ironwood_digest`, for carrying the Ironwood bundle digest.
+  - `TransactionDigest::{IronwoodDigest, digest_ironwood}`, for digest
+    implementations that commit to Ironwood bundles.
 - `zcash_primitives::transaction::builder`:
   - `BuildConfig::Standard::ironwood_anchor`, enabling callers to provide the
     anchor for the separate Ironwood note commitment tree.
@@ -27,6 +34,10 @@ workspace.
     positions for Ironwood bundles.
   - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
     Ironwood PCZT bundle data and randomized action positions.
+
+### Changed
+- `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest
+  implementations can distinguish Orchard commitments by transaction format.
 
 ## [0.28.0] - 2026-06-02
 
