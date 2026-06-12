@@ -213,14 +213,7 @@ mod v1 {
                 sapling: pczt.sapling,
                 orchard: pczt.orchard.into(),
                 #[cfg(zcash_unstable = "nu7")]
-                ironwood: orchard::Bundle {
-                    actions: vec![],
-                    flags: 0,
-                    value_sum: (0, false),
-                    anchor: crate::EMPTY_IRONWOOD_ANCHOR,
-                    zkproof: None,
-                    bsk: None,
-                },
+                ironwood: crate::empty_ironwood_bundle(),
             }
         }
     }
@@ -873,6 +866,18 @@ mod tests {
             *action.output().note_version(),
             orchard::NotePlaintextVersion::V2
         );
+
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            let fallback = crate::empty_ironwood_bundle();
+            assert!(parsed.ironwood.actions.is_empty());
+            assert!(fallback.actions.is_empty());
+            assert_eq!(parsed.ironwood.flags, fallback.flags);
+            assert_eq!(parsed.ironwood.value_sum, fallback.value_sum);
+            assert_eq!(parsed.ironwood.anchor, fallback.anchor);
+            assert_eq!(parsed.ironwood.zkproof, fallback.zkproof);
+            assert_eq!(parsed.ironwood.bsk, fallback.bsk);
+        }
 
         assert_eq!(
             u32::from_le_bytes(parsed.serialize()[4..8].try_into().unwrap()),
