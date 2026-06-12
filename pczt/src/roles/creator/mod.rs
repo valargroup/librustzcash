@@ -57,7 +57,7 @@ impl Creator {
             coin_type,
             orchard_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
             #[cfg(zcash_unstable = "nu7")]
-            ironwood_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            ironwood_flags: crate::IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
             sapling_anchor,
             orchard_anchor,
             #[cfg(zcash_unstable = "nu7")]
@@ -141,7 +141,9 @@ impl Creator {
 
     /// Builds a PCZT from the output of a [`Builder`].
     ///
-    /// Returns `None` if the `TxVersion` is incompatible with PCZTs.
+    /// Returns `None` if the `TxVersion` is incompatible with PCZTs, or if
+    /// Orchard-shaped bundles use note plaintext versions that are invalid for
+    /// their pools.
     ///
     /// [`Builder`]: zcash_primitives::transaction::builder::Builder
     #[cfg(feature = "zcp-builder")]
@@ -175,6 +177,34 @@ impl Creator {
             tx_modifiable |= FLAG_HAS_SIGHASH_SINGLE;
         }
 
+        let orchard = parts
+            .orchard
+            .map(crate::orchard::Bundle::serialize_from)
+            .unwrap_or_else(|| crate::orchard::Bundle {
+                actions: vec![],
+                flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+                value_sum: (0, true),
+                anchor: orchard::Anchor::empty_tree().to_bytes(),
+                zkproof: None,
+                bsk: None,
+            });
+        orchard.validate_orchard_note_plaintext_versions().ok()?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood = parts
+            .ironwood
+            .map(crate::orchard::Bundle::serialize_from)
+            .unwrap_or_else(|| crate::orchard::Bundle {
+                actions: vec![],
+                flags: crate::IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
+                value_sum: (0, true),
+                anchor: orchard::Anchor::empty_tree().to_bytes(),
+                zkproof: None,
+                bsk: None,
+            });
+        #[cfg(zcash_unstable = "nu7")]
+        ironwood.validate_ironwood_note_plaintext_versions().ok()?;
+
         Some(Pczt {
             global: crate::common::Global {
                 tx_version,
@@ -203,29 +233,9 @@ impl Creator {
                     anchor: sapling::Anchor::empty_tree().to_bytes(),
                     bsk: None,
                 }),
-            orchard: parts
-                .orchard
-                .map(crate::orchard::Bundle::serialize_from)
-                .unwrap_or_else(|| crate::orchard::Bundle {
-                    actions: vec![],
-                    flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
-                    value_sum: (0, true),
-                    anchor: orchard::Anchor::empty_tree().to_bytes(),
-                    zkproof: None,
-                    bsk: None,
-                }),
+            orchard,
             #[cfg(zcash_unstable = "nu7")]
-            ironwood: parts
-                .ironwood
-                .map(crate::orchard::Bundle::serialize_from)
-                .unwrap_or_else(|| crate::orchard::Bundle {
-                    actions: vec![],
-                    flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
-                    value_sum: (0, true),
-                    anchor: orchard::Anchor::empty_tree().to_bytes(),
-                    zkproof: None,
-                    bsk: None,
-                }),
+            ironwood,
         })
     }
 }

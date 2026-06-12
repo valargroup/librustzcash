@@ -1,4 +1,4 @@
-use orchard::pczt::{ParseError, Updater, UpdaterError};
+use orchard::pczt::{Updater, UpdaterError};
 
 use crate::Pczt;
 
@@ -17,7 +17,9 @@ impl super::Updater {
             ironwood,
         } = self.pczt;
 
-        let mut bundle = orchard.into_parsed().map_err(OrchardError::Parser)?;
+        let mut bundle = orchard
+            .into_parsed_orchard()
+            .map_err(OrchardError::Parser)?;
 
         bundle.update_with(f).map_err(OrchardError::Updater)?;
 
@@ -47,7 +49,9 @@ impl super::Updater {
             ironwood,
         } = self.pczt;
 
-        let mut bundle = ironwood.into_parsed().map_err(OrchardError::Parser)?;
+        let mut bundle = ironwood
+            .into_parsed_ironwood()
+            .map_err(OrchardError::Parser)?;
 
         bundle.update_with(f).map_err(OrchardError::Updater)?;
 
@@ -66,6 +70,6 @@ impl super::Updater {
 /// Errors that can occur while updating the Orchard bundle of a PCZT.
 #[derive(Debug)]
 pub enum OrchardError {
-    Parser(ParseError),
+    Parser(crate::orchard::BundleParseError),
     Updater(UpdaterError),
 }

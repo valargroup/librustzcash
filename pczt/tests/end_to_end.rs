@@ -91,6 +91,108 @@ fn creator_accepts_v6_pczt_parts() {
     );
 }
 
+#[cfg(zcash_unstable = "nu7")]
+fn nu7_pczt_parts_with_orchard_style_outputs(ironwood: bool) -> PcztParts<Nu7Network> {
+    let params = nu7_network();
+
+    let transparent_account_sk =
+        AccountPrivKey::from_seed(&params, &[1; 32], zip32::AccountId::ZERO).unwrap();
+    let (transparent_addr, address_index) = transparent_account_sk
+        .to_account_pubkey()
+        .derive_external_ivk()
+        .unwrap()
+        .default_address();
+    let transparent_sk = transparent_account_sk
+        .derive_external_secret_key(address_index)
+        .unwrap();
+    let secp = secp256k1::Secp256k1::signing_only();
+    let transparent_pubkey = transparent_sk.public_key(&secp);
+
+    let orchard_sk = orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap();
+    let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
+    let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
+    let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
+    let internal_ovk = orchard_fvk.to_ovk(zip32::Scope::Internal);
+    let internal_recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
+
+    let coin = transparent::TxOut::new(
+        Zatoshis::const_from_u64(1_000_000),
+        transparent_addr.script().into(),
+    );
+
+    let mut builder = Builder::new(
+        params,
+        10_000_000.into(),
+        BuildConfig::Standard {
+            sapling_anchor: None,
+            orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+        },
+    );
+    builder
+        .add_transparent_p2pkh_input(transparent_pubkey, transparent::OutPoint::fake(), coin)
+        .unwrap();
+
+    if ironwood {
+        builder
+            .add_ironwood_output::<zip317::FeeRule>(
+                Some(orchard_ovk),
+                recipient,
+                Zatoshis::const_from_u64(100_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        builder
+            .add_ironwood_output::<zip317::FeeRule>(
+                Some(internal_ovk),
+                internal_recipient,
+                Zatoshis::const_from_u64(885_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+    } else {
+        builder
+            .add_orchard_output::<zip317::FeeRule>(
+                Some(orchard_ovk),
+                recipient,
+                Zatoshis::const_from_u64(100_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        builder
+            .add_orchard_output::<zip317::FeeRule>(
+                Some(internal_ovk),
+                internal_recipient,
+                Zatoshis::const_from_u64(885_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+    }
+
+    builder
+        .build_for_pczt(OsRng, &zip317::FeeRule::standard())
+        .unwrap()
+        .pczt_parts
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn creator_rejects_ironwood_bundle_as_orchard_parts() {
+    let mut parts = nu7_pczt_parts_with_orchard_style_outputs(true);
+    parts.orchard = parts.ironwood.take();
+
+    assert!(Creator::build_from_parts(parts).is_none());
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn creator_rejects_orchard_bundle_as_ironwood_parts() {
+    let mut parts = nu7_pczt_parts_with_orchard_style_outputs(false);
+    parts.ironwood = parts.orchard.take();
+
+    assert!(Creator::build_from_parts(parts).is_none());
+}
+
 #[test]
 fn transparent_to_orchard() {
     let params = MainNetwork;

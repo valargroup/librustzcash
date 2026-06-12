@@ -147,6 +147,10 @@ impl Updater {
         mut self,
         witnesses: impl IntoIterator<Item = OrchardSpendWitness>,
     ) -> Result<Self, OrchardSpendWitnessError> {
+        self.pczt
+            .orchard
+            .validate_orchard_note_plaintext_versions()
+            .map_err(OrchardSpendWitnessError::NotePlaintextVersion)?;
         ensure_no_orchard_proof(&self.pczt.orchard)?;
         for witness in witnesses {
             let action = self
@@ -191,6 +195,10 @@ impl Updater {
         witnesses: impl IntoIterator<Item = OrchardSpendWitness>,
     ) -> Result<Self, OrchardSpendWitnessError> {
         ensure_v6(&self.pczt.global)?;
+        self.pczt
+            .ironwood
+            .validate_ironwood_note_plaintext_versions()
+            .map_err(OrchardSpendWitnessError::NotePlaintextVersion)?;
         ensure_no_orchard_proof(&self.pczt.ironwood)?;
         for witness in witnesses {
             let action = self
@@ -254,6 +262,8 @@ pub enum OrchardSpendWitnessError {
     RequiresV6,
     /// The bundle already contains a proof that depends on the current witness data.
     ProofAlreadyPresent,
+    /// The bundle uses a note plaintext version that is not valid for its pool.
+    NotePlaintextVersion(crate::orchard::NotePlaintextVersionError),
 }
 
 #[cfg(feature = "orchard")]
@@ -274,6 +284,7 @@ impl core::fmt::Display for OrchardSpendWitnessError {
             OrchardSpendWitnessError::ProofAlreadyPresent => {
                 write!(f, "Orchard or Ironwood proof is already present")
             }
+            OrchardSpendWitnessError::NotePlaintextVersion(e) => e.fmt(f),
         }
     }
 }

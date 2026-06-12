@@ -14,7 +14,9 @@ impl super::Prover {
             ironwood,
         } = self.pczt;
 
-        let mut bundle = orchard.into_parsed().map_err(OrchardError::Parser)?;
+        let mut bundle = orchard
+            .into_parsed_orchard()
+            .map_err(OrchardError::Parser)?;
 
         bundle
             .create_proof(pk, OsRng)
@@ -42,7 +44,9 @@ impl super::Prover {
             ironwood,
         } = self.pczt;
 
-        let mut bundle = ironwood.into_parsed().map_err(OrchardError::Parser)?;
+        let mut bundle = ironwood
+            .into_parsed_ironwood()
+            .map_err(OrchardError::Parser)?;
 
         bundle
             .create_proof(pk, OsRng)
@@ -63,6 +67,6 @@ impl super::Prover {
 /// Errors that can occur while creating Orchard proofs for a PCZT.
 #[derive(Debug)]
 pub enum OrchardError {
-    Parser(orchard::pczt::ParseError),
+    Parser(crate::orchard::BundleParseError),
     Prover(orchard::pczt::ProverError),
 }

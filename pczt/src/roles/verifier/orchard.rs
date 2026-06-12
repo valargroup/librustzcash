@@ -15,7 +15,7 @@ impl super::Verifier {
             ironwood,
         } = self.pczt;
 
-        let bundle = orchard.into_parsed().map_err(OrchardError::Parse)?;
+        let bundle = orchard.into_parsed_orchard().map_err(OrchardError::Parse)?;
 
         f(&bundle)?;
 
@@ -45,7 +45,9 @@ impl super::Verifier {
             ironwood,
         } = self.pczt;
 
-        let bundle = ironwood.into_parsed().map_err(OrchardError::Parse)?;
+        let bundle = ironwood
+            .into_parsed_ironwood()
+            .map_err(OrchardError::Parse)?;
 
         f(&bundle)?;
 
@@ -64,7 +66,7 @@ impl super::Verifier {
 /// Errors that can occur while verifying the Orchard bundle of a PCZT.
 #[derive(Debug)]
 pub enum OrchardError<E> {
-    Parse(orchard::pczt::ParseError),
+    Parse(crate::orchard::BundleParseError),
     Verify(orchard::pczt::VerifyError),
     Custom(E),
 }

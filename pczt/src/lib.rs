@@ -88,8 +88,10 @@ pub struct Pczt {
     transparent: transparent::Bundle,
     #[getset(get = "pub")]
     sapling: sapling::Bundle,
+    /// Orchard bundle fields.
     #[getset(get = "pub")]
     orchard: orchard::Bundle,
+    /// Ironwood bundle fields, represented as Orchard-shaped actions.
     #[cfg(zcash_unstable = "nu7")]
     #[serde(default = "empty_ironwood_bundle")]
     #[getset(get = "pub")]
@@ -98,12 +100,14 @@ pub struct Pczt {
 
 #[cfg(zcash_unstable = "nu7")]
 pub(crate) const EMPTY_IRONWOOD_ANCHOR: [u8; 32] = [0; 32];
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) const IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED: u8 = 0b0000_0011;
 
 #[cfg(zcash_unstable = "nu7")]
 pub(crate) fn empty_ironwood_bundle() -> orchard::Bundle {
     orchard::Bundle {
         actions: vec![],
-        flags: 0b0000_0011,
+        flags: IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
         value_sum: (0, true),
         anchor: EMPTY_IRONWOOD_ANCHOR,
         zkproof: None,
@@ -293,13 +297,23 @@ impl Pczt {
             return Err(ParseError::NotPczt);
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        match version {
+        let pczt = match version {
             PCZT_VERSION_1 => postcard::from_bytes::<v1::Pczt>(&bytes[8..])
                 .map(Into::into)
                 .map_err(ParseError::Invalid),
             PCZT_VERSION_2 => Self::parse_v2_payload(&bytes[8..]),
             _ => Err(ParseError::UnknownVersion(version)),
-        }
+        }?;
+
+        pczt.orchard
+            .validate_orchard_note_plaintext_versions()
+            .map_err(ParseError::NotePlaintextVersion)?;
+        #[cfg(zcash_unstable = "nu7")]
+        pczt.ironwood
+            .validate_ironwood_note_plaintext_versions()
+            .map_err(ParseError::NotePlaintextVersion)?;
+
+        Ok(pczt)
     }
 
     #[cfg(zcash_unstable = "nu7")]
@@ -377,10 +391,12 @@ impl Pczt {
             .into_parsed()
             .map_err(ExtractError::TransparentParse)?;
         let sapling = sapling.into_parsed().map_err(ExtractError::SaplingParse)?;
-        let orchard = orchard.into_parsed().map_err(ExtractError::OrchardParse)?;
+        let orchard = orchard
+            .into_parsed_orchard()
+            .map_err(ExtractError::OrchardParse)?;
         #[cfg(zcash_unstable = "nu7")]
         let ironwood = ironwood
-            .into_parsed()
+            .into_parsed_ironwood()
             .map_err(ExtractError::IronwoodParse)?;
 
         let version = match (global.tx_version, global.version_group_id) {
@@ -543,11 +559,11 @@ pub enum ExtractError {
     IronwoodExtract(::orchard::pczt::TxExtractorError),
     /// An error occurred parsing the Ironwood PCZT bundle from the PCZT data.
     #[cfg(zcash_unstable = "nu7")]
-    IronwoodParse(::orchard::pczt::ParseError),
+    IronwoodParse(crate::orchard::BundleParseError),
     /// An error occurred extracting the Orchard protocol bundle from the Orchard PCZT bundle.
     OrchardExtract(::orchard::pczt::TxExtractorError),
     /// An error occurred parsing the Orchard PCZT bundle from the PCZT data.
-    OrchardParse(::orchard::pczt::ParseError),
+    OrchardParse(crate::orchard::BundleParseError),
     /// An error occurred extracting the Sapling protocol bundle from the Sapling PCZT bundle.
     SaplingExtract(::sapling::pczt::TxExtractorError),
     /// An error occurred parsing the Sapling PCZT bundle from the PCZT data.
@@ -569,6 +585,8 @@ pub enum ParseError {
     NotPczt,
     /// The PCZT encoding was invalid.
     Invalid(postcard::Error),
+    /// The PCZT uses a note plaintext version that is not valid for its pool.
+    NotePlaintextVersion(orchard::NotePlaintextVersionError),
     /// The bytes are too short to contain a PCZT.
     TooShort,
     /// The PCZT has an unknown version.
@@ -579,7 +597,7 @@ pub enum ParseError {
 mod tests {
     use alloc::collections::BTreeMap;
 
-    #[cfg(zcash_unstable = "nu7")]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
     use zcash_protocol::{
         consensus::BranchId,
@@ -664,6 +682,17 @@ mod tests {
     }
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn set_orchard_style_note_version(
+        bundle: &mut orchard::Bundle,
+        version: orchard::NotePlaintextVersion,
+    ) {
+        for action in bundle.actions.iter_mut() {
+            action.spend.note_version = version;
+            action.output.note_version = version;
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     fn pczt_with_one_v6_orchard_action() -> Pczt {
         let mut pczt = pczt_with_one_orchard_action();
         pczt.global.tx_version = V6_TX_VERSION;
@@ -677,6 +706,100 @@ mod tests {
         let mut bytes = [0; 32];
         bytes[0] = byte;
         ::orchard::Anchor::from_bytes(bytes).into_option().unwrap()
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn orchard_bundle_rejects_v3_spend_note_plaintext_version() {
+        let mut bundle = pczt_with_one_orchard_action().orchard;
+        bundle.actions[0].spend.note_version = orchard::NotePlaintextVersion::V3;
+
+        assert!(matches!(
+            bundle.validate_orchard_note_plaintext_versions(),
+            Err(orchard::NotePlaintextVersionError::OrchardSpend {
+                action_index: 0,
+                version: orchard::NotePlaintextVersion::V3
+            })
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn orchard_bundle_rejects_v3_output_note_plaintext_version() {
+        let mut bundle = pczt_with_one_orchard_action().orchard;
+        bundle.actions[0].output.note_version = orchard::NotePlaintextVersion::V3;
+
+        assert!(matches!(
+            bundle.validate_orchard_note_plaintext_versions(),
+            Err(orchard::NotePlaintextVersionError::OrchardOutput {
+                action_index: 0,
+                version: orchard::NotePlaintextVersion::V3
+            })
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn ironwood_bundle_rejects_v2_spend_note_plaintext_version() {
+        let mut bundle = pczt_with_one_orchard_action().orchard;
+        bundle.actions[0].output.note_version = orchard::NotePlaintextVersion::V3;
+
+        assert!(matches!(
+            bundle.validate_ironwood_note_plaintext_versions(),
+            Err(orchard::NotePlaintextVersionError::IronwoodSpend {
+                action_index: 0,
+                version: orchard::NotePlaintextVersion::V2
+            })
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn ironwood_bundle_rejects_v2_output_note_plaintext_version() {
+        let mut bundle = pczt_with_one_orchard_action().orchard;
+        bundle.actions[0].spend.note_version = orchard::NotePlaintextVersion::V3;
+
+        assert!(matches!(
+            bundle.validate_ironwood_note_plaintext_versions(),
+            Err(orchard::NotePlaintextVersionError::IronwoodOutput {
+                action_index: 0,
+                version: orchard::NotePlaintextVersion::V2
+            })
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn parse_rejects_v3_orchard_note_plaintext_version() {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.orchard.actions[0].spend.note_version = orchard::NotePlaintextVersion::V3;
+
+        assert!(matches!(
+            Pczt::parse(&pczt.serialize()),
+            Err(ParseError::NotePlaintextVersion(
+                orchard::NotePlaintextVersionError::OrchardSpend {
+                    action_index: 0,
+                    version: orchard::NotePlaintextVersion::V3
+                }
+            ))
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn parse_rejects_v2_ironwood_note_plaintext_version() {
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+
+        assert!(matches!(
+            Pczt::parse(&pczt.serialize()),
+            Err(ParseError::NotePlaintextVersion(
+                orchard::NotePlaintextVersionError::IronwoodSpend {
+                    action_index: 0,
+                    version: orchard::NotePlaintextVersion::V2
+                }
+            ))
+        ));
     }
 
     #[cfg(feature = "orchard")]
@@ -770,6 +893,7 @@ mod tests {
 
         let mut pczt = pczt_with_one_v6_orchard_action();
         pczt.ironwood = pczt.orchard.clone();
+        set_orchard_style_note_version(&mut pczt.ironwood, orchard::NotePlaintextVersion::V3);
 
         let anchor = valid_anchor(2);
         let updated = Updater::new(pczt)
@@ -784,6 +908,27 @@ mod tests {
             updated.ironwood().actions()[0].spend().witness,
             Some((9, [[0; 32]; 32]))
         );
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn updater_rejects_v2_ironwood_witness() {
+        use roles::updater::{OrchardSpendWitnessError, Updater};
+
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+
+        let result = Updater::new(pczt).set_ironwood_spend_witnesses([orchard_witness(0, 9)]);
+
+        assert!(matches!(
+            result,
+            Err(OrchardSpendWitnessError::NotePlaintextVersion(
+                orchard::NotePlaintextVersionError::IronwoodSpend {
+                    action_index: 0,
+                    version: orchard::NotePlaintextVersion::V2
+                }
+            ))
+        ));
     }
 
     #[test]

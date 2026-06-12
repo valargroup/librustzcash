@@ -29,28 +29,17 @@ impl IoFinalizer {
     pub fn finalize_io(self) -> Result<Pczt, Error> {
         let Self { pczt } = self;
 
-        let has_shielded_spends =
-            !(pczt.sapling.spends.is_empty() && pczt.orchard.actions.is_empty() && {
-                #[cfg(zcash_unstable = "nu7")]
-                {
-                    pczt.ironwood.actions.is_empty()
-                }
-                #[cfg(not(zcash_unstable = "nu7"))]
-                {
-                    true
-                }
-            });
-        let has_shielded_outputs =
-            !(pczt.sapling.outputs.is_empty() && pczt.orchard.actions.is_empty() && {
-                #[cfg(zcash_unstable = "nu7")]
-                {
-                    pczt.ironwood.actions.is_empty()
-                }
-                #[cfg(not(zcash_unstable = "nu7"))]
-                {
-                    true
-                }
-            });
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood_actions_empty = pczt.ironwood.actions.is_empty();
+        #[cfg(not(zcash_unstable = "nu7"))]
+        let ironwood_actions_empty = true;
+
+        let has_shielded_spends = !(pczt.sapling.spends.is_empty()
+            && pczt.orchard.actions.is_empty()
+            && ironwood_actions_empty);
+        let has_shielded_outputs = !(pczt.sapling.outputs.is_empty()
+            && pczt.orchard.actions.is_empty()
+            && ironwood_actions_empty);
 
         // We can't build a transaction that has no spends or outputs.
         // However, we don't attempt to reject an entirely dummy transaction.
