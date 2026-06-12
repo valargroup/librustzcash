@@ -30,6 +30,8 @@ use crate::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
 ///         nu6: Some(BlockHeight::from_u32(1)),
 ///         nu6_1: Some(BlockHeight::from_u32(1)),
 ///         nu6_2: Some(BlockHeight::from_u32(1)),
+///         #[cfg(zcash_unstable = "nu7")]
+///         nu7: Some(BlockHeight::from_u32(1)),
 ///     };
 ///     ```
 ///     
