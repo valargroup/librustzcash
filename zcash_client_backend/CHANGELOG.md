@@ -14,6 +14,12 @@ workspace.
 - `zcash_client_backend::data_api::error::RewindError`
 - `zcash_client_backend::data_api::AccountBalance::ironwood_balance`, for
   exposing Ironwood wallet funds separately from Orchard.
+- Ironwood scanning and tree APIs: `BlockMetadata::ironwood_tree_size`,
+  `NoteCommitmentTree::Ironwood`, `ScannedBlock::ironwood`, and Ironwood
+  tree methods on `WalletCommitmentTrees`.
+- The NU7-gated Orchard to Ironwood migration API:
+  `data_api::wallet::create_orchard_to_ironwood_transaction` and
+  `data_api::wallet::MigrationTransaction`.
 - `zcash_client_backend::wallet::WalletTransparentOutput`:
   - `recipient_account`
   - `recipient_key_scope`
