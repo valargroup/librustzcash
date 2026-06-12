@@ -61,8 +61,6 @@ const ZCASH_SAPLING_OUTPUTS_MEMOS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdSOutM
 const ZCASH_SAPLING_OUTPUTS_NONCOMPACT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdSOutN__Hash";
 
 const ZCASH_ORCHARD_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrchardHash";
-#[cfg(zcash_unstable = "nu7")]
-const ZCASH_ORCHARD_V6_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrchV6_Hash";
 const ZCASH_ORCHARD_ACTIONS_COMPACT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrcActCHash";
 const ZCASH_ORCHARD_ACTIONS_MEMOS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrcActMHash";
 const ZCASH_ORCHARD_ACTIONS_NONCOMPACT_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxIdOrcActNHash";
@@ -78,8 +76,6 @@ const ZCASH_AUTH_PERSONALIZATION_PREFIX: &[u8; 12] = b"ZTxAuthHash_";
 const ZCASH_TRANSPARENT_SCRIPTS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthTransHash";
 const ZCASH_SAPLING_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthSapliHash";
 const ZCASH_ORCHARD_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthOrchaHash";
-#[cfg(zcash_unstable = "nu7")]
-const ZCASH_ORCHARD_V6_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthOrcV6Hash";
 #[cfg(zcash_unstable = "nu7")]
 const ZCASH_IRONWOOD_SIGS_HASH_PERSONALIZATION: &[u8; 16] = b"ZTxAuthIrnwdHash";
 #[cfg(zcash_unstable = "zfuture")]
@@ -103,16 +99,6 @@ const ORCHARD_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
     };
 
 #[cfg(zcash_unstable = "nu7")]
-const ORCHARD_V6_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
-    OrchardStyleBundlePersonalization {
-        txid_bundle: ZCASH_ORCHARD_V6_HASH_PERSONALIZATION,
-        txid_actions_compact: ZCASH_ORCHARD_ACTIONS_COMPACT_HASH_PERSONALIZATION,
-        txid_actions_memos: ZCASH_ORCHARD_ACTIONS_MEMOS_HASH_PERSONALIZATION,
-        txid_actions_noncompact: ZCASH_ORCHARD_ACTIONS_NONCOMPACT_HASH_PERSONALIZATION,
-        auth: ZCASH_ORCHARD_V6_SIGS_HASH_PERSONALIZATION,
-    };
-
-#[cfg(zcash_unstable = "nu7")]
 const IRONWOOD_BUNDLE_PERSONALIZATION: OrchardStyleBundlePersonalization =
     OrchardStyleBundlePersonalization {
         txid_bundle: ZCASH_IRONWOOD_HASH_PERSONALIZATION,
@@ -128,16 +114,6 @@ enum BundleAnchorCommitment {
     Omit,
 }
 
-fn orchard_txid_personalization(version: TxVersion) -> &'static OrchardStyleBundlePersonalization {
-    #[cfg(zcash_unstable = "nu7")]
-    if matches!(version, TxVersion::V6) {
-        return &ORCHARD_V6_BUNDLE_PERSONALIZATION;
-    }
-
-    let _ = version;
-    &ORCHARD_BUNDLE_PERSONALIZATION
-}
-
 fn orchard_txid_anchor_commitment(version: TxVersion) -> BundleAnchorCommitment {
     #[cfg(zcash_unstable = "nu7")]
     if matches!(version, TxVersion::V6) {
@@ -146,16 +122,6 @@ fn orchard_txid_anchor_commitment(version: TxVersion) -> BundleAnchorCommitment 
 
     let _ = version;
     BundleAnchorCommitment::Include
-}
-
-fn orchard_auth_personalization(version: TxVersion) -> &'static OrchardStyleBundlePersonalization {
-    #[cfg(zcash_unstable = "nu7")]
-    if matches!(version, TxVersion::V6) {
-        return &ORCHARD_V6_BUNDLE_PERSONALIZATION;
-    }
-
-    let _ = version;
-    &ORCHARD_BUNDLE_PERSONALIZATION
 }
 
 fn orchard_auth_anchor_commitment(version: TxVersion) -> BundleAnchorCommitment {
@@ -532,7 +498,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         orchard_bundle.map(|b| {
             hash_orchard_style_bundle_txid_data(
                 b,
-                orchard_txid_personalization(version),
+                &ORCHARD_BUNDLE_PERSONALIZATION,
                 orchard_txid_anchor_commitment(version),
             )
         })
@@ -649,7 +615,7 @@ pub(crate) fn to_hash_v6(
     h.write_all(
         orchard_digest
             .unwrap_or_else(|| {
-                hash_orchard_style_bundle_txid_empty(&ORCHARD_V6_BUNDLE_PERSONALIZATION)
+                hash_orchard_style_bundle_txid_empty(&ORCHARD_BUNDLE_PERSONALIZATION)
             })
             .as_bytes(),
     )
@@ -785,11 +751,11 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         orchard_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::OrchardDigest {
         orchard_bundle.map_or_else(
-            || hash_orchard_style_auth_empty(orchard_auth_personalization(version)),
+            || hash_orchard_style_auth_empty(&ORCHARD_BUNDLE_PERSONALIZATION),
             |b| {
                 hash_orchard_style_auth_data(
                     b,
-                    orchard_auth_personalization(version),
+                    &ORCHARD_BUNDLE_PERSONALIZATION,
                     orchard_auth_anchor_commitment(version),
                 )
             },

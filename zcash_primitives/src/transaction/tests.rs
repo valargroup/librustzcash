@@ -96,6 +96,36 @@ fn v5_auth_commitment_in_nu7_does_not_include_ironwood_digest() {
 
 #[cfg(all(test, zcash_unstable = "nu7"))]
 #[test]
+fn v6_empty_orchard_txid_uses_standard_orchard_personalization() {
+    fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
+        Params::new().hash_length(32).personal(personal).hash(&[])
+    }
+
+    let tx_data =
+        TransactionData::from_parts_v6(BranchId::Nu7, 0, 0u32.into(), None, None, None, None);
+    let txid_parts = tx_data.digest(TxIdDigester);
+    let tx = tx_data.freeze().unwrap();
+
+    assert!(txid_parts.orchard_digest.is_none());
+    assert!(txid_parts.ironwood_digest.is_none());
+
+    let mut personal = [0; 16];
+    personal[..12].copy_from_slice(b"ZcashTxHash_");
+    personal[12..].copy_from_slice(&u32::from(BranchId::Nu7).to_le_bytes());
+
+    let mut expected = Params::new().hash_length(32).personal(&personal).to_state();
+    expected.update(txid_parts.header_digest.as_bytes());
+    expected.update(empty_hash(b"ZTxIdTranspaHash").as_bytes());
+    expected.update(empty_hash(b"ZTxIdSaplingHash").as_bytes());
+    expected.update(empty_hash(b"ZTxIdOrchardHash").as_bytes());
+    expected.update(empty_hash(b"ZTxIdIronwd_Hash").as_bytes());
+
+    let expected = expected.finalize();
+    assert_eq!(&tx.txid().as_ref()[..], expected.as_bytes());
+}
+
+#[cfg(all(test, zcash_unstable = "nu7"))]
+#[test]
 fn v6_branch_reconstruction_preserves_ironwood_bundle() {
     use proptest::{strategy::ValueTree, test_runner::TestRunner};
 
