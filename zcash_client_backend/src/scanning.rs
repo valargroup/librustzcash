@@ -572,7 +572,7 @@ impl fmt::Display for ScanError {
                 txid, tree, index, ..
             } => write!(
                 f,
-                "{tree:?} output {index} of transaction {txid} was improperly encoded."
+                "{tree:?} compact item {index} of transaction {txid} was improperly encoded."
             ),
             PrevHashMismatch { at_height } => write!(
                 f,

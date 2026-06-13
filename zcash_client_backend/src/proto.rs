@@ -140,8 +140,11 @@ impl compact_formats::CompactSaplingOutput {
     ///
     /// A convenience method that parses [`field@Self::cmu`].
     pub fn cmu(&self) -> Result<ExtractedNoteCommitment, CompactFormatError> {
-        let mut repr = [0; 32];
-        repr.copy_from_slice(&self.cmu[..]);
+        let repr = self
+            .cmu
+            .as_slice()
+            .try_into()
+            .map_err(CompactFormatError::InvalidLength)?;
         Option::from(ExtractedNoteCommitment::from_bytes(&repr))
             .ok_or(CompactFormatError::InvalidValue)
     }

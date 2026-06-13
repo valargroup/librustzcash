@@ -319,14 +319,20 @@ where
         let tx_index =
             TxIndex::try_from(tx.index).expect("Cannot fit more than 2^16 transactions in a block");
 
+        let sapling_spend_nullifiers = tx
+            .spends
+            .iter()
+            .enumerate()
+            .map(|(i, spend)| {
+                spend.nf().map_err(|_| {
+                    invalid_compact_encoding(cur_height, txid, NoteCommitmentTree::Sapling, i)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let (sapling_spends, sapling_unlinked_nullifiers) = find_spent(
-            &tx.spends,
+            &sapling_spend_nullifiers,
             &nullifiers.sapling,
-            |spend| {
-                spend.nf().expect(
-                    "Could not deserialize nullifier for spend from protobuf representation.",
-                )
-            },
+            |nf| *nf,
             WalletSpend::from_parts,
         );
 
@@ -334,14 +340,20 @@ where
 
         #[cfg(feature = "orchard")]
         let orchard_spends = {
+            let orchard_action_nullifiers = tx
+                .actions
+                .iter()
+                .enumerate()
+                .map(|(i, spend)| {
+                    spend.nf().map_err(|_| {
+                        invalid_compact_encoding(cur_height, txid, NoteCommitmentTree::Orchard, i)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let (orchard_spends, orchard_unlinked_nullifiers) = find_spent(
-                &tx.actions,
+                &orchard_action_nullifiers,
                 &nullifiers.orchard,
-                |spend| {
-                    spend.nf().expect(
-                        "Could not deserialize nullifier for spend from protobuf representation.",
-                    )
-                },
+                |nf| *nf,
                 WalletSpend::from_parts,
             );
             orchard_nullifier_map.push((tx_index, txid, orchard_unlinked_nullifiers));
@@ -349,14 +361,20 @@ where
         };
         #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
         let ironwood_spends = {
+            let ironwood_action_nullifiers = tx
+                .ironwood_actions
+                .iter()
+                .enumerate()
+                .map(|(i, spend)| {
+                    spend.nf().map_err(|_| {
+                        invalid_compact_encoding(cur_height, txid, NoteCommitmentTree::Ironwood, i)
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let (ironwood_spends, ironwood_unlinked_nullifiers) = find_spent(
-                &tx.ironwood_actions,
+                &ironwood_action_nullifiers,
                 &nullifiers.orchard,
-                |spend| {
-                    spend.nf().expect(
-                        "Could not deserialize nullifier for spend from protobuf representation.",
-                    )
-                },
+                |nf| *nf,
                 |index, nf, account_id| {
                     WalletSpend::from_parts(tx.actions.len() + index, nf, account_id)
                 },
@@ -1332,6 +1350,126 @@ mod tests {
         }
     }
 
+    fn malformed_sapling_spend_block() -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{CompactBlock, CompactSaplingSpend, CompactTx};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![CompactTx {
+                index: 0,
+                txid: vec![2; 32],
+                fee: 0,
+                spends: vec![CompactSaplingSpend { nf: vec![3; 31] }],
+                outputs: vec![],
+                actions: vec![],
+                vin: vec![],
+                vout: vec![],
+                ironwood_actions: vec![],
+            }],
+            chain_metadata: None,
+        }
+    }
+
+    fn malformed_sapling_output_block() -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{CompactBlock, CompactSaplingOutput, CompactTx};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![CompactTx {
+                index: 0,
+                txid: vec![2; 32],
+                fee: 0,
+                spends: vec![],
+                outputs: vec![CompactSaplingOutput {
+                    cmu: vec![3; 31],
+                    ephemeral_key: vec![4; 32],
+                    ciphertext: vec![5; 52],
+                }],
+                actions: vec![],
+                vin: vec![],
+                vout: vec![],
+                ironwood_actions: vec![],
+            }],
+            chain_metadata: None,
+        }
+    }
+
+    #[cfg(feature = "orchard")]
+    fn malformed_orchard_nullifier_block() -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![CompactTx {
+                index: 0,
+                txid: vec![2; 32],
+                fee: 0,
+                spends: vec![],
+                outputs: vec![],
+                actions: vec![CompactOrchardAction {
+                    nullifier: vec![3; 31],
+                    cmx: vec![4; 32],
+                    ephemeral_key: vec![5; 32],
+                    ciphertext: vec![6; 52],
+                }],
+                vin: vec![],
+                vout: vec![],
+                ironwood_actions: vec![],
+            }],
+            chain_metadata: None,
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn malformed_ironwood_nullifier_block() -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{ChainMetadata, CompactBlock, CompactOrchardAction};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![crate::proto::compact_formats::CompactTx {
+                index: 0,
+                txid: vec![2; 32],
+                fee: 0,
+                spends: vec![],
+                outputs: vec![],
+                actions: vec![],
+                vin: vec![],
+                vout: vec![],
+                ironwood_actions: vec![CompactOrchardAction {
+                    nullifier: vec![3; 31],
+                    cmx: vec![4; 32],
+                    ephemeral_key: vec![5; 32],
+                    ciphertext: vec![6; 52],
+                }],
+            }],
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: 0,
+                ironwood_commitment_tree_size: 1,
+            }),
+        }
+    }
+
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     fn empty_block_with_ironwood_tree_size(
         ironwood_tree_size: u32,
@@ -1379,17 +1517,19 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-    fn assert_ironwood_decode_error(err: &ScanError) {
+    fn assert_decode_error(err: &ScanError, expected_tree: NoteCommitmentTree) {
         match err {
             ScanError::EncodingInvalid { tree, index, .. } => {
-                assert_eq!(*tree, NoteCommitmentTree::Ironwood);
+                assert_eq!(*tree, expected_tree);
                 assert_eq!(*index, 0);
             }
-            err => panic!("expected an Ironwood decoding error, got {err:?}"),
+            err => panic!("expected a compact decoding error, got {err:?}"),
         }
 
-        assert!(err.to_string().contains("Ironwood output 0"));
+        assert!(
+            err.to_string()
+                .contains(&format!("{expected_tree:?} compact item 0"))
+        );
     }
 
     #[test]
@@ -1531,7 +1671,7 @@ mod tests {
             Err(err) => err,
         };
 
-        assert_ironwood_decode_error(&err);
+        assert_decode_error(&err, NoteCommitmentTree::Ironwood);
     }
 
     #[test]
@@ -1543,6 +1683,88 @@ mod tests {
             .add_block(&Network::TestNetwork, malformed_ironwood_action_block())
             .expect_err("malformed Ironwood action should fail decoding");
 
-        assert_ironwood_decode_error(&err);
+        assert_decode_error(&err, NoteCommitmentTree::Ironwood);
+    }
+
+    #[test]
+    fn scan_block_reports_malformed_sapling_spend_nullifier() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            malformed_sapling_spend_block(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            None,
+        ) {
+            Ok(_) => panic!("malformed Sapling spend nullifier should fail decoding"),
+            Err(err) => err,
+        };
+
+        assert_decode_error(&err, NoteCommitmentTree::Sapling);
+    }
+
+    #[test]
+    fn scan_block_reports_malformed_sapling_output_cmu() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            malformed_sapling_output_block(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            None,
+        ) {
+            Ok(_) => panic!("malformed Sapling output commitment should fail decoding"),
+            Err(err) => err,
+        };
+
+        assert_decode_error(&err, NoteCommitmentTree::Sapling);
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_block_reports_malformed_orchard_nullifier() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            malformed_orchard_nullifier_block(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            None,
+        ) {
+            Ok(_) => panic!("malformed Orchard nullifier should fail decoding"),
+            Err(err) => err,
+        };
+
+        assert_decode_error(&err, NoteCommitmentTree::Orchard);
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn scan_block_reports_malformed_ironwood_nullifier() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            malformed_ironwood_nullifier_block(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            None,
+        ) {
+            Ok(_) => panic!("malformed Ironwood nullifier should fail decoding"),
+            Err(err) => err,
+        };
+
+        assert_decode_error(&err, NoteCommitmentTree::Ironwood);
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn batch_runners_report_malformed_ironwood_nullifier() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let mut runners = BatchRunners::<_, (), ()>::for_keys(10, &scanning_keys);
+        let err = runners
+            .add_block(&Network::TestNetwork, malformed_ironwood_nullifier_block())
+            .expect_err("malformed Ironwood nullifier should fail decoding");
+
+        assert_decode_error(&err, NoteCommitmentTree::Ironwood);
     }
 }
