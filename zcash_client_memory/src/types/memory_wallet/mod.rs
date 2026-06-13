@@ -522,24 +522,8 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             .get(&note.txid())
             .ok_or_else(|| Error::TransactionNotFound(note.txid()))?;
 
-        let unscanned_ranges = self.unscanned_ranges();
-
-        let note_in_unscanned_range =
-            unscanned_ranges
-                .iter()
-                .any(|(start_height, end_height, start, end_exclusive)| {
-                    let in_range = note.commitment_tree_position.is_some_and(|pos| {
-                        if let (Some(start), Some(end_exclusive)) = (start, end_exclusive) {
-                            pos >= *start && pos < *end_exclusive
-                        } else {
-                            true
-                        }
-                    });
-                    in_range && *end_height > birthday_height && *start_height <= anchor_height
-                });
-
         Ok(!self.note_is_spent(note, target_height)?
-            && !note_in_unscanned_range
+            && !self.note_in_unscanned_range(note, birthday_height, anchor_height)
             && note.note.value().into_u64() > 5000
             && note_account.ufvk().is_some()
             && note.nullifier().is_some()
@@ -744,6 +728,30 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         self.orchard_tree_shard_end_heights.values().max().copied()
     }
 
+    #[cfg(feature = "orchard")]
+    pub(crate) fn ironwood_tip_shard_end_height(&self) -> Option<BlockHeight> {
+        self.ironwood_tree_shard_end_heights.values().max().copied()
+    }
+
+    pub(crate) fn min_tip_shard_end_height(&self) -> Option<BlockHeight> {
+        #[cfg(feature = "orchard")]
+        {
+            [
+                self.sapling_tip_shard_end_height(),
+                self.orchard_tip_shard_end_height(),
+                self.ironwood_tip_shard_end_height(),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+        }
+
+        #[cfg(not(feature = "orchard"))]
+        {
+            self.sapling_tip_shard_end_height()
+        }
+    }
+
     pub(crate) fn get_sapling_max_checkpointed_height(
         &self,
         chain_tip_height: BlockHeight,
@@ -848,10 +856,60 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
         Ok(None)
     }
 
-    /// Get the unscanned ranges from the scan queue and their corresponding sapling tree indices
-    /// This can be used to determine if a note is in an unscanned range and therefore not spendable
-    pub(crate) fn unscanned_ranges(
+    pub(crate) fn note_in_unscanned_range(
         &self,
+        note: &ReceivedNote,
+        birthday_height: BlockHeight,
+        anchor_height: BlockHeight,
+    ) -> bool {
+        self.position_in_unscanned_range(
+            Self::note_commitment_tree(note),
+            note.commitment_tree_position,
+            birthday_height,
+            anchor_height,
+        )
+    }
+
+    fn position_in_unscanned_range(
+        &self,
+        tree: NoteCommitmentTree,
+        position: Option<Position>,
+        birthday_height: BlockHeight,
+        anchor_height: BlockHeight,
+    ) -> bool {
+        self.unscanned_ranges_for_tree(tree).iter().any(
+            |(start_height, end_height, start, end_exclusive)| {
+                let in_range = position.is_some_and(|pos| {
+                    if let (Some(start), Some(end_exclusive)) = (start, end_exclusive) {
+                        pos >= *start && pos < *end_exclusive
+                    } else {
+                        true
+                    }
+                });
+                in_range && *end_height > birthday_height && *start_height <= anchor_height
+            },
+        )
+    }
+
+    fn note_commitment_tree(note: &ReceivedNote) -> NoteCommitmentTree {
+        match &note.note {
+            zcash_client_backend::wallet::Note::Sapling(_) => NoteCommitmentTree::Sapling,
+            #[cfg(feature = "orchard")]
+            zcash_client_backend::wallet::Note::Orchard(note)
+                if note.version() == orchard::note::NoteVersion::V3 =>
+            {
+                NoteCommitmentTree::Ironwood
+            }
+            #[cfg(feature = "orchard")]
+            zcash_client_backend::wallet::Note::Orchard(_) => NoteCommitmentTree::Orchard,
+        }
+    }
+
+    /// Get the unscanned ranges from the scan queue and their corresponding tree indices.
+    /// This can be used to determine if a note is in an unscanned range and therefore not spendable.
+    pub(crate) fn unscanned_ranges_for_tree(
+        &self,
+        tree: NoteCommitmentTree,
     ) -> Vec<(BlockHeight, BlockHeight, Option<Position>, Option<Position>)> {
         self.scan_queue
             .iter()
@@ -860,28 +918,46 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 (
                     *start,
                     *end,
-                    self.first_subtree_for_height(start)
+                    self.first_subtree_for_height(tree, start)
                         .map(|a| a.position_range_start()),
-                    self.last_subtree_for_height(end)
+                    self.last_subtree_for_height(tree, end)
                         .map(|a| a.position_range_end()),
                 )
             })
             .collect()
     }
 
-    /// Return the address of the last subtree in the sapling tree where note for a give block height was found
-    pub(crate) fn last_subtree_for_height(&self, height: &BlockHeight) -> Option<Address> {
-        self.sapling_tree_shard_end_heights
+    /// Return the address of the last subtree in the given tree where a note for a given block
+    /// height was found.
+    pub(crate) fn last_subtree_for_height(
+        &self,
+        tree: NoteCommitmentTree,
+        height: &BlockHeight,
+    ) -> Option<Address> {
+        let shard_end_heights = match tree {
+            NoteCommitmentTree::Sapling => &self.sapling_tree_shard_end_heights,
+            #[cfg(feature = "orchard")]
+            NoteCommitmentTree::Orchard => &self.orchard_tree_shard_end_heights,
+            #[cfg(feature = "orchard")]
+            NoteCommitmentTree::Ironwood => &self.ironwood_tree_shard_end_heights,
+        };
+
+        shard_end_heights
             .iter()
             .filter(|(_, h)| *h == height)
             .map(|(a, _)| *a)
             .max()
     }
 
-    ///  Return the address of the first subtree in the sapling tree where note for a give block height was found
-    pub(crate) fn first_subtree_for_height(&self, height: &BlockHeight) -> Option<Address> {
+    /// Return the address of the first subtree in the given tree where a note for a given block
+    /// height was found.
+    pub(crate) fn first_subtree_for_height(
+        &self,
+        tree: NoteCommitmentTree,
+        height: &BlockHeight,
+    ) -> Option<Address> {
         // The first subtree is the last subtree for the previous height
-        self.last_subtree_for_height(&height.saturating_sub(1))
+        self.last_subtree_for_height(tree, &height.saturating_sub(1))
     }
 
     /// Makes the required changes to the scan queue to reflect the completion of a scan

@@ -151,9 +151,7 @@ impl<P: consensus::Parameters> WalletWrite for MemoryWalletDb<P> {
         // `ScanRange` uses an exclusive upper bound.
         let chain_end = tip_height + 1;
 
-        let sapling_shard_tip = self.sapling_tip_shard_end_height();
-        // TODO: Handle orchard case as well. See zcash_client_sqlite scanning.rs update_chain_tip
-        let min_shard_tip = sapling_shard_tip;
+        let min_shard_tip = self.min_tip_shard_end_height();
 
         // Create a scanning range for the fragment of the last shard leading up to new tip.
         // We set a lower bound at the wallet birthday (if known), because account creation

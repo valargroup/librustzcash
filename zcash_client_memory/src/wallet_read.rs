@@ -225,15 +225,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             if self.note_is_spent(note, target_height)? {
                 continue;
             }
-            // don't count notes in unscanned ranges
-            let unscanned_ranges = self.unscanned_ranges();
-            for (_, _, start_position, end_position_exclusive) in unscanned_ranges {
-                if note.commitment_tree_position >= start_position
-                    && note.commitment_tree_position < end_position_exclusive
-                {
-                    continue; // note is in an unscanned range. Skip it
-                }
-            }
+            let note_in_unscanned_range =
+                self.note_in_unscanned_range(note, birthday_height, chain_tip_height);
             // don't count notes in unmined transactions or that have expired
             if let Ok(Some(note_tx)) = self.get_transaction(note.txid) {
                 if note_tx.expiry_height() < BlockHeight::from(target_height) {
@@ -253,6 +246,15 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             // Given a note update the balance for the account
             // This includes determining if it is change, spendable, etc
             let update_balance_with_note = |b: &mut Balance| -> Result<(), Error> {
+                if note_in_unscanned_range {
+                    if note.is_change {
+                        b.add_pending_change_value(note.note.value())?;
+                    } else {
+                        b.add_pending_spendable_value(note.note.value())?;
+                    }
+                    return Ok(());
+                }
+
                 match (
                     self.note_is_pending(note, target_height, confirmations_policy)?,
                     note.is_change,
