@@ -69,6 +69,18 @@ const MAGIC_BYTES: &[u8] = b"PCZT";
 const PCZT_VERSION_1: u32 = 1;
 const PCZT_VERSION_2: u32 = 2;
 
+fn postcard_from_exact<'de, T>(bytes: &'de [u8]) -> Result<T, postcard::Error>
+where
+    T: Deserialize<'de>,
+{
+    let (value, remainder) = postcard::take_from_bytes(bytes)?;
+    if remainder.is_empty() {
+        Ok(value)
+    } else {
+        Err(postcard::Error::DeserializeBadEncoding)
+    }
+}
+
 /// A partially-created Zcash transaction.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
 pub struct Pczt {
@@ -298,7 +310,7 @@ impl Pczt {
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let pczt = match version {
-            PCZT_VERSION_1 => postcard::from_bytes::<v1::Pczt>(&bytes[8..])
+            PCZT_VERSION_1 => postcard_from_exact::<v1::Pczt>(&bytes[8..])
                 .map(Into::into)
                 .map_err(ParseError::Invalid),
             PCZT_VERSION_2 => Self::parse_v2_payload(&bytes[8..]),
@@ -318,9 +330,9 @@ impl Pczt {
 
     #[cfg(zcash_unstable = "nu7")]
     fn parse_v2_payload(bytes: &[u8]) -> Result<Self, ParseError> {
-        postcard::from_bytes(bytes)
+        postcard_from_exact(bytes)
             .or_else(|err| {
-                postcard::from_bytes::<PcztWithoutIronwood>(bytes)
+                postcard_from_exact::<PcztWithoutIronwood>(bytes)
                     .map(Into::into)
                     .map_err(|_| err)
             })
@@ -329,7 +341,7 @@ impl Pczt {
 
     #[cfg(not(zcash_unstable = "nu7"))]
     fn parse_v2_payload(bytes: &[u8]) -> Result<Self, ParseError> {
-        postcard::from_bytes(bytes).map_err(ParseError::Invalid)
+        postcard_from_exact(bytes).map_err(ParseError::Invalid)
     }
 
     /// Serializes this PCZT.
@@ -708,6 +720,76 @@ mod tests {
         ::orchard::Anchor::from_bytes(bytes).into_option().unwrap()
     }
 
+    fn encoded_v1_pczt() -> Vec<u8> {
+        let legacy = v1::Pczt {
+            global: common::Global {
+                tx_version: V5_TX_VERSION,
+                version_group_id: V5_VERSION_GROUP_ID,
+                consensus_branch_id: u32::from(BranchId::Nu5),
+                fallback_lock_time: None,
+                expiry_height: 0,
+                coin_type: 1,
+                tx_modifiable: 0,
+                proprietary: BTreeMap::new(),
+            },
+            transparent: transparent::Bundle {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            sapling: sapling::Bundle {
+                spends: vec![],
+                outputs: vec![],
+                value_sum: 0,
+                anchor: [0; 32],
+                bsk: None,
+            },
+            orchard: v1::Bundle {
+                actions: vec![v1::Action {
+                    cv_net: [1; 32],
+                    spend: v1::Spend {
+                        nullifier: [2; 32],
+                        rk: [3; 32],
+                        spend_auth_sig: None,
+                        recipient: None,
+                        value: Some(1000),
+                        rho: Some([4; 32]),
+                        rseed: Some([5; 32]),
+                        fvk: None,
+                        witness: None,
+                        alpha: None,
+                        zip32_derivation: None,
+                        dummy_sk: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    output: v1::Output {
+                        cmx: [6; 32],
+                        ephemeral_key: [7; 32],
+                        enc_ciphertext: vec![8; 580],
+                        out_ciphertext: vec![9; 80],
+                        recipient: None,
+                        value: Some(1000),
+                        rseed: Some([10; 32]),
+                        ock: None,
+                        zip32_derivation: None,
+                        user_address: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    rcv: None,
+                }],
+                flags: 0,
+                value_sum: (0, false),
+                anchor: [0; 32],
+                zkproof: None,
+                bsk: None,
+            },
+        };
+
+        let mut encoded = vec![];
+        encoded.extend_from_slice(MAGIC_BYTES);
+        encoded.extend_from_slice(&PCZT_VERSION_1.to_le_bytes());
+        postcard::to_extend(&legacy, encoded).unwrap()
+    }
+
     #[cfg(feature = "orchard")]
     #[test]
     fn orchard_bundle_rejects_v3_spend_note_plaintext_version() {
@@ -933,74 +1015,7 @@ mod tests {
 
     #[test]
     fn parse_v1_defaults_orchard_note_versions() {
-        let legacy = v1::Pczt {
-            global: common::Global {
-                tx_version: V5_TX_VERSION,
-                version_group_id: V5_VERSION_GROUP_ID,
-                consensus_branch_id: u32::from(BranchId::Nu5),
-                fallback_lock_time: None,
-                expiry_height: 0,
-                coin_type: 1,
-                tx_modifiable: 0,
-                proprietary: BTreeMap::new(),
-            },
-            transparent: transparent::Bundle {
-                inputs: vec![],
-                outputs: vec![],
-            },
-            sapling: sapling::Bundle {
-                spends: vec![],
-                outputs: vec![],
-                value_sum: 0,
-                anchor: [0; 32],
-                bsk: None,
-            },
-            orchard: v1::Bundle {
-                actions: vec![v1::Action {
-                    cv_net: [1; 32],
-                    spend: v1::Spend {
-                        nullifier: [2; 32],
-                        rk: [3; 32],
-                        spend_auth_sig: None,
-                        recipient: None,
-                        value: Some(1000),
-                        rho: Some([4; 32]),
-                        rseed: Some([5; 32]),
-                        fvk: None,
-                        witness: None,
-                        alpha: None,
-                        zip32_derivation: None,
-                        dummy_sk: None,
-                        proprietary: BTreeMap::new(),
-                    },
-                    output: v1::Output {
-                        cmx: [6; 32],
-                        ephemeral_key: [7; 32],
-                        enc_ciphertext: vec![8; 580],
-                        out_ciphertext: vec![9; 80],
-                        recipient: None,
-                        value: Some(1000),
-                        rseed: Some([10; 32]),
-                        ock: None,
-                        zip32_derivation: None,
-                        user_address: None,
-                        proprietary: BTreeMap::new(),
-                    },
-                    rcv: None,
-                }],
-                flags: 0,
-                value_sum: (0, false),
-                anchor: [0; 32],
-                zkproof: None,
-                bsk: None,
-            },
-        };
-
-        let mut encoded = vec![];
-        encoded.extend_from_slice(MAGIC_BYTES);
-        encoded.extend_from_slice(&PCZT_VERSION_1.to_le_bytes());
-        let encoded = postcard::to_extend(&legacy, encoded).unwrap();
-
+        let encoded = encoded_v1_pczt();
         let parsed = Pczt::parse(&encoded).unwrap();
         let action = &parsed.orchard().actions()[0];
         assert_eq!(
@@ -1030,6 +1045,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_v1_rejects_trailing_bytes() {
+        let mut encoded = encoded_v1_pczt();
+        encoded.push(0);
+
+        assert!(matches!(
+            Pczt::parse(&encoded),
+            Err(ParseError::Invalid(postcard::Error::DeserializeBadEncoding))
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn parse_v2_rejects_trailing_bytes() {
+        let mut encoded = pczt_with_one_orchard_action().serialize();
+        encoded.push(0);
+
+        assert!(matches!(
+            Pczt::parse(&encoded),
+            Err(ParseError::Invalid(postcard::Error::DeserializeBadEncoding))
+        ));
+    }
+
     #[cfg(zcash_unstable = "nu7")]
     #[test]
     fn parse_v2_pczt_without_ironwood_bundle() {
@@ -1052,5 +1090,27 @@ mod tests {
         assert!(parsed.ironwood.actions.is_empty());
         assert_eq!(parsed.ironwood.flags, 0b0000_0011);
         assert_eq!(parsed.ironwood.value_sum, (0, true));
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn parse_v2_pczt_without_ironwood_bundle_rejects_trailing_bytes() {
+        let pczt =
+            roles::creator::Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+                .build();
+        let legacy_pczt = PcztWithoutIronwood {
+            global: pczt.global,
+            transparent: pczt.transparent,
+            sapling: pczt.sapling,
+            orchard: pczt.orchard,
+        };
+
+        let mut bytes = vec![];
+        bytes.extend_from_slice(MAGIC_BYTES);
+        bytes.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
+        let mut bytes = postcard::to_extend(&legacy_pczt, bytes).unwrap();
+        bytes.push(0);
+
+        assert!(matches!(Pczt::parse(&bytes), Err(ParseError::Invalid(_))));
     }
 }
