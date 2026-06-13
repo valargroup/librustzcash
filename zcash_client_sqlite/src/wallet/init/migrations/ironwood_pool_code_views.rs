@@ -2,9 +2,18 @@
 
 use std::collections::HashSet;
 
+#[cfg(zcash_unstable = "nu7")]
+use rusqlite::named_params;
 use schemerz_rusqlite::RusqliteMigration;
 use uuid::Uuid;
+use zcash_protocol::consensus;
+#[cfg(zcash_unstable = "nu7")]
+use zcash_protocol::consensus::BlockHeight;
 
+#[cfg(zcash_unstable = "nu7")]
+use crate::error::SqliteClientError;
+#[cfg(zcash_unstable = "nu7")]
+use crate::wallet::parse_tx;
 use crate::wallet::{
     db,
     init::{
@@ -20,9 +29,11 @@ const DEPENDENCIES: &[Uuid] = &[
     v_tx_outputs_key_scopes::MIGRATION_ID,
 ];
 
-pub(super) struct Migration;
+pub(super) struct Migration<P> {
+    pub(super) params: P,
+}
 
-impl schemerz::Migration<Uuid> for Migration {
+impl<P> schemerz::Migration<Uuid> for Migration<P> {
     fn id(&self) -> Uuid {
         MIGRATION_ID
     }
@@ -36,7 +47,83 @@ impl schemerz::Migration<Uuid> for Migration {
     }
 }
 
-impl RusqliteMigration for Migration {
+impl<P: consensus::Parameters> Migration<P> {
+    #[cfg(zcash_unstable = "nu7")]
+    fn backfill_sent_ironwood_pool_codes(
+        &self,
+        transaction: &rusqlite::Transaction,
+    ) -> Result<(), WalletMigrationError> {
+        let mut stmt_transactions = transaction.prepare(
+            "SELECT DISTINCT
+                t.id_tx, t.raw, t.mined_height, t.expiry_height
+             FROM sent_notes sn
+             JOIN transactions t ON t.id_tx = sn.transaction_id
+             WHERE sn.output_pool = 3
+             AND t.raw IS NOT NULL",
+        )?;
+        let rows = stmt_transactions.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>("id_tx")?,
+                row.get::<_, Vec<u8>>("raw")?,
+                row.get::<_, Option<u32>>("mined_height")?
+                    .map(BlockHeight::from),
+                row.get::<_, Option<u32>>("expiry_height")?
+                    .map(BlockHeight::from),
+            ))
+        })?;
+
+        let mut tx_ranges = vec![];
+        for row in rows {
+            let (id_tx, raw, mined_height, expiry_height) = row?;
+            let (_, tx) = parse_tx(&self.params, &raw, mined_height, expiry_height).map_err(
+                |err| match err {
+                    SqliteClientError::CorruptedData(msg) => {
+                        WalletMigrationError::CorruptedData(msg)
+                    }
+                    SqliteClientError::DbError(err) => WalletMigrationError::DbError(err),
+                    other => WalletMigrationError::CorruptedData(format!(
+                        "An error was encountered decoding transaction data: {other:?}"
+                    )),
+                },
+            )?;
+
+            let orchard_action_count = tx
+                .orchard_bundle()
+                .map_or(0, |bundle| bundle.actions().len());
+            let ironwood_action_count = tx
+                .ironwood_bundle()
+                .map_or(0, |bundle| bundle.actions().len());
+            if ironwood_action_count > 0 {
+                tx_ranges.push((
+                    id_tx,
+                    i64::try_from(orchard_action_count).expect("action count fits in i64"),
+                    i64::try_from(orchard_action_count + ironwood_action_count)
+                        .expect("action count fits in i64"),
+                ));
+            }
+        }
+
+        let mut stmt_update = transaction.prepare(
+            "UPDATE sent_notes
+             SET output_pool = 4
+             WHERE transaction_id = :transaction_id
+             AND output_pool = 3
+             AND output_index >= :ironwood_start
+             AND output_index < :ironwood_end",
+        )?;
+        for (id_tx, ironwood_start, ironwood_end) in tx_ranges {
+            stmt_update.execute(named_params! {
+                ":transaction_id": id_tx,
+                ":ironwood_start": ironwood_start,
+                ":ironwood_end": ironwood_end,
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<P: consensus::Parameters> RusqliteMigration for Migration<P> {
     type Error = WalletMigrationError;
 
     fn up(&self, transaction: &rusqlite::Transaction) -> Result<(), Self::Error> {
@@ -60,6 +147,11 @@ impl RusqliteMigration for Migration {
              )",
             [],
         )?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        self.backfill_sent_ironwood_pool_codes(transaction)?;
+        #[cfg(not(zcash_unstable = "nu7"))]
+        let _ = &self.params;
 
         transaction.execute_batch(db::VIEW_RECEIVED_OUTPUTS)?;
         transaction.execute_batch(db::VIEW_RECEIVED_OUTPUT_SPENDS)?;

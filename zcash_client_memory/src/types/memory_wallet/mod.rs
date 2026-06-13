@@ -1131,12 +1131,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << SAPLING_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << SAPLING_SHARD_HEIGHT);
 
             Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    Ratio::new(scanned_count, max_tree_size.saturating_sub(min_tree_size))
                 },
             ))
         }
@@ -1169,7 +1169,7 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 .values()
                 .filter_map(|account| {
                     if account.birthday().height() == *birthday_height {
-                        Some(account.birthday().sapling_frontier().tree_size())
+                        Some(account.birthday().orchard_frontier().tree_size())
                     } else {
                         None
                     }
@@ -1213,12 +1213,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
 
             Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    Ratio::new(scanned_count, max_tree_size.saturating_sub(min_tree_size))
                 },
             ))
         }
@@ -1288,12 +1288,12 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
             let min_idx = shard_index_iter.clone().min().unwrap_or(0);
             let max_idx = shard_index_iter.max().unwrap_or(0);
 
-            let max_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
-            let min_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
+            let min_tree_size = Some(min_idx << ORCHARD_SHARD_HEIGHT);
+            let max_tree_size = Some((max_idx + 1) << ORCHARD_SHARD_HEIGHT);
 
             Ok(start_size.or(min_tree_size).zip(max_tree_size).map(
                 |(min_tree_size, max_tree_size)| {
-                    Ratio::new(scanned_count, max_tree_size - min_tree_size)
+                    Ratio::new(scanned_count, max_tree_size.saturating_sub(min_tree_size))
                 },
             ))
         }
@@ -1435,6 +1435,8 @@ mod tests {
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     use shardtree::store::Checkpoint;
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    use zcash_primitives::block::BlockHash;
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     use zcash_protocol::consensus::Network;
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
@@ -1481,6 +1483,71 @@ mod tests {
                 )
                 .unwrap(),
             Some(BlockHeight::from_u32(1))
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn scan_progress_uses_shard_span_for_all_pools() {
+        let mut wallet = MemoryWalletDb::new(Network::TestNetwork, 100);
+        let birthday = BlockHeight::from_u32(1);
+        let scanned = BlockHeight::from_u32(2);
+        let chain_tip = BlockHeight::from_u32(3);
+
+        wallet.blocks.insert(
+            scanned,
+            MemoryWalletBlock {
+                height: scanned,
+                hash: BlockHash([0; 32]),
+                block_time: 0,
+                _transactions: std::collections::HashSet::new(),
+                _memos: std::collections::HashMap::new(),
+                sapling_commitment_tree_size: Some(3),
+                sapling_output_count: Some(3),
+                orchard_commitment_tree_size: Some(5),
+                orchard_action_count: Some(5),
+                ironwood_commitment_tree_size: Some(7),
+                ironwood_action_count: Some(7),
+            },
+        );
+        wallet
+            .sapling_tree_shard_end_heights
+            .insert(Address::from_parts(SAPLING_SHARD_HEIGHT.into(), 1), scanned);
+        wallet
+            .orchard_tree_shard_end_heights
+            .insert(Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), 1), scanned);
+        wallet
+            .ironwood_tree_shard_end_heights
+            .insert(Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), 1), scanned);
+
+        let sapling_progress = wallet
+            .sapling_scan_progress(&birthday, &scanned, &chain_tip)
+            .unwrap()
+            .unwrap();
+        assert_eq!(*sapling_progress.numerator(), 3);
+        assert_eq!(
+            *sapling_progress.denominator(),
+            1_u64 << SAPLING_SHARD_HEIGHT
+        );
+
+        let orchard_progress = wallet
+            .orchard_scan_progress(&birthday, &scanned, &chain_tip)
+            .unwrap()
+            .unwrap();
+        assert_eq!(*orchard_progress.numerator(), 5);
+        assert_eq!(
+            *orchard_progress.denominator(),
+            1_u64 << ORCHARD_SHARD_HEIGHT
+        );
+
+        let ironwood_progress = wallet
+            .ironwood_scan_progress(&birthday, &scanned, &chain_tip)
+            .unwrap()
+            .unwrap();
+        assert_eq!(*ironwood_progress.numerator(), 7);
+        assert_eq!(
+            *ironwood_progress.denominator(),
+            1_u64 << ORCHARD_SHARD_HEIGHT
         );
     }
 }

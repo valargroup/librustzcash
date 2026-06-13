@@ -240,7 +240,9 @@ pub(super) fn all_migrations<
         Box::new(ironwood_shardtree::Migration {
             params: params.clone(),
         }),
-        Box::new(ironwood_pool_code_views::Migration),
+        Box::new(ironwood_pool_code_views::Migration {
+            params: params.clone(),
+        }),
     ]
 }
 

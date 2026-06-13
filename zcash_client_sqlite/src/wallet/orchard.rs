@@ -780,7 +780,7 @@ pub(crate) mod tests {
         st.scan_cached_blocks(height, 1);
 
         let prover = zcash_proofs::prover::LocalTxProver::bundled();
-        let network = st.network().clone();
+        let network = *st.network();
         let migration = create_orchard_to_ironwood_transaction(
             st.wallet_mut(),
             &network,

@@ -140,15 +140,32 @@ fn orchard_note_from_pczt_parts(
 }
 
 #[cfg(all(feature = "pczt", feature = "orchard"))]
+struct OrchardPcztOutputInfo<AccountId> {
+    pczt_recipient: PcztRecipient<AccountId>,
+    external_address: Option<ZcashAddress>,
+    note: orchard::Note,
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_zip32_derivation_for_account(
+    derivation: &crate::data_api::Zip32Derivation,
+    coin_type: u32,
+) -> orchard::pczt::Zip32Derivation {
+    orchard::pczt::Zip32Derivation::parse(
+        derivation.seed_fingerprint().to_bytes(),
+        vec![
+            zip32::ChildIndex::hardened(32).index(),
+            zip32::ChildIndex::hardened(coin_type).index(),
+            zip32::ChildIndex::hardened(u32::from(derivation.account_index())).index(),
+        ],
+    )
+    .expect("valid")
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
 fn orchard_output_info_from_pczt_action<AccountId>(
     act: &pczt::orchard::Action,
-) -> Result<
-    Option<(
-        (PcztRecipient<AccountId>, Option<ZcashAddress>),
-        orchard::Note,
-    )>,
-    PcztError,
->
+) -> Result<Option<OrchardPcztOutputInfo<AccountId>>, PcztError>
 where
     AccountId: serde::de::DeserializeOwned,
 {
@@ -201,7 +218,15 @@ where
     // If the pczt recipient is not present, this is a dummy note; if the note is not
     // present, then the PCZT has been pruned to make this output unrecoverable and so we
     // also ignore it.
-    Ok(pczt_recipient.zip(note()))
+    Ok(pczt_recipient
+        .zip(note())
+        .map(
+            |((pczt_recipient, external_address), note)| OrchardPcztOutputInfo {
+                pczt_recipient,
+                external_address,
+                note,
+            },
+        ))
 }
 
 #[cfg(feature = "pczt")]
@@ -2618,6 +2643,7 @@ where
         .ok_or(Error::AccountIdNotRecognized)?;
     let ufvk = account.ufvk().ok_or(Error::AccountCannotSpend)?;
     let account_derivation = account.source().key_derivation();
+    let coin_type = params.network_type().coin_type();
 
     // For now we only support turning single-step proposals into PCZTs.
     if proposal.steps().len() > 1 {
@@ -2688,6 +2714,13 @@ where
         .flatten()
         .collect::<HashSet<_>>();
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let ironwood_spends = (0..)
+        .map(|i| build_result.ironwood_meta.spend_action_index(i))
+        .take_while(|item| item.is_some())
+        .flatten()
+        .collect::<HashSet<_>>();
+
     let sapling_outputs = build_state
         .sapling_output_meta
         .into_iter()
@@ -2723,21 +2756,7 @@ where
                         if orchard_spends.contains(&index) {
                             // All spent notes are from the same account.
                             action_updater.set_spend_zip32_derivation(
-                                orchard::pczt::Zip32Derivation::parse(
-                                    derivation.seed_fingerprint().to_bytes(),
-                                    vec![
-                                        zip32::ChildIndex::hardened(32).index(),
-                                        zip32::ChildIndex::hardened(
-                                            params.network_type().coin_type(),
-                                        )
-                                        .index(),
-                                        zip32::ChildIndex::hardened(u32::from(
-                                            derivation.account_index(),
-                                        ))
-                                        .index(),
-                                    ],
-                                )
-                                .expect("valid"),
+                                orchard_zip32_derivation_for_account(derivation, coin_type),
                             );
                         }
                     }
@@ -2764,6 +2783,18 @@ where
     let pczt = pczt.update_ironwood_with(|mut updater| {
         for index in 0..updater.bundle().actions().len() {
             updater.update_action_with(index, |mut action_updater| {
+                // If the account has a known derivation, add the Ironwood key path to the PCZT.
+                if let Some(derivation) = account_derivation {
+                    // ironwood_spends will only contain action indices for the real spends, and
+                    // not the dummy inputs
+                    if ironwood_spends.contains(&index) {
+                        // All spent notes are from the same account.
+                        action_updater.set_spend_zip32_derivation(
+                            orchard_zip32_derivation_for_account(derivation, coin_type),
+                        );
+                    }
+                }
+
                 if let Some((pczt_recipient, external_address)) = ironwood_outputs.get(&index) {
                     if let Some(user_address) = external_address {
                         action_updater.set_output_user_address(user_address.encode());
@@ -2937,7 +2968,7 @@ where
 ///   PCZT has a Sapling bundle, this function will return an error.
 /// - `orchard_vk` is optional to allow the caller to control where the Orchard verifying
 ///   key is generated or cached. If `orchard_vk` is `None`, and the PCZT has an Orchard
-///   bundle, an Orchard verifying key will be generated on the fly.
+///   or Ironwood bundle, an Orchard verifying key will be generated on the fly.
 #[cfg(feature = "pczt")]
 pub fn extract_and_store_transaction_from_pczt<DbT, N>(
     wallet_db: &mut DbT,
@@ -3079,6 +3110,10 @@ where
     }
     if let Some(orchard_vk) = orchard_vk {
         tx_extractor = tx_extractor.with_orchard(orchard_vk);
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            tx_extractor = tx_extractor.with_ironwood(orchard_vk);
+        }
     }
     let transaction = tx_extractor.extract()?;
     let txid = transaction.txid();
@@ -3149,16 +3184,16 @@ where
                 .zip(orchard_output_info)
                 .enumerate()
                 .filter_map(|(output_index, (action, output_info))| {
-                    output_info.map(|((pczt_recipient, external_address), note)| {
+                    output_info.map(|output_info| {
                         let domain = OrchardDomain::for_action(action);
                         to_sent_transaction_output::<_, _, _, DbT, _>(
                             domain,
-                            note,
+                            output_info.note,
                             action,
                             ShieldedProtocol::Orchard,
                             output_index,
-                            pczt_recipient,
-                            external_address,
+                            output_info.pczt_recipient,
+                            output_info.external_address,
                             |note| note.value().inner(),
                             |memo| memo,
                             Note::Orchard,
@@ -3184,16 +3219,16 @@ where
                 .zip(ironwood_output_info)
                 .enumerate()
                 .filter_map(|(raw_output_index, (action, output_info))| {
-                    output_info.map(|((pczt_recipient, external_address), note)| {
+                    output_info.map(|output_info| {
                         let domain = OrchardDomain::for_action(action);
                         to_sent_transaction_output::<_, _, _, DbT, _>(
                             domain,
-                            note,
+                            output_info.note,
                             action,
                             ShieldedProtocol::Orchard,
                             orchard_action_count + raw_output_index,
-                            pczt_recipient,
-                            external_address,
+                            output_info.pczt_recipient,
+                            output_info.external_address,
                             |note| note.value().inner(),
                             |memo| memo,
                             Note::Orchard,

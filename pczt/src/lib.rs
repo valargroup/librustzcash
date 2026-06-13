@@ -137,6 +137,15 @@ struct PcztWithoutIronwood {
 }
 
 #[cfg(zcash_unstable = "nu7")]
+#[derive(Serialize)]
+struct PcztWithoutIronwoodRef<'a> {
+    global: &'a common::Global,
+    transparent: &'a transparent::Bundle,
+    sapling: &'a sapling::Bundle,
+    orchard: &'a orchard::Bundle,
+}
+
+#[cfg(zcash_unstable = "nu7")]
 impl From<PcztWithoutIronwood> for Pczt {
     fn from(pczt: PcztWithoutIronwood) -> Self {
         Self {
@@ -344,11 +353,39 @@ impl Pczt {
         postcard_from_exact(bytes).map_err(ParseError::Invalid)
     }
 
+    #[cfg(zcash_unstable = "nu7")]
+    fn serializes_as_legacy_v2(&self) -> bool {
+        self.global.tx_version != zcash_protocol::constants::V6_TX_VERSION
+            && self.ironwood.actions.is_empty()
+            && self.ironwood.flags == IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED
+            && self.ironwood.value_sum == (0, true)
+            && self.ironwood.anchor == EMPTY_IRONWOOD_ANCHOR
+            && self.ironwood.zkproof.is_none()
+            && self.ironwood.bsk.is_none()
+    }
+
     /// Serializes this PCZT.
     pub fn serialize(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(MAGIC_BYTES);
         bytes.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
+
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            if self.serializes_as_legacy_v2() {
+                return postcard::to_extend(
+                    &PcztWithoutIronwoodRef {
+                        global: &self.global,
+                        transparent: &self.transparent,
+                        sapling: &self.sapling,
+                        orchard: &self.orchard,
+                    },
+                    bytes,
+                )
+                .expect("can serialize into memory");
+            }
+        }
+
         postcard::to_extend(self, bytes).expect("can serialize into memory")
     }
 
@@ -1109,6 +1146,42 @@ mod tests {
         assert!(parsed.ironwood.actions.is_empty());
         assert_eq!(parsed.ironwood.flags, 0b0000_0011);
         assert_eq!(parsed.ironwood.value_sum, (0, true));
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn serialize_v5_without_ironwood_uses_legacy_v2_layout() {
+        let pczt =
+            roles::creator::Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+                .build();
+        let legacy_pczt = PcztWithoutIronwood {
+            global: pczt.global.clone(),
+            transparent: pczt.transparent.clone(),
+            sapling: pczt.sapling.clone(),
+            orchard: pczt.orchard.clone(),
+        };
+
+        let mut expected = vec![];
+        expected.extend_from_slice(MAGIC_BYTES);
+        expected.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
+        let expected = postcard::to_extend(&legacy_pczt, expected).unwrap();
+
+        assert_eq!(pczt.serialize(), expected);
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn serialize_v6_with_empty_actions_preserves_ironwood_metadata() {
+        let anchor = [1; 32];
+        let pczt =
+            roles::creator::Creator::new(BranchId::Nu7.into(), 10_000_000, 133, [0; 32], [0; 32])
+                .with_ironwood_anchor(anchor)
+                .build();
+
+        let parsed = Pczt::parse(&pczt.serialize()).unwrap();
+
+        assert!(parsed.ironwood.actions.is_empty());
+        assert_eq!(*parsed.ironwood().anchor(), anchor);
     }
 
     #[cfg(zcash_unstable = "nu7")]

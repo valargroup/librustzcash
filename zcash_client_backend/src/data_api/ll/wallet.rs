@@ -878,6 +878,9 @@ where
         #[cfg(feature = "orchard")]
         let detectable_via_scanning =
             detectable_via_scanning | d_tx.tx().orchard_bundle().is_some();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let detectable_via_scanning =
+            detectable_via_scanning | d_tx.tx().ironwood_bundle().is_some();
 
         if d_tx.mined_height().is_none() && !detectable_via_scanning {
             wallet_db.queue_tx_retrieval(std::iter::once(d_tx.tx().txid()), None)?
