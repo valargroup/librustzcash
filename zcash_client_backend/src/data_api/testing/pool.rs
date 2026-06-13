@@ -6232,7 +6232,11 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
         .create_orchard_proof(&orchard_pk)
         .unwrap();
     #[cfg(zcash_unstable = "nu7")]
-    let pczt_prover = pczt_prover.create_ironwood_proof(&orchard_pk).unwrap();
+    let pczt_prover = if pczt_prover.requires_ironwood_proof() {
+        pczt_prover.create_ironwood_proof(&orchard_pk).unwrap()
+    } else {
+        pczt_prover
+    };
     let pczt_proven = pczt_prover
         .create_sapling_proofs(&sapling_prover, &sapling_prover)
         .unwrap()

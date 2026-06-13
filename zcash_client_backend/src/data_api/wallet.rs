@@ -2789,37 +2789,42 @@ where
         })?;
 
     #[cfg(zcash_unstable = "nu7")]
-    let pczt = pczt.update_ironwood_with(|mut updater| {
-        for index in 0..updater.bundle().actions().len() {
-            updater.update_action_with(index, |mut action_updater| {
-                // If the account has a known derivation, add the Ironwood key path to the PCZT.
-                if let Some(derivation) = account_derivation {
-                    // ironwood_spends will only contain action indices for the real spends, and
-                    // not the dummy inputs
-                    if ironwood_spends.contains(&index) {
-                        // All spent notes are from the same account.
-                        action_updater.set_spend_zip32_derivation(
-                            orchard_zip32_derivation_for_account(derivation, coin_type),
+    let pczt = if ironwood_spends.is_empty() && ironwood_outputs.is_empty() {
+        pczt
+    } else {
+        pczt.update_ironwood_with(|mut updater| {
+            for index in 0..updater.bundle().actions().len() {
+                updater.update_action_with(index, |mut action_updater| {
+                    // If the account has a known derivation, add the Ironwood key path to the PCZT.
+                    if let Some(derivation) = account_derivation {
+                        // ironwood_spends will only contain action indices for the real spends, and
+                        // not the dummy inputs
+                        if ironwood_spends.contains(&index) {
+                            // All spent notes are from the same account.
+                            action_updater.set_spend_zip32_derivation(
+                                orchard_zip32_derivation_for_account(derivation, coin_type),
+                            );
+                        }
+                    }
+
+                    if let Some((pczt_recipient, external_address)) = ironwood_outputs.get(&index) {
+                        if let Some(user_address) = external_address {
+                            action_updater.set_output_user_address(user_address.encode());
+                        }
+                        action_updater.set_output_proprietary(
+                            PROPRIETARY_OUTPUT_INFO.into(),
+                            postcard::to_allocvec(pczt_recipient).expect(
+                                "postcard encoding of PCZT recipient metadata should not fail",
+                            ),
                         );
                     }
-                }
 
-                if let Some((pczt_recipient, external_address)) = ironwood_outputs.get(&index) {
-                    if let Some(user_address) = external_address {
-                        action_updater.set_output_user_address(user_address.encode());
-                    }
-                    action_updater.set_output_proprietary(
-                        PROPRIETARY_OUTPUT_INFO.into(),
-                        postcard::to_allocvec(pczt_recipient)
-                            .expect("postcard encoding of PCZT recipient metadata should not fail"),
-                    );
-                }
-
-                Ok(())
-            })?;
-        }
-        Ok(())
-    })?;
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })?
+    };
 
     let pczt = pczt
         .update_sapling_with(|mut updater| {
