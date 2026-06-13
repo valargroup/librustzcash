@@ -13,15 +13,13 @@ use zcash_primitives::{
     block::{Block, BlockHeader},
     transaction::{Transaction, components::sapling::zip212_enforcement},
 };
-use zcash_protocol::{
-    ShieldedProtocol,
-    consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
-};
+use zcash_protocol::consensus::{self, BlockHeight, NetworkUpgrade, TxIndex};
 
 use super::{Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received, find_spent};
 use crate::{
     data_api::{
-        BlockMetadata, ScannedBlock, ScannedBundles, ll::wallet::detect_wallet_transparent_outputs,
+        BlockMetadata, NoteCommitmentTree, ScannedBlock, ScannedBundles,
+        ll::wallet::detect_wallet_transparent_outputs,
     },
     scan::{Batch, BatchReceiver, BatchRunner, DecryptedOutput, FullDecryptor, Tasks},
     wallet::{WalletSpend, WalletTx},
@@ -709,9 +707,9 @@ where
 /// Returns the size of the given shielded protocol's note commitment tree both before and
 /// after the application of a block at `at_height`.
 ///
-/// - `activation_height` is the height at which `protocol` activated, if set.
+/// - `activation_height` is the height at which `tree` activated, if set.
 /// - `prior_tree_size` is the tree size as of the end of the previous block, if known.
-/// - `output_counts` yields the number of `protocol` outputs in each transaction of the
+/// - `output_counts` yields the number of `tree` outputs in each transaction of the
 ///   block, in order.
 ///
 /// Returns [`ScanError::TreeSizeUnknown`] if the starting size cannot be determined (the
@@ -723,7 +721,7 @@ fn tree_sizes_around(
     activation_height: Option<BlockHeight>,
     prior_tree_size: Option<u32>,
     mut output_counts: impl Iterator<Item = usize>,
-    protocol: ShieldedProtocol,
+    tree: NoteCommitmentTree,
 ) -> Result<(u32, u32), ScanError> {
     let start_tree_size = match prior_tree_size {
         Some(size) => size,
@@ -731,10 +729,7 @@ fn tree_sizes_around(
         // size is zero; otherwise the starting size is unknown.
         None => match activation_height {
             Some(activation_height) if at_height >= activation_height => {
-                return Err(ScanError::TreeSizeUnknown {
-                    protocol,
-                    at_height,
-                });
+                return Err(ScanError::TreeSizeUnknown { tree, at_height });
             }
             _ => 0,
         },
@@ -745,10 +740,7 @@ fn tree_sizes_around(
     // set the tree checkpoint in `find_received`. Note commitment tree sizes are
     // `u32`-bounded by the protocol, so overflow here indicates corrupt or adversarial
     // input rather than a valid chain state.
-    let overflow = || ScanError::TreeSizeOverflow {
-        protocol,
-        at_height,
-    };
+    let overflow = || ScanError::TreeSizeOverflow { tree, at_height };
     let end_tree_size = output_counts.try_fold(start_tree_size, |acc, tx_outputs| {
         let tx_outputs = u32::try_from(tx_outputs).map_err(|_| overflow())?;
         acc.checked_add(tx_outputs).ok_or_else(overflow)
@@ -807,7 +799,7 @@ impl PositionTracker {
                 b.tx.sapling_bundle()
                     .map_or(0, |bd| bd.shielded_outputs().len())
             }),
-            ShieldedProtocol::Sapling,
+            NoteCommitmentTree::Sapling,
         )?;
 
         #[cfg(feature = "orchard")]
@@ -817,7 +809,7 @@ impl PositionTracker {
             prior_block_metadata.and_then(|m| m.orchard_tree_size()),
             vtx.iter()
                 .map(|b| b.tx.orchard_bundle().map_or(0, |bd| bd.actions().len())),
-            ShieldedProtocol::Orchard,
+            NoteCommitmentTree::Orchard,
         )?;
 
         #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
@@ -827,7 +819,7 @@ impl PositionTracker {
             prior_block_metadata.and_then(|m| m.ironwood_tree_size()),
             vtx.iter()
                 .map(|b| b.tx.ironwood_bundle().map_or(0, |bd| bd.actions().len())),
-            ShieldedProtocol::Orchard,
+            NoteCommitmentTree::Ironwood,
         )?;
         #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
         let ironwood_final_tree_size = 0;
@@ -930,21 +922,38 @@ impl PositionTracker {
 mod tests {
     use proptest::prelude::*;
 
-    use zcash_protocol::{consensus::BlockHeight, testing::arb_protocol};
+    use zcash_protocol::consensus::BlockHeight;
 
     use super::{PositionTracker, tree_sizes_around};
+    use crate::data_api::NoteCommitmentTree;
     use crate::scanning::ScanError;
 
-    // The behaviour of `tree_sizes_around` is independent of the shielded protocol (the
-    // protocol is only echoed back in errors), so these properties are checked for a
-    // `ShieldedProtocol` drawn uniformly at random via `arb_protocol`.
+    fn arb_tree() -> impl Strategy<Value = NoteCommitmentTree> {
+        #[cfg(feature = "orchard")]
+        {
+            prop_oneof![
+                Just(NoteCommitmentTree::Sapling),
+                Just(NoteCommitmentTree::Orchard),
+                Just(NoteCommitmentTree::Ironwood),
+            ]
+        }
+
+        #[cfg(not(feature = "orchard"))]
+        {
+            Just(NoteCommitmentTree::Sapling)
+        }
+    }
+
+    // The behaviour of `tree_sizes_around` is independent of the note commitment tree
+    // (the tree is only echoed back in errors), so these properties are checked for a
+    // `NoteCommitmentTree` drawn uniformly at random.
     proptest! {
         /// A known prior tree size is the starting point, and each transaction's outputs
         /// are summed onto it to reach the final size. An empty block (no transactions, or
         /// transactions with no outputs) leaves the size unchanged.
         #[test]
         fn uses_known_prior_size(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             at_height in 0u32..1_000_000,
             prior in 0u32..100_000,
             counts in prop::collection::vec(0usize..1_000, 0..16),
@@ -955,7 +964,7 @@ mod tests {
                 Some(BlockHeight::from(1u32)),
                 Some(prior),
                 counts.into_iter(),
-                protocol,
+                tree,
             );
             prop_assert_eq!(result.unwrap(), (prior, expected_end));
         }
@@ -964,7 +973,7 @@ mod tests {
         /// empty.
         #[test]
         fn zero_below_activation_without_prior(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             at_height in 0u32..1_000_000,
             activation_offset in 1u32..1_000,
             counts in prop::collection::vec(0usize..1_000, 0..16),
@@ -977,7 +986,7 @@ mod tests {
                 Some(BlockHeight::from(activation)),
                 None,
                 counts.into_iter(),
-                protocol,
+                tree,
             );
             prop_assert_eq!(result.unwrap(), (0, expected_end));
         }
@@ -986,7 +995,7 @@ mod tests {
         /// this network), the tree starts empty regardless of the block height.
         #[test]
         fn zero_when_activation_unset(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             at_height in 0u32..1_000_000,
             counts in prop::collection::vec(0usize..1_000, 0..16),
         ) {
@@ -996,7 +1005,7 @@ mod tests {
                 None,
                 None,
                 counts.into_iter(),
-                protocol,
+                tree,
             );
             prop_assert_eq!(result.unwrap(), (0, expected_end));
         }
@@ -1004,7 +1013,7 @@ mod tests {
         /// A known prior size is used even when the block is below the activation height.
         #[test]
         fn prior_size_takes_precedence_below_activation(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             at_height in 0u32..1_000_000,
             activation_offset in 1u32..1_000,
             prior in 0u32..100_000,
@@ -1017,16 +1026,16 @@ mod tests {
                 Some(BlockHeight::from(activation)),
                 Some(prior),
                 counts.into_iter(),
-                protocol,
+                tree,
             );
             prop_assert_eq!(result.unwrap(), (prior, expected_end));
         }
 
         /// At or above the activation height with no prior size, the starting size cannot
-        /// be determined, and the error reports the queried protocol and height.
+        /// be determined, and the error reports the queried tree and height.
         #[test]
         fn unknown_at_or_above_activation_without_prior(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             activation in 0u32..1_000_000,
             delta in 0u32..1_000,
         ) {
@@ -1037,21 +1046,21 @@ mod tests {
                 Some(BlockHeight::from(activation)),
                 None,
                 std::iter::empty(),
-                protocol,
+                tree,
             );
             let matched = matches!(
                 result,
-                Err(ScanError::TreeSizeUnknown { protocol: p, at_height: h })
-                    if p == protocol && h == BlockHeight::from(at_height)
+                Err(ScanError::TreeSizeUnknown { tree: t, at_height: h })
+                    if t == tree && h == BlockHeight::from(at_height)
             );
             prop_assert!(matched);
         }
 
         /// Applying the block's outputs would push the tree size beyond the `u32` range,
-        /// and the error reports the queried protocol.
+        /// and the error reports the queried tree.
         #[test]
         fn overflow_is_reported(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             headroom in 0u32..100,
             extra in 1u32..100,
         ) {
@@ -1064,11 +1073,11 @@ mod tests {
                 Some(BlockHeight::from(1u32)),
                 Some(prior),
                 std::iter::once(count),
-                protocol,
+                tree,
             );
             let matched = matches!(
                 result,
-                Err(ScanError::TreeSizeOverflow { protocol: p, .. }) if p == protocol
+                Err(ScanError::TreeSizeOverflow { tree: t, .. }) if t == tree
             );
             prop_assert!(matched);
         }
@@ -1076,7 +1085,7 @@ mod tests {
         /// Reaching exactly `u32::MAX` is a valid (non-overflowing) final size.
         #[test]
         fn exact_u32_max_boundary_is_not_overflow(
-            protocol in arb_protocol(),
+            tree in arb_tree(),
             count in 0u32..1_000,
         ) {
             let prior = u32::MAX - count;
@@ -1085,7 +1094,7 @@ mod tests {
                 Some(BlockHeight::from(1u32)),
                 Some(prior),
                 std::iter::once(count as usize),
-                protocol,
+                tree,
             );
             prop_assert_eq!(result.unwrap(), (prior, u32::MAX));
         }

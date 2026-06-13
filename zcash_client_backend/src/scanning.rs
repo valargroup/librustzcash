@@ -12,10 +12,7 @@ use subtle::{ConditionallySelectable, ConstantTimeEq, CtOption};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_note_encryption::{BatchDomain, Domain, ShieldedOutput};
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::{
-    ShieldedProtocol,
-    consensus::{self, BlockHeight},
-};
+use zcash_protocol::consensus::{self, BlockHeight};
 use zip32::Scope;
 
 use crate::{
@@ -504,20 +501,20 @@ pub enum ScanError {
         new_height: BlockHeight,
     },
 
-    /// The note commitment tree size for the given protocol at the proposed new block is not equal
+    /// The note commitment tree size for the given tree at the proposed new block is not equal
     /// to the size at the previous block plus the count of this block's outputs.
     TreeSizeMismatch {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
         given: u32,
         computed: u32,
     },
 
-    /// The size of the note commitment tree for the given protocol was not provided as part of a
+    /// The size of the note commitment tree for the given tree was not provided as part of a
     /// [`CompactBlock`] being scanned, making it impossible to construct the nullifier for a
     /// detected note.
     TreeSizeUnknown {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
     },
 
@@ -525,14 +522,14 @@ pub enum ScanError {
     /// that is invalidated by the data in the block itself. This may be caused by the presence
     /// of default values in the chain metadata.
     TreeSizeInvalid {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
     },
 
-    /// The size of the note commitment tree for the given protocol would exceed the
+    /// The size of the note commitment tree for the given tree would exceed the
     /// `u32` range as a result of applying the outputs in the block being scanned.
     TreeSizeOverflow {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
     },
 }
@@ -591,41 +588,32 @@ impl fmt::Display for ScanError {
                 )
             }
             TreeSizeMismatch {
-                protocol,
+                tree,
                 at_height,
                 given,
                 computed,
             } => {
                 write!(
                     f,
-                    "The {protocol:?} note commitment tree size provided by a compact block did not match the expected size at height {at_height}; given {given}, expected {computed}"
+                    "The {tree:?} note commitment tree size provided by a compact block did not match the expected size at height {at_height}; given {given}, expected {computed}"
                 )
             }
-            TreeSizeUnknown {
-                protocol,
-                at_height,
-            } => {
+            TreeSizeUnknown { tree, at_height } => {
                 write!(
                     f,
-                    "Unable to determine {protocol:?} note commitment tree size at height {at_height}"
+                    "Unable to determine {tree:?} note commitment tree size at height {at_height}"
                 )
             }
-            TreeSizeInvalid {
-                protocol,
-                at_height,
-            } => {
+            TreeSizeInvalid { tree, at_height } => {
                 write!(
                     f,
-                    "Received invalid (potentially default) {protocol:?} note commitment tree size metadata at height {at_height}"
+                    "Received invalid (potentially default) {tree:?} note commitment tree size metadata at height {at_height}"
                 )
             }
-            TreeSizeOverflow {
-                protocol,
-                at_height,
-            } => {
+            TreeSizeOverflow { tree, at_height } => {
                 write!(
                     f,
-                    "The {protocol:?} note commitment tree size at height {at_height} would exceed the `u32` range."
+                    "The {tree:?} note commitment tree size at height {at_height} would exceed the `u32` range."
                 )
             }
         }

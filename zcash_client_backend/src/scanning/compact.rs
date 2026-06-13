@@ -10,7 +10,7 @@ use tracing::{debug, trace};
 use zcash_note_encryption::batch;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_protocol::{
-    ShieldedProtocol, TxId,
+    TxId,
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
 
@@ -804,7 +804,7 @@ impl PositionTracker {
             params: &P,
             block: &CompactBlock,
             prior_block_metadata: Option<&BlockMetadata>,
-            protocol: ShieldedProtocol,
+            tree: NoteCommitmentTree,
             activation_nu: NetworkUpgrade,
             prior_tree_size: impl Fn(&BlockMetadata) -> Option<u32>,
             tx_output_count: impl Fn(&CompactTx) -> usize,
@@ -827,10 +827,7 @@ impl PositionTracker {
                                     if at_height < activation_height {
                                         Ok(0)
                                     } else {
-                                        Err(ScanError::TreeSizeUnknown {
-                                            protocol,
-                                            at_height,
-                                        })
+                                        Err(ScanError::TreeSizeUnknown { tree, at_height })
                                     }
                                 },
                             )
@@ -848,12 +845,9 @@ impl PositionTracker {
                             // check that the subtraction will not underflow; if it would
                             // do so, we were given invalid chain metadata for a block
                             // with outputs in this shielded protocol.
-                            final_tree_size(m).checked_sub(output_count).ok_or(
-                                ScanError::TreeSizeInvalid {
-                                    protocol,
-                                    at_height,
-                                },
-                            )
+                            final_tree_size(m)
+                                .checked_sub(output_count)
+                                .ok_or(ScanError::TreeSizeInvalid { tree, at_height })
                         },
                     )
                 },
@@ -878,7 +872,7 @@ impl PositionTracker {
             params,
             block,
             prior_block_metadata,
-            ShieldedProtocol::Sapling,
+            NoteCommitmentTree::Sapling,
             NetworkUpgrade::Sapling,
             |m| m.sapling_tree_size(),
             |tx| tx.outputs.len(),
@@ -890,7 +884,7 @@ impl PositionTracker {
             params,
             block,
             prior_block_metadata,
-            ShieldedProtocol::Orchard,
+            NoteCommitmentTree::Orchard,
             NetworkUpgrade::Nu5,
             |m| m.orchard_tree_size(),
             |tx| tx.actions.len(),
@@ -902,7 +896,7 @@ impl PositionTracker {
             params,
             block,
             prior_block_metadata,
-            ShieldedProtocol::Orchard,
+            NoteCommitmentTree::Ironwood,
             NetworkUpgrade::Nu7,
             |m| m.ironwood_tree_size(),
             |tx| tx.ironwood_actions.len(),
@@ -978,7 +972,7 @@ impl PositionTracker {
         if let Some(chain_meta) = chain_metadata {
             if chain_meta.sapling_commitment_tree_size != self.sapling_tree_position {
                 return Err(ScanError::TreeSizeMismatch {
-                    protocol: ShieldedProtocol::Sapling,
+                    tree: NoteCommitmentTree::Sapling,
                     at_height,
                     given: chain_meta.sapling_commitment_tree_size,
                     computed: self.sapling_tree_position,
@@ -988,7 +982,7 @@ impl PositionTracker {
             #[cfg(feature = "orchard")]
             if chain_meta.orchard_commitment_tree_size != self.orchard_tree_position {
                 return Err(ScanError::TreeSizeMismatch {
-                    protocol: ShieldedProtocol::Orchard,
+                    tree: NoteCommitmentTree::Orchard,
                     at_height,
                     given: chain_meta.orchard_commitment_tree_size,
                     computed: self.orchard_tree_position,
@@ -998,7 +992,7 @@ impl PositionTracker {
             #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
             if chain_meta.ironwood_commitment_tree_size != self.ironwood_tree_position {
                 return Err(ScanError::TreeSizeMismatch {
-                    protocol: ShieldedProtocol::Orchard,
+                    tree: NoteCommitmentTree::Ironwood,
                     at_height,
                     given: chain_meta.ironwood_commitment_tree_size,
                     computed: self.ironwood_tree_position,
@@ -1293,6 +1287,28 @@ mod tests {
     }
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn empty_block_with_ironwood_tree_size(
+        ironwood_tree_size: u32,
+    ) -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{ChainMetadata, CompactBlock};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![],
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: 0,
+                ironwood_commitment_tree_size: ironwood_tree_size,
+            }),
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     fn assert_ironwood_decode_error(err: &ScanError) {
         match err {
             ScanError::EncodingInvalid { tree, index, .. } => {
@@ -1303,6 +1319,69 @@ mod tests {
         }
 
         assert!(err.to_string().contains("Ironwood output 0"));
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn scan_block_reports_ironwood_tree_size_mismatch() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            empty_block_with_ironwood_tree_size(1),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([1; 32]),
+                Some(0),
+                Some(0),
+                Some(0),
+            )),
+        ) {
+            Ok(_) => panic!("incorrect Ironwood final tree size should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            ScanError::TreeSizeMismatch {
+                tree: NoteCommitmentTree::Ironwood,
+                given: 1,
+                computed: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn scan_block_reports_ironwood_tree_size_invalid() {
+        let mut block = malformed_ironwood_action_block();
+        block
+            .chain_metadata
+            .as_mut()
+            .unwrap()
+            .ironwood_commitment_tree_size = 0;
+
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            block,
+            &scanning_keys,
+            &Nullifiers::empty(),
+            None,
+        ) {
+            Ok(_) => panic!("invalid Ironwood tree size metadata should fail before decoding"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            ScanError::TreeSizeInvalid {
+                tree: NoteCommitmentTree::Ironwood,
+                ..
+            }
+        ));
     }
 
     #[test]

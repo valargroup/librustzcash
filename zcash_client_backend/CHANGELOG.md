@@ -88,9 +88,9 @@ workspace.
   addition to `propose_shielding`.
 - `zcash_client_backend::wallet::WalletTx::new` now takes a `transparent_outputs`
   argument.
-- `zcash_client_backend::scanning::ScanError::EncodingInvalid` now reports a
-  `NoteCommitmentTree`, so compact Ironwood decode failures are labeled
-  separately from Orchard failures.
+- `zcash_client_backend::scanning::ScanError` variants for invalid encodings
+  and tree-size failures now report a `NoteCommitmentTree`, so Ironwood scan
+  failures are labeled separately from Orchard failures.
 
 ### Fixed
 - `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
