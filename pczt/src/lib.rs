@@ -399,6 +399,21 @@ impl Pczt {
             ironwood,
         } = self;
 
+        let version = match (global.tx_version, global.version_group_id) {
+            (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
+            #[cfg(zcash_unstable = "nu7")]
+            (V6_TX_VERSION, V6_VERSION_GROUP_ID) => Ok(TxVersion::V6),
+            (version, version_group_id) => Err(ExtractError::UnsupportedTxVersion {
+                version,
+                version_group_id,
+            }),
+        }?;
+
+        #[cfg(zcash_unstable = "nu7")]
+        if !version.has_ironwood() && !ironwood.actions.is_empty() {
+            return Err(ExtractError::IronwoodRequiresV6.into());
+        }
+
         let transparent = transparent
             .into_parsed()
             .map_err(ExtractError::TransparentParse)?;
@@ -411,16 +426,6 @@ impl Pczt {
             .into_parsed_ironwood()
             .map_err(ExtractError::IronwoodParse)?;
 
-        let version = match (global.tx_version, global.version_group_id) {
-            (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
-            #[cfg(zcash_unstable = "nu7")]
-            (V6_TX_VERSION, V6_VERSION_GROUP_ID) => Ok(TxVersion::V6),
-            (version, version_group_id) => Err(ExtractError::UnsupportedTxVersion {
-                version,
-                version_group_id,
-            }),
-        }?;
-
         let consensus_branch_id = BranchId::try_from(global.consensus_branch_id)
             .map_err(|_| ExtractError::UnknownConsensusBranchId)?;
 
@@ -431,7 +436,11 @@ impl Pczt {
         let sapling_bundle = extract_sapling(&sapling)?;
         let orchard_bundle = extract_orchard(&orchard)?;
         #[cfg(zcash_unstable = "nu7")]
-        let ironwood_bundle = extract_ironwood(&ironwood)?;
+        let ironwood_bundle = if version.has_ironwood() {
+            extract_ironwood(&ironwood)?
+        } else {
+            None
+        };
 
         #[cfg(not(zcash_unstable = "nu7"))]
         let tx_data = TransactionData::from_parts(
@@ -449,24 +458,18 @@ impl Pczt {
 
         #[cfg(zcash_unstable = "nu7")]
         let tx_data = match version {
-            TxVersion::V5 => {
-                if ironwood_bundle.is_some() {
-                    return Err(ExtractError::IronwoodRequiresV6.into());
-                }
-
-                TransactionData::from_parts(
-                    version,
-                    consensus_branch_id,
-                    lock_time,
-                    global.expiry_height.into(),
-                    #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
-                    Zatoshis::ZERO,
-                    transparent_bundle,
-                    None,
-                    sapling_bundle,
-                    orchard_bundle,
-                )
-            }
+            TxVersion::V5 => TransactionData::from_parts(
+                version,
+                consensus_branch_id,
+                lock_time,
+                global.expiry_height.into(),
+                #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
+                Zatoshis::ZERO,
+                transparent_bundle,
+                None,
+                sapling_bundle,
+                orchard_bundle,
+            ),
             TxVersion::V6 => TransactionData::from_parts_v6(
                 consensus_branch_id,
                 lock_time,
@@ -966,6 +969,22 @@ mod tests {
             Updater::new(pczt_with_one_orchard_action()).set_v6_orchard_anchor(valid_anchor(1));
 
         assert!(matches!(result, Err(OrchardSpendWitnessError::RequiresV6)));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn extraction_rejects_v5_pczt_with_ironwood_actions() {
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+        set_orchard_style_note_version(&mut pczt.ironwood, orchard::NotePlaintextVersion::V3);
+        pczt.global.tx_version = V5_TX_VERSION;
+        pczt.global.version_group_id = V5_VERSION_GROUP_ID;
+        pczt.global.consensus_branch_id = u32::from(BranchId::Nu5);
+
+        assert!(matches!(
+            pczt.into_effects(),
+            Err(ExtractError::IronwoodRequiresV6)
+        ));
     }
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]

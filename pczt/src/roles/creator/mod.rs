@@ -143,7 +143,8 @@ impl Creator {
     ///
     /// Returns `None` if the `TxVersion` is incompatible with PCZTs, or if
     /// Orchard-shaped bundles use note plaintext versions that are invalid for
-    /// their pools.
+    /// their pools, or if Ironwood actions are present for a transaction version
+    /// that does not support Ironwood.
     ///
     /// [`Builder`]: zcash_primitives::transaction::builder::Builder
     #[cfg(feature = "zcp-builder")]
@@ -195,6 +196,10 @@ impl Creator {
             .ironwood
             .map(crate::orchard::Bundle::serialize_from)
             .unwrap_or_else(crate::empty_ironwood_bundle);
+        #[cfg(zcash_unstable = "nu7")]
+        if !parts.version.has_ironwood() && !ironwood.actions.is_empty() {
+            return None;
+        }
         #[cfg(zcash_unstable = "nu7")]
         ironwood.validate_ironwood_note_plaintext_versions().ok()?;
 

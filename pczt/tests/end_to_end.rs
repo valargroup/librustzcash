@@ -92,6 +92,42 @@ fn creator_accepts_v6_pczt_parts() {
 }
 
 #[cfg(zcash_unstable = "nu7")]
+#[test]
+fn creator_accepts_v5_pczt_parts_without_ironwood_bundle() {
+    assert!(
+        Creator::build_from_parts(PcztParts {
+            params: nu7_network(),
+            version: TxVersion::V5,
+            consensus_branch_id: BranchId::Nu5,
+            lock_time: 0,
+            expiry_height: 0u32.into(),
+            transparent: None,
+            sapling: None,
+            orchard: None,
+            ironwood: None,
+        })
+        .is_some()
+    );
+}
+
+#[cfg(zcash_unstable = "nu7")]
+#[test]
+fn creator_rejects_v5_pczt_parts_with_ironwood_bundle() {
+    let mut parts = nu7_pczt_parts_with_orchard_style_outputs(true);
+    assert!(
+        parts
+            .ironwood
+            .as_ref()
+            .is_some_and(|bundle| !bundle.actions().is_empty())
+    );
+
+    parts.version = TxVersion::V5;
+    parts.consensus_branch_id = BranchId::Nu5;
+
+    assert!(Creator::build_from_parts(parts).is_none());
+}
+
+#[cfg(zcash_unstable = "nu7")]
 fn nu7_pczt_parts_with_orchard_style_outputs(ironwood: bool) -> PcztParts<Nu7Network> {
     let params = nu7_network();
 

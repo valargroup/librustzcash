@@ -40,6 +40,8 @@ workspace.
 - PCZT parsing now rejects trailing bytes after v1 and v2 payloads.
 - Creator output from transaction builder parts now uses the same empty
   Ironwood bundle fallback as legacy PCZT parsing.
+- `Creator::build_from_parts` now rejects Ironwood actions for transaction
+  versions that do not support Ironwood.
 
 ## [0.7.0] - 2026-06-02
 
