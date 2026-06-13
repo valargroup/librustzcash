@@ -57,6 +57,20 @@ type TaggedOrchardBatchRunner<IvkTag, Tasks> = BatchRunner<
     Tasks,
 >;
 
+fn checked_tree_size_add(
+    tree: NoteCommitmentTree,
+    at_height: BlockHeight,
+    position: u32,
+    output_count: usize,
+) -> Result<u32, ScanError> {
+    let output_count =
+        u32::try_from(output_count).map_err(|_| ScanError::TreeSizeOverflow { tree, at_height })?;
+
+    position
+        .checked_add(output_count)
+        .ok_or(ScanError::TreeSizeOverflow { tree, at_height })
+}
+
 fn invalid_compact_encoding(
     at_height: BlockHeight,
     txid: TxId,
@@ -363,7 +377,7 @@ where
 
         let (mut sapling_outputs, mut sapling_nc) = find_received(
             cur_height,
-            pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
+            pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(cur_height, &tx)?,
             txid,
             |output_idx| output_idx,
             |output_idx| pos_tracker.sapling_note_position(output_idx),
@@ -402,7 +416,7 @@ where
         #[cfg(feature = "orchard")]
         let (mut orchard_outputs, mut orchard_nc) = find_received(
             cur_height,
-            pos_tracker.compact_tx_contains_last_orchard_actions_in_block(&tx),
+            pos_tracker.compact_tx_contains_last_orchard_actions_in_block(cur_height, &tx)?,
             txid,
             |output_idx| output_idx,
             |output_idx| pos_tracker.orchard_note_position(output_idx),
@@ -437,7 +451,7 @@ where
         #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
         let (mut ironwood_outputs, mut ironwood_nc) = find_received(
             cur_height,
-            pos_tracker.compact_tx_contains_last_ironwood_actions_in_block(&tx),
+            pos_tracker.compact_tx_contains_last_ironwood_actions_in_block(cur_height, &tx)?,
             txid,
             // Ironwood is represented as Orchard-shaped V3 outputs at this API boundary. Offset
             // Ironwood action indices by the Orchard action count so mixed-bundle transactions have
@@ -758,7 +772,7 @@ where
             ));
         }
 
-        pos_tracker.increment_over_compact_tx(&tx);
+        pos_tracker.increment_over_compact_tx(cur_height, &tx)?;
     }
 
     pos_tracker.check_end_of_compact_block_consistency(cur_height, block.chain_metadata)?;
@@ -814,6 +828,11 @@ impl PositionTracker {
             P: consensus::Parameters,
         {
             let at_height = block.height();
+            let overflow = || ScanError::TreeSizeOverflow { tree, at_height };
+            let output_count = block.vtx.iter().try_fold(0u32, |acc, tx| {
+                let tx_outputs = u32::try_from(tx_output_count(tx)).map_err(|_| overflow())?;
+                acc.checked_add(tx_outputs).ok_or_else(overflow)
+            })?;
 
             let start_tree_size = prior_block_metadata.and_then(prior_tree_size).map_or_else(
                 || {
@@ -833,14 +852,6 @@ impl PositionTracker {
                             )
                         },
                         |m| {
-                            let output_count: u32 = block
-                                .vtx
-                                .iter()
-                                .map(&tx_output_count)
-                                .sum::<usize>()
-                                .try_into()
-                                .expect("Shielded output count cannot exceed a u32");
-
                             // The default for `final_tree_size(m)` is zero, so we need to
                             // check that the subtraction will not underflow; if it would
                             // do so, we were given invalid chain metadata for a block
@@ -858,12 +869,8 @@ impl PositionTracker {
             // last transaction in the block that adds notes to the tree. This enables us
             // to correctly set the tree checkpoint in `find_received`.
             let end_tree_size = start_tree_size
-                + block
-                    .vtx
-                    .iter()
-                    .map(tx_output_count)
-                    .map(|tx_outputs| u32::try_from(tx_outputs).unwrap())
-                    .sum::<u32>();
+                .checked_add(output_count)
+                .ok_or_else(overflow)?;
 
             Ok((start_tree_size, end_tree_size))
         }
@@ -919,40 +926,82 @@ impl PositionTracker {
         })
     }
 
-    fn compact_tx_contains_last_sapling_outputs_in_block(&self, tx: &CompactTx) -> bool {
-        self.sapling_tree_position
-            + u32::try_from(tx.outputs.len()).expect("Sapling output count cannot exceed a u32")
-            == self.sapling_final_tree_size
+    fn compact_tx_contains_last_sapling_outputs_in_block(
+        &self,
+        at_height: BlockHeight,
+        tx: &CompactTx,
+    ) -> Result<bool, ScanError> {
+        checked_tree_size_add(
+            NoteCommitmentTree::Sapling,
+            at_height,
+            self.sapling_tree_position,
+            tx.outputs.len(),
+        )
+        .map(|position| position == self.sapling_final_tree_size)
     }
 
     #[cfg(feature = "orchard")]
-    fn compact_tx_contains_last_orchard_actions_in_block(&self, tx: &CompactTx) -> bool {
-        self.orchard_tree_position
-            + u32::try_from(tx.actions.len()).expect("Orchard action count cannot exceed a u32")
-            == self.orchard_final_tree_size
+    fn compact_tx_contains_last_orchard_actions_in_block(
+        &self,
+        at_height: BlockHeight,
+        tx: &CompactTx,
+    ) -> Result<bool, ScanError> {
+        checked_tree_size_add(
+            NoteCommitmentTree::Orchard,
+            at_height,
+            self.orchard_tree_position,
+            tx.actions.len(),
+        )
+        .map(|position| position == self.orchard_final_tree_size)
     }
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-    fn compact_tx_contains_last_ironwood_actions_in_block(&self, tx: &CompactTx) -> bool {
-        self.ironwood_tree_position
-            + u32::try_from(tx.ironwood_actions.len())
-                .expect("Ironwood action count cannot exceed a u32")
-            == self.ironwood_final_tree_size
+    fn compact_tx_contains_last_ironwood_actions_in_block(
+        &self,
+        at_height: BlockHeight,
+        tx: &CompactTx,
+    ) -> Result<bool, ScanError> {
+        checked_tree_size_add(
+            NoteCommitmentTree::Ironwood,
+            at_height,
+            self.ironwood_tree_position,
+            tx.ironwood_actions.len(),
+        )
+        .map(|position| position == self.ironwood_final_tree_size)
     }
 
-    fn increment_over_compact_tx(&mut self, tx: &CompactTx) {
-        self.sapling_tree_position +=
-            u32::try_from(tx.outputs.len()).expect("Sapling output count cannot exceed a u32");
+    fn increment_over_compact_tx(
+        &mut self,
+        at_height: BlockHeight,
+        tx: &CompactTx,
+    ) -> Result<(), ScanError> {
+        self.sapling_tree_position = checked_tree_size_add(
+            NoteCommitmentTree::Sapling,
+            at_height,
+            self.sapling_tree_position,
+            tx.outputs.len(),
+        )?;
+
         #[cfg(feature = "orchard")]
         {
-            self.orchard_tree_position +=
-                u32::try_from(tx.actions.len()).expect("Orchard action count cannot exceed a u32");
+            self.orchard_tree_position = checked_tree_size_add(
+                NoteCommitmentTree::Orchard,
+                at_height,
+                self.orchard_tree_position,
+                tx.actions.len(),
+            )?;
         }
         #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
         {
-            self.ironwood_tree_position += u32::try_from(tx.ironwood_actions.len())
-                .expect("Ironwood action count cannot exceed a u32");
+            self.ironwood_tree_position = checked_tree_size_add(
+                NoteCommitmentTree::Ironwood,
+                at_height,
+                self.ironwood_tree_position,
+                tx.ironwood_actions.len(),
+            )?;
         }
+
+        Ok(())
     }
 
     fn check_end_of_compact_block_consistency(
@@ -1021,12 +1070,9 @@ mod tests {
 
     use super::{BatchRunners, scan_block_with_runners};
     use crate::{
-        data_api::BlockMetadata,
-        scanning::{Nullifiers, ScanningKeys, scan_block, testing::fake_compact_block},
+        data_api::{BlockMetadata, NoteCommitmentTree},
+        scanning::{Nullifiers, ScanError, ScanningKeys, scan_block, testing::fake_compact_block},
     };
-
-    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-    use crate::{data_api::NoteCommitmentTree, scanning::ScanError};
 
     #[test]
     fn scan_block_with_my_tx() {
@@ -1308,6 +1354,31 @@ mod tests {
         }
     }
 
+    fn block_with_one_sapling_output() -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{CompactBlock, CompactSaplingOutput, CompactTx};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![CompactTx {
+                index: 0,
+                txid: vec![2; 32],
+                fee: 0,
+                spends: vec![],
+                outputs: vec![CompactSaplingOutput::default()],
+                actions: vec![],
+                vin: vec![],
+                vout: vec![],
+                ironwood_actions: vec![],
+            }],
+            chain_metadata: None,
+        }
+    }
+
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     fn assert_ironwood_decode_error(err: &ScanError) {
         match err {
@@ -1319,6 +1390,67 @@ mod tests {
         }
 
         assert!(err.to_string().contains("Ironwood output 0"));
+    }
+
+    #[test]
+    fn scan_block_reports_sapling_tree_size_overflow() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            block_with_one_sapling_output(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([1; 32]),
+                Some(u32::MAX),
+                #[cfg(feature = "orchard")]
+                Some(0),
+                #[cfg(feature = "orchard")]
+                Some(0),
+            )),
+        ) {
+            Ok(_) => panic!("overflowing Sapling tree size should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            ScanError::TreeSizeOverflow {
+                tree: NoteCommitmentTree::Sapling,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn scan_block_reports_ironwood_tree_size_overflow() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            malformed_ironwood_action_block(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            Some(&BlockMetadata::from_parts(
+                BlockHeight::from(0),
+                BlockHash([1; 32]),
+                Some(0),
+                Some(0),
+                Some(u32::MAX),
+            )),
+        ) {
+            Ok(_) => panic!("overflowing Ironwood tree size should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            ScanError::TreeSizeOverflow {
+                tree: NoteCommitmentTree::Ironwood,
+                ..
+            }
+        ));
     }
 
     #[test]
