@@ -14,8 +14,8 @@ pub struct BlockId {
 /// Both BlockIDs must be heights; specification by hash is not yet supported.
 ///
 /// If no pool types are specified, the server should default to the legacy
-/// behavior of returning only data relevant to the shielded (Sapling and
-/// Orchard, and Ironwood) pools; otherwise, the server should prune `CompactBlock`s returned
+/// behavior of returning only data relevant to the shielded (Sapling, Orchard,
+/// and Ironwood) pools; otherwise, the server should prune `CompactBlock`s returned
 /// to include only data relevant to the requested pool types. Clients MUST
 /// verify that the version of the server they are connected to are capable
 /// of returning pruned and/or transparent data before setting `poolTypes`
@@ -924,7 +924,7 @@ pub mod compact_tx_streamer_client {
             self.inner.unary(req, path, codec).await
         }
         /// Returns a stream of information about roots of subtrees of the note commitment tree
-        /// for the specified shielded protocol (Sapling or Orchard).
+        /// for the specified shielded protocol (Sapling, Orchard, or Ironwood).
         pub async fn get_subtree_roots(
             &mut self,
             request: impl tonic::IntoRequest<super::GetSubtreeRootsArg>,
