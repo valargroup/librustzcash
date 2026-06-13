@@ -702,6 +702,14 @@ impl PositionTracker {
             self.orchard_tree_position + u32::try_from(output_idx).unwrap(),
         ))
     }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn ironwood_note_position(&self, output_idx: usize) -> Position {
+        Position::from(u64::from(
+            self.ironwood_tree_position
+                + u32::try_from(output_idx).expect("Ironwood action count cannot exceed a u32"),
+        ))
+    }
 }
 
 /// Check for spent notes. The comparison against known-unspent nullifiers is done
