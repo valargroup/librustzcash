@@ -40,6 +40,8 @@ workspace.
 ### Changed
 - `zcash_primitives::transaction::builder`:
   - NU7 coinbase builders no longer expose Orchard outputs.
+  - `Builder::add_orchard_spend` and `Builder::add_ironwood_spend` now
+    explicitly enforce their note-version requirements.
 - `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest
   implementations can distinguish Orchard commitments by transaction format.
 

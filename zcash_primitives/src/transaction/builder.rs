@@ -705,20 +705,29 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
 impl<P: consensus::Parameters, U> Builder<'_, P, U> {
     /// Adds an Orchard note to be spent in this bundle.
     ///
-    /// Returns an error if the given Merkle path does not have the required anchor for
-    /// the given note.
+    /// The note must use [`orchard::note::NoteVersion::V2`].
+    ///
+    /// Returns an error if the given note has an unsupported version, or if
+    /// the given Merkle path does not have the required anchor for the note.
     pub fn add_orchard_spend<FE>(
         &mut self,
         fvk: orchard::keys::FullViewingKey,
         note: orchard::Note,
         merkle_path: orchard::tree::MerklePath,
     ) -> Result<(), Error<FE>> {
-        if let Some(builder) = self.orchard_builder.as_mut() {
-            builder.add_spend(fvk, note, merkle_path)?;
-            Ok(())
-        } else {
-            Err(Error::OrchardBuilderNotAvailable)
+        let builder = self
+            .orchard_builder
+            .as_mut()
+            .ok_or(Error::OrchardBuilderNotAvailable)?;
+
+        if note.version() != orchard::note::NoteVersion::V2 {
+            return Err(Error::OrchardSpend(
+                orchard::builder::SpendError::UnsupportedNoteVersion,
+            ));
         }
+
+        builder.add_spend(fvk, note, merkle_path)?;
+        Ok(())
     }
 
     /// Adds an Orchard recipient to the transaction.
@@ -746,8 +755,12 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
 
     /// Adds an Ironwood note to be spent in this bundle.
     ///
-    /// Returns an error if the given Merkle path does not have the required
-    /// Ironwood anchor for the given note.
+    /// The note must use [`orchard::note::NoteVersion::V3`], the QR/Ironwood
+    /// note plaintext format.
+    ///
+    /// Returns an error if the given note has an unsupported version, or if
+    /// the given Merkle path does not have the required Ironwood anchor for the
+    /// note.
     #[cfg(zcash_unstable = "nu7")]
     pub fn add_ironwood_spend<FE>(
         &mut self,
@@ -755,14 +768,21 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         note: orchard::Note,
         merkle_path: orchard::tree::MerklePath,
     ) -> Result<(), Error<FE>> {
-        if let Some(builder) = self.ironwood_builder.as_mut() {
-            builder
-                .add_spend(fvk, note, merkle_path)
-                .map_err(Error::IronwoodSpend)?;
-            Ok(())
-        } else {
-            Err(Error::IronwoodBuilderNotAvailable)
+        let builder = self
+            .ironwood_builder
+            .as_mut()
+            .ok_or(Error::IronwoodBuilderNotAvailable)?;
+
+        if note.version() != orchard::note::NoteVersion::V3 {
+            return Err(Error::IronwoodSpend(
+                orchard::builder::SpendError::UnsupportedNoteVersion,
+            ));
         }
+
+        builder
+            .add_spend(fvk, note, merkle_path)
+            .map_err(Error::IronwoodSpend)?;
+        Ok(())
     }
 
     /// Adds an Ironwood recipient to the transaction.
@@ -2493,6 +2513,76 @@ mod tests {
                 BranchId::Nu7,
                 TxVersion::V5,
                 None
+            ))
+        );
+    }
+
+    #[cfg(feature = "circuits")]
+    fn orchard_note_with_version(
+        version: orchard::note::NoteVersion,
+    ) -> (
+        orchard::keys::FullViewingKey,
+        orchard::Note,
+        orchard::tree::MerklePath,
+    ) {
+        let sk = orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap();
+        let fvk = orchard::keys::FullViewingKey::from(&sk);
+        let recipient = fvk.address_at(0u32, orchard::keys::Scope::External);
+        let value = orchard::value::NoteValue::from_raw(99);
+        let rho = orchard::note::Rho::from_bytes(&[1; 32]).unwrap();
+        let rseed = (0u8..=255)
+            .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
+            .expect("at least one test rseed is valid");
+        let note =
+            orchard::Note::from_parts_with_version(recipient, value, rho, rseed, version).unwrap();
+        let zero = orchard::tree::MerkleHashOrchard::from_bytes(&[0; 32]).unwrap();
+        let merkle_path = orchard::tree::MerklePath::from_parts(0, [zero; 32]);
+
+        (fvk, note, merkle_path)
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn add_orchard_spend_rejects_v3_note_version() {
+        let tx_height = TEST_NETWORK.activation_height(NetworkUpgrade::Nu5).unwrap();
+        let mut builder = Builder::new(
+            TEST_NETWORK,
+            tx_height,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                #[cfg(zcash_unstable = "nu7")]
+                ironwood_anchor: None,
+            },
+        );
+        let (fvk, note, merkle_path) = orchard_note_with_version(orchard::note::NoteVersion::V3);
+
+        assert_matches!(
+            builder.add_orchard_spend::<Infallible>(fvk, note, merkle_path),
+            Err(Error::OrchardSpend(
+                orchard::builder::SpendError::UnsupportedNoteVersion
+            ))
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    fn add_ironwood_spend_rejects_v2_note_version() {
+        let mut builder = Builder::new(
+            Nu7Network,
+            10u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+            },
+        );
+        let (fvk, note, merkle_path) = orchard_note_with_version(orchard::note::NoteVersion::V2);
+
+        assert_matches!(
+            builder.add_ironwood_spend::<Infallible>(fvk, note, merkle_path),
+            Err(Error::IronwoodSpend(
+                orchard::builder::SpendError::UnsupportedNoteVersion
             ))
         );
     }
