@@ -1335,6 +1335,12 @@ pub(crate) mod tests {
         testing::pool::pczt_single_step::<OrchardPoolTester, SaplingPoolTester>()
     }
 
+    #[cfg(all(feature = "pczt-tests", zcash_unstable = "nu7"))]
+    #[test]
+    fn pczt_single_step_orchard_to_ironwood() {
+        testing::pool::pczt_single_step_orchard_to_ironwood()
+    }
+
     #[cfg(feature = "transparent-inputs")]
     #[test]
     fn wallet_recovery_compute_fees() {

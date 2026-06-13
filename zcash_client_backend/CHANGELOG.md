@@ -92,6 +92,10 @@ workspace.
   `NoteCommitmentTree`, so compact Ironwood decode failures are labeled
   separately from Orchard failures.
 
+### Fixed
+- `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
+  Ironwood sent output metadata added by `create_pczt_from_proposal`.
+
 ### Removed
 - `zcash_client_backend::data_api::WalletUtxo` (use `WalletTransparentOutput`
   instead).

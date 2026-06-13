@@ -6087,9 +6087,59 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     Dsf: DataStoreFactory,
     <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
 {
+    pczt_single_step_with_network::<P0, P1, _>(
+        ds_factory,
+        cache,
+        TestBuilder::DEFAULT_NETWORK,
+        false,
+    );
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard", zcash_unstable = "nu7"))]
+pub fn pczt_single_step_orchard_to_ironwood<Dsf>(ds_factory: Dsf, cache: impl TestCache)
+where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use super::orchard::OrchardPoolTester;
     use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
 
+    let zip212_enforcement_height = std::cmp::max(
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Nu5)
+            .unwrap(),
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Canopy)
+            .unwrap()
+            + ZIP212_GRACE_PERIOD,
+    );
+    let network = LocalNetwork {
+        nu7: Some(zip212_enforcement_height + 1),
+        ..TestBuilder::DEFAULT_NETWORK
+    };
+
+    pczt_single_step_with_network::<OrchardPoolTester, OrchardPoolTester, _>(
+        ds_factory, cache, network, true,
+    );
+}
+
+#[cfg(feature = "pczt")]
+fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+    network: LocalNetwork,
+    expect_ironwood_bundle: bool,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
+
+    #[cfg(not(zcash_unstable = "nu7"))]
+    let _ = expect_ironwood_bundle;
+
     let mut st = TestBuilder::new()
+        .with_network(network)
         .with_data_store_factory(ds_factory)
         .with_block_cache(cache)
         .with_initial_chain_state(|_, network| {
@@ -6178,9 +6228,12 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
     let orchard_pk = ::orchard::circuit::ProvingKey::build();
-    let pczt_proven = Prover::new(pczt_updated)
+    let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)
-        .unwrap()
+        .unwrap();
+    #[cfg(zcash_unstable = "nu7")]
+    let pczt_prover = pczt_prover.create_ironwood_proof(&orchard_pk).unwrap();
+    let pczt_proven = pczt_prover
         .create_sapling_proofs(&sapling_prover, &sapling_prover)
         .unwrap()
         .finish();
@@ -6194,6 +6247,24 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let extract_and_store_result = st.extract_and_store_transaction_from_pczt(pczt_authorized);
     assert_matches!(&extract_and_store_result, Ok(_));
     let txid = extract_and_store_result.unwrap();
+
+    #[cfg(zcash_unstable = "nu7")]
+    {
+        let tx = st
+            .wallet()
+            .get_transaction(txid)
+            .unwrap()
+            .expect("extracted PCZT transaction was stored");
+
+        if expect_ironwood_bundle {
+            assert!(tx.ironwood_bundle().is_some());
+        }
+    }
+
+    let sent_outputs = st.wallet().get_sent_outputs(&txid).unwrap();
+    assert!(sent_outputs.iter().any(|output| {
+        output.value() == transfer_amount && output.external_recipient() == Some(&p1_to)
+    }));
 
     let (h, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(h, 1);
