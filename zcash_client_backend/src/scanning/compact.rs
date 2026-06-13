@@ -10,13 +10,13 @@ use tracing::{debug, trace};
 use zcash_note_encryption::batch;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_protocol::{
-    ShieldedProtocol,
+    ShieldedProtocol, TxId,
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
 
 use super::{Nullifiers, PositionTracker, ScanError, ScanningKeys, find_received, find_spent};
 use crate::{
-    data_api::{BlockMetadata, ScannedBlock, ScannedBundles},
+    data_api::{BlockMetadata, NoteCommitmentTree, ScannedBlock, ScannedBundles},
     proto::compact_formats::{ChainMetadata, CompactBlock, CompactTx},
     scan::{Batch, BatchRunner, CompactDecryptor, Tasks},
     wallet::{WalletSpend, WalletTx},
@@ -56,6 +56,20 @@ type TaggedOrchardBatchRunner<IvkTag, Tasks> = BatchRunner<
     CompactDecryptor,
     Tasks,
 >;
+
+fn invalid_compact_encoding(
+    at_height: BlockHeight,
+    txid: TxId,
+    tree: NoteCommitmentTree,
+    index: usize,
+) -> ScanError {
+    ScanError::EncodingInvalid {
+        at_height,
+        txid,
+        tree,
+        index,
+    }
+}
 
 pub(crate) trait SaplingTasks<IvkTag>: Tasks<TaggedSaplingBatch<IvkTag>> {}
 impl<IvkTag, T: Tasks<TaggedSaplingBatch<IvkTag>>> SaplingTasks<IvkTag> for T {}
@@ -153,12 +167,12 @@ where
                     .enumerate()
                     .map(|(i, output)| {
                         CompactOutputDescription::try_from(output).map_err(|_| {
-                            ScanError::EncodingInvalid {
-                                at_height: block_height,
+                            invalid_compact_encoding(
+                                block_height,
                                 txid,
-                                pool_type: ShieldedProtocol::Sapling,
-                                index: i,
-                            }
+                                NoteCommitmentTree::Sapling,
+                                i,
+                            )
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?,
@@ -173,11 +187,13 @@ where
                     .iter()
                     .enumerate()
                     .map(|(i, action)| {
-                        CompactAction::try_from(action).map_err(|_| ScanError::EncodingInvalid {
-                            at_height: block_height,
-                            txid,
-                            pool_type: ShieldedProtocol::Orchard,
-                            index: i,
+                        CompactAction::try_from(action).map_err(|_| {
+                            invalid_compact_encoding(
+                                block_height,
+                                txid,
+                                NoteCommitmentTree::Orchard,
+                                i,
+                            )
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?,
@@ -192,11 +208,13 @@ where
                     .iter()
                     .enumerate()
                     .map(|(i, action)| {
-                        CompactAction::try_from(action).map_err(|_| ScanError::EncodingInvalid {
-                            at_height: block_height,
-                            txid,
-                            pool_type: ShieldedProtocol::Orchard,
-                            index: i,
+                        CompactAction::try_from(action).map_err(|_| {
+                            invalid_compact_encoding(
+                                block_height,
+                                txid,
+                                NoteCommitmentTree::Ironwood,
+                                i,
+                            )
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?,
@@ -358,12 +376,12 @@ where
                     Ok((
                         SaplingDomain::new(zip212_enforcement),
                         CompactOutputDescription::try_from(output).map_err(|_| {
-                            ScanError::EncodingInvalid {
-                                at_height: cur_height,
+                            invalid_compact_encoding(
+                                cur_height,
                                 txid,
-                                pool_type: ShieldedProtocol::Sapling,
-                                index: i,
-                            }
+                                NoteCommitmentTree::Sapling,
+                                i,
+                            )
                         })?,
                     ))
                 })
@@ -395,12 +413,7 @@ where
                 .enumerate()
                 .map(|(i, action)| {
                     let action = CompactAction::try_from(action).map_err(|_| {
-                        ScanError::EncodingInvalid {
-                            at_height: cur_height,
-                            txid,
-                            pool_type: ShieldedProtocol::Orchard,
-                            index: i,
-                        }
+                        invalid_compact_encoding(cur_height, txid, NoteCommitmentTree::Orchard, i)
                     })?;
                     Ok((OrchardDomain::for_compact_action(&action), action))
                 })
@@ -438,12 +451,7 @@ where
                 .enumerate()
                 .map(|(i, action)| {
                     let action = CompactAction::try_from(action).map_err(|_| {
-                        ScanError::EncodingInvalid {
-                            at_height: cur_height,
-                            txid,
-                            pool_type: ShieldedProtocol::Orchard,
-                            index: i,
-                        }
+                        invalid_compact_encoding(cur_height, txid, NoteCommitmentTree::Ironwood, i)
                     })?;
                     Ok((OrchardDomain::for_compact_action(&action), action))
                 })
@@ -520,12 +528,12 @@ where
                         Ok((
                             SaplingDomain::new(zip212_enforcement),
                             CompactOutputDescription::try_from(output).map_err(|_| {
-                                ScanError::EncodingInvalid {
-                                    at_height: cur_height,
+                                invalid_compact_encoding(
+                                    cur_height,
                                     txid,
-                                    pool_type: ShieldedProtocol::Sapling,
-                                    index: i,
-                                }
+                                    NoteCommitmentTree::Sapling,
+                                    i,
+                                )
                             })?,
                         ))
                     })
@@ -588,12 +596,12 @@ where
                     .enumerate()
                     .map(|(i, action)| {
                         let action = CompactAction::try_from(action).map_err(|_| {
-                            ScanError::EncodingInvalid {
-                                at_height: cur_height,
+                            invalid_compact_encoding(
+                                cur_height,
                                 txid,
-                                pool_type: ShieldedProtocol::Orchard,
-                                index: i,
-                            }
+                                NoteCommitmentTree::Orchard,
+                                i,
+                            )
                         })?;
                         Ok((OrchardDomain::for_compact_action(&action), action))
                     })
@@ -654,12 +662,12 @@ where
                     .enumerate()
                     .map(|(i, action)| {
                         let action = CompactAction::try_from(action).map_err(|_| {
-                            ScanError::EncodingInvalid {
-                                at_height: cur_height,
+                            invalid_compact_encoding(
+                                cur_height,
                                 txid,
-                                pool_type: ShieldedProtocol::Orchard,
-                                index: i,
-                            }
+                                NoteCommitmentTree::Ironwood,
+                                i,
+                            )
                         })?;
                         Ok((OrchardDomain::for_compact_action(&action), action))
                     })
@@ -1023,6 +1031,9 @@ mod tests {
         scanning::{Nullifiers, ScanningKeys, scan_block, testing::fake_compact_block},
     };
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    use crate::{data_api::NoteCommitmentTree, scanning::ScanError};
+
     #[test]
     fn scan_block_with_my_tx() {
         fn go(scan_multithreaded: bool) {
@@ -1244,5 +1255,83 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn malformed_ironwood_action_block() -> crate::proto::compact_formats::CompactBlock {
+        use crate::proto::compact_formats::{ChainMetadata, CompactBlock, CompactOrchardAction};
+
+        CompactBlock {
+            proto_version: 4,
+            height: 1,
+            hash: vec![0; 32],
+            prev_hash: vec![1; 32],
+            time: 0,
+            header: vec![],
+            vtx: vec![crate::proto::compact_formats::CompactTx {
+                index: 0,
+                txid: vec![2; 32],
+                fee: 0,
+                spends: vec![],
+                outputs: vec![],
+                actions: vec![],
+                vin: vec![],
+                vout: vec![],
+                ironwood_actions: vec![CompactOrchardAction {
+                    nullifier: vec![3; 32],
+                    cmx: vec![4; 31],
+                    ephemeral_key: vec![5; 32],
+                    ciphertext: vec![6; 52],
+                }],
+            }],
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: 0,
+                ironwood_commitment_tree_size: 1,
+            }),
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn assert_ironwood_decode_error(err: &ScanError) {
+        match err {
+            ScanError::EncodingInvalid { tree, index, .. } => {
+                assert_eq!(*tree, NoteCommitmentTree::Ironwood);
+                assert_eq!(*index, 0);
+            }
+            err => panic!("expected an Ironwood decoding error, got {err:?}"),
+        }
+
+        assert!(err.to_string().contains("Ironwood output 0"));
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn scan_block_reports_ironwood_decode_error() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let err = match scan_block(
+            &Network::TestNetwork,
+            malformed_ironwood_action_block(),
+            &scanning_keys,
+            &Nullifiers::empty(),
+            None,
+        ) {
+            Ok(_) => panic!("malformed Ironwood action should fail decoding"),
+            Err(err) => err,
+        };
+
+        assert_ironwood_decode_error(&err);
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn batch_runners_report_ironwood_decode_error() {
+        let scanning_keys = ScanningKeys::<AccountId, Infallible>::empty();
+        let mut runners = BatchRunners::<_, (), ()>::for_keys(10, &scanning_keys);
+        let err = runners
+            .add_block(&Network::TestNetwork, malformed_ironwood_action_block())
+            .expect_err("malformed Ironwood action should fail decoding");
+
+        assert_ironwood_decode_error(&err);
     }
 }

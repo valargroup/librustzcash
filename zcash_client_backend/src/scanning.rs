@@ -19,7 +19,7 @@ use zcash_protocol::{
 use zip32::Scope;
 
 use crate::{
-    data_api::{BlockMetadata, NullifierQuery, ScannedBlock, WalletRead},
+    data_api::{BlockMetadata, NoteCommitmentTree, NullifierQuery, ScannedBlock, WalletRead},
     proto::compact_formats::CompactBlock,
     scan::DecryptedOutput,
     wallet::WalletOutput,
@@ -485,11 +485,11 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
 /// Errors that may occur in chain scanning
 #[derive(Clone, Debug)]
 pub enum ScanError {
-    /// The encoding of a compact Sapling output or compact Orchard action was invalid.
+    /// The encoding of a compact shielded output was invalid.
     EncodingInvalid {
         at_height: BlockHeight,
         txid: TxId,
-        pool_type: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         index: usize,
     },
 
@@ -572,13 +572,10 @@ impl fmt::Display for ScanError {
         use ScanError::*;
         match &self {
             EncodingInvalid {
-                txid,
-                pool_type,
-                index,
-                ..
+                txid, tree, index, ..
             } => write!(
                 f,
-                "{pool_type:?} output {index} of transaction {txid} was improperly encoded."
+                "{tree:?} output {index} of transaction {txid} was improperly encoded."
             ),
             PrevHashMismatch { at_height } => write!(
                 f,
