@@ -38,6 +38,8 @@ workspace.
 
 ### Fixed
 - PCZT parsing now rejects trailing bytes after v1 and v2 payloads.
+- Creator output from transaction builder parts now uses the same empty
+  Ironwood bundle fallback as legacy PCZT parsing.
 
 ## [0.7.0] - 2026-06-02
 
