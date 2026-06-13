@@ -136,7 +136,7 @@ fn orchard_note_from_pczt_parts(
     rseed: orchard::note::RandomSeed,
     note_version: orchard::note::NoteVersion,
 ) -> Option<orchard::Note> {
-    orchard::Note::from_parts_with_version(recipient, value, rho, rseed, note_version).into()
+    orchard::Note::from_parts(recipient, value, rho, rseed, note_version).into()
 }
 
 #[cfg(all(feature = "pczt", feature = "orchard"))]

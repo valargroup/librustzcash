@@ -585,14 +585,8 @@ mod tests {
             .expect("at least one test rseed is valid");
 
         Note::Orchard(
-            orchard::Note::from_parts_with_version(
-                recipient,
-                value,
-                rho,
-                rseed,
-                orchard::note::NoteVersion::V3,
-            )
-            .unwrap(),
+            orchard::Note::from_parts(recipient, value, rho, rseed, orchard::note::NoteVersion::V3)
+                .unwrap(),
         )
         .into()
     }

@@ -134,6 +134,21 @@ fn orchard_auth_anchor_commitment(version: TxVersion) -> BundleAnchorCommitment 
     BundleAnchorCommitment::Omit
 }
 
+fn orchard_bundle_format(version: TxVersion) -> orchard::BundleFormat {
+    #[cfg(zcash_unstable = "nu7")]
+    if matches!(version, TxVersion::V6) {
+        return orchard::BundleFormat::Nu6_3;
+    }
+
+    #[cfg(zcash_unstable = "zfuture")]
+    if matches!(version, TxVersion::ZFuture) {
+        return orchard::BundleFormat::Nu6_3;
+    }
+
+    let _ = version;
+    orchard::BundleFormat::PreNu6_3
+}
+
 fn hasher(personal: &[u8; 16]) -> StateWrite {
     StateWrite(Params::new().hash_length(32).personal(personal).to_state())
 }
@@ -353,6 +368,7 @@ fn hash_orchard_style_bundle_txid_data<A: orchard::Authorization>(
     bundle: &orchard::Bundle<A, ZatBalance>,
     personal: &OrchardStyleBundlePersonalization,
     anchor_commitment: BundleAnchorCommitment,
+    bundle_format: orchard::BundleFormat,
 ) -> Blake2bHash {
     let mut h = hasher(personal.txid_bundle);
     let mut ch = hasher(personal.txid_actions_compact);
@@ -380,7 +396,11 @@ fn hash_orchard_style_bundle_txid_data<A: orchard::Authorization>(
     h.write_all(ch.finalize().as_bytes()).unwrap();
     h.write_all(mh.finalize().as_bytes()).unwrap();
     h.write_all(nh.finalize().as_bytes()).unwrap();
-    h.write_all(&[bundle.flags().to_byte()]).unwrap();
+    h.write_all(&[bundle
+        .flags()
+        .to_byte(bundle_format)
+        .expect("bundle flags must be encodable for the transaction format")])
+        .unwrap();
     h.write_all(&bundle.value_balance().to_i64_le_bytes())
         .unwrap();
     if anchor_commitment == BundleAnchorCommitment::Include {
@@ -500,6 +520,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
                 b,
                 &ORCHARD_BUNDLE_PERSONALIZATION,
                 orchard_txid_anchor_commitment(version),
+                orchard_bundle_format(version),
             )
         })
     }
@@ -515,6 +536,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
                 b,
                 &IRONWOOD_BUNDLE_PERSONALIZATION,
                 BundleAnchorCommitment::Omit,
+                orchard::BundleFormat::Nu6_3,
             )
         })
     }

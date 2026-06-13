@@ -136,14 +136,8 @@ mod serialization {
                         _ => panic!("invalid Orchard note version"),
                     };
                     Self::Orchard(
-                        orchard::Note::from_parts_with_version(
-                            recipient,
-                            value,
-                            rho,
-                            rseed,
-                            note_version,
-                        )
-                        .unwrap(),
+                        orchard::Note::from_parts(recipient, value, rho, rseed, note_version)
+                            .unwrap(),
                     )
                 }
                 #[cfg(not(feature = "orchard"))]
@@ -189,7 +183,7 @@ mod serialization {
                 .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
                 .expect("at least one test rseed is valid");
             let note = Note::Orchard(
-                orchard::Note::from_parts_with_version(
+                orchard::Note::from_parts(
                     recipient,
                     value,
                     rho,

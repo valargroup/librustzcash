@@ -6227,7 +6227,8 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
 
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
-    let orchard_pk = ::orchard::circuit::ProvingKey::build();
+    let orchard_pk =
+        ::orchard::circuit::ProvingKey::build(::orchard::circuit::OrchardCircuitVersion::Ironwood);
     let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)
         .unwrap();
@@ -7036,9 +7037,9 @@ pub fn propose_shielding_coinbase_with_zero_limit_insufficient_funds<T: Shielded
 
 /// Regression test for the propose-fee/build-fee mismatch fixed in #2376.
 ///
-/// Both `sapling::builder::BundleType::DEFAULT` and
-/// `orchard::builder::BundleType::DEFAULT` pad up to a minimum of 2
-/// outputs/actions (`MIN_SHIELDED_OUTPUTS` / `MIN_ACTIONS`). Before the fix,
+/// Both `sapling::builder::BundleType::DEFAULT` and the Orchard protocol action
+/// count helpers pad up to a minimum of 2 outputs/actions
+/// (`MIN_SHIELDED_OUTPUTS` / `MIN_ACTIONS`). Before the fix,
 /// `propose_shielding_coinbase` hardcoded `(1, 0)` / `(0, 1)` when asking the
 /// fee rule what fee to charge, so the proposal underestimated the fee by
 /// exactly one ZIP-317 marginal unit (5000 zat). The proposal succeeded, but

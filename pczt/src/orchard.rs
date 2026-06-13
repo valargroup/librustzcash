@@ -633,16 +633,21 @@ impl Bundle {
 impl Bundle {
     pub(crate) fn into_parsed_orchard(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_orchard_note_plaintext_versions()?;
-        self.into_parsed().map_err(BundleParseError::Parse)
+        self.into_parsed(orchard::bundle::BundleFormat::Nu6_3)
+            .map_err(BundleParseError::Parse)
     }
 
     #[cfg(zcash_unstable = "nu7")]
     pub(crate) fn into_parsed_ironwood(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_ironwood_note_plaintext_versions()?;
-        self.into_parsed().map_err(BundleParseError::Parse)
+        self.into_parsed(orchard::bundle::BundleFormat::Nu6_3)
+            .map_err(BundleParseError::Parse)
     }
 
-    pub(crate) fn into_parsed(self) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
+    pub(crate) fn into_parsed(
+        self,
+        bundle_format: orchard::bundle::BundleFormat,
+    ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
         let actions = self
             .actions
             .into_iter()
@@ -705,6 +710,7 @@ impl Bundle {
         orchard::pczt::Bundle::parse(
             actions,
             self.flags,
+            bundle_format,
             self.value_sum,
             self.anchor,
             self.zkproof,
@@ -803,7 +809,10 @@ impl Bundle {
 
         Self {
             actions,
-            flags: bundle.flags().to_byte(),
+            flags: bundle
+                .flags()
+                .to_byte(orchard::bundle::BundleFormat::Nu6_3)
+                .expect("PCZT Orchard-style flags must encode in the NU6.3 format"),
             value_sum,
             anchor: bundle.anchor().to_bytes(),
             zkproof: bundle

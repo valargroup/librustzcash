@@ -80,6 +80,19 @@ impl<FE: fmt::Display> fmt::Display for FeeError<FE> {
     }
 }
 
+fn orchard_action_count_error(err: orchard::BundleActionCountError) -> &'static str {
+    match err {
+        orchard::BundleActionCountError::InputCountOverflow => "Orchard action count overflowed.",
+        orchard::BundleActionCountError::SpendsDisabled => {
+            "Spends are disabled, so num_spends must be zero."
+        }
+        orchard::BundleActionCountError::OutputsDisabled => {
+            "Outputs are disabled, so num_outputs must be zero."
+        }
+        _ => "Bundle action count could not be computed.",
+    }
+}
+
 /// Errors that can occur during transaction construction.
 #[derive(Debug)]
 pub enum Error<FE> {
@@ -104,11 +117,16 @@ pub enum Error<FE> {
     IronwoodBuild(orchard::builder::BuildError),
     /// An error occurred in adding an Orchard Spend to a transaction.
     OrchardSpend(orchard::builder::SpendError),
+    /// An Orchard spend note used an unsupported note plaintext version.
+    OrchardSpendUnsupportedNoteVersion(orchard::NoteVersion),
     /// An error occurred in adding an Orchard Output to a transaction.
     OrchardRecipient(orchard::builder::OutputError),
     /// An error occurred in adding an Ironwood Spend to a transaction.
     #[cfg(zcash_unstable = "nu7")]
     IronwoodSpend(orchard::builder::SpendError),
+    /// An Ironwood spend note used an unsupported note plaintext version.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodSpendUnsupportedNoteVersion(orchard::NoteVersion),
     /// An error occurred in adding an Ironwood Output to a transaction.
     #[cfg(zcash_unstable = "nu7")]
     IronwoodRecipient(orchard::builder::OutputError),
@@ -157,9 +175,18 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
             #[cfg(zcash_unstable = "nu7")]
             Error::IronwoodBuild(err) => write!(f, "{err:?}"),
             Error::OrchardSpend(err) => write!(f, "Could not add Orchard spend: {err}"),
+            Error::OrchardSpendUnsupportedNoteVersion(version) => write!(
+                f,
+                "Could not add Orchard spend: note version {version:?} is unsupported"
+            ),
             Error::OrchardRecipient(err) => write!(f, "Could not add Orchard recipient: {err}"),
             #[cfg(zcash_unstable = "nu7")]
             Error::IronwoodSpend(err) => write!(f, "Could not add Ironwood spend: {err}"),
+            #[cfg(zcash_unstable = "nu7")]
+            Error::IronwoodSpendUnsupportedNoteVersion(version) => write!(
+                f,
+                "Could not add Ironwood spend: note version {version:?} is unsupported"
+            ),
             #[cfg(zcash_unstable = "nu7")]
             Error::IronwoodRecipient(err) => {
                 write!(f, "Could not add Ironwood recipient: {err}")
@@ -285,6 +312,47 @@ pub enum BuildConfig {
     },
 }
 
+/// Rules for constructing an Orchard-style bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrchardBuilderConfig {
+    /// Construct a standard transactional bundle using the given protocol.
+    Transactional(orchard::BundleProtocol),
+    /// Construct a coinbase bundle using the given protocol.
+    Coinbase(orchard::BundleProtocol),
+}
+
+impl OrchardBuilderConfig {
+    fn builder(self, anchor: orchard::Anchor) -> orchard::builder::Builder {
+        match self {
+            OrchardBuilderConfig::Transactional(protocol) => {
+                orchard::builder::Builder::new(protocol, anchor)
+            }
+            OrchardBuilderConfig::Coinbase(protocol) => {
+                orchard::builder::Builder::new_coinbase(protocol, anchor)
+            }
+        }
+    }
+
+    fn action_count(
+        self,
+        num_spends: usize,
+        num_outputs: usize,
+    ) -> Result<usize, orchard::BundleActionCountError> {
+        match self {
+            OrchardBuilderConfig::Transactional(protocol) => {
+                protocol.transactional_action_count(num_spends, num_outputs)
+            }
+            OrchardBuilderConfig::Coinbase(protocol) => {
+                if num_spends > 0 {
+                    Err(orchard::BundleActionCountError::SpendsDisabled)
+                } else {
+                    Ok(protocol.coinbase_action_count(num_outputs))
+                }
+            }
+        }
+    }
+}
+
 impl BuildConfig {
     /// Returns the Sapling bundle type and anchor for this configuration.
     pub fn sapling_builder_config(
@@ -302,15 +370,16 @@ impl BuildConfig {
     }
 
     /// Returns the Orchard bundle type and anchor for this configuration.
-    pub fn orchard_builder_config(
-        &self,
-    ) -> Option<(orchard::builder::BundleType, orchard::Anchor)> {
+    pub fn orchard_builder_config(&self) -> Option<(OrchardBuilderConfig, orchard::Anchor)> {
         match self {
-            BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor
-                .as_ref()
-                .map(|a| (orchard::builder::BundleType::DEFAULT, *a)),
+            BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor.as_ref().map(|a| {
+                (
+                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::Orchard),
+                    *a,
+                )
+            }),
             BuildConfig::Coinbase { .. } => Some((
-                orchard::builder::BundleType::Coinbase,
+                OrchardBuilderConfig::Coinbase(orchard::BundleProtocol::Orchard),
                 orchard::Anchor::empty_tree(),
             )),
         }
@@ -318,15 +387,16 @@ impl BuildConfig {
 
     /// Returns the Ironwood bundle type and anchor for this configuration.
     #[cfg(zcash_unstable = "nu7")]
-    pub fn ironwood_builder_config(
-        &self,
-    ) -> Option<(orchard::builder::BundleType, orchard::Anchor)> {
+    pub fn ironwood_builder_config(&self) -> Option<(OrchardBuilderConfig, orchard::Anchor)> {
         match self {
             BuildConfig::Standard {
                 ironwood_anchor, ..
-            } => ironwood_anchor
-                .as_ref()
-                .map(|a| (orchard::builder::BundleType::DEFAULT, *a)),
+            } => ironwood_anchor.as_ref().map(|a| {
+                (
+                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::Ironwood),
+                    *a,
+                )
+            }),
             BuildConfig::Coinbase { .. } => None,
         }
     }
@@ -596,13 +666,7 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
         {
             build_config
                 .orchard_builder_config()
-                .map(|(bundle_type, anchor)| {
-                    orchard::builder::Builder::new(
-                        orchard::builder::BundleProtocol::Orchard,
-                        bundle_type,
-                        anchor,
-                    )
-                })
+                .map(|(builder_config, anchor)| builder_config.builder(anchor))
         } else {
             None
         };
@@ -611,13 +675,7 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
         let ironwood_builder = if params.is_nu_active(NetworkUpgrade::Nu7, target_height) {
             build_config
                 .ironwood_builder_config()
-                .map(|(bundle_type, anchor)| {
-                    orchard::builder::Builder::new(
-                        orchard::builder::BundleProtocol::Ironwood,
-                        bundle_type,
-                        anchor,
-                    )
-                })
+                .map(|(builder_config, anchor)| builder_config.builder(anchor))
         } else {
             None
         };
@@ -721,9 +779,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .ok_or(Error::OrchardBuilderNotAvailable)?;
 
         if note.version() != orchard::note::NoteVersion::V2 {
-            return Err(Error::OrchardSpend(
-                orchard::builder::SpendError::UnsupportedNoteVersion,
-            ));
+            return Err(Error::OrchardSpendUnsupportedNoteVersion(note.version()));
         }
 
         builder.add_spend(fvk, note, merkle_path)?;
@@ -774,9 +830,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .ok_or(Error::IronwoodBuilderNotAvailable)?;
 
         if note.version() != orchard::note::NoteVersion::V3 {
-            return Err(Error::IronwoodSpend(
-                orchard::builder::SpendError::UnsupportedNoteVersion,
-            ));
+            return Err(Error::IronwoodSpendUnsupportedNoteVersion(note.version()));
         }
 
         builder
@@ -951,10 +1005,10 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .orchard_builder
             .as_ref()
             .zip(self.build_config.orchard_builder_config())
-            .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                bundle_type
-                    .num_actions(builder.spends().len(), builder.outputs().len())
-                    .map_err(FeeError::Bundle)
+            .map_or(Ok(0), |(builder, (builder_config, _))| {
+                builder_config
+                    .action_count(builder.spends().len(), builder.outputs().len())
+                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
             })?;
 
         #[cfg(zcash_unstable = "nu7")]
@@ -963,10 +1017,10 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 .ironwood_builder
                 .as_ref()
                 .zip(self.build_config.ironwood_builder_config())
-                .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                    bundle_type
-                        .num_actions(builder.spends().len(), builder.outputs().len())
-                        .map_err(FeeError::Bundle)
+                .map_or(Ok(0), |(builder, (builder_config, _))| {
+                    builder_config
+                        .action_count(builder.spends().len(), builder.outputs().len())
+                        .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
                 })?;
 
         fee_rule
@@ -1012,10 +1066,10 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .orchard_builder
             .as_ref()
             .zip(self.build_config.orchard_builder_config())
-            .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                bundle_type
-                    .num_actions(builder.spends().len(), builder.outputs().len())
-                    .map_err(FeeError::Bundle)
+            .map_or(Ok(0), |(builder, (builder_config, _))| {
+                builder_config
+                    .action_count(builder.spends().len(), builder.outputs().len())
+                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
             })?;
 
         #[cfg(zcash_unstable = "nu7")]
@@ -1024,10 +1078,10 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 .ironwood_builder
                 .as_ref()
                 .zip(self.build_config.ironwood_builder_config())
-                .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                    bundle_type
-                        .num_actions(builder.spends().len(), builder.outputs().len())
-                        .map_err(FeeError::Bundle)
+                .map_or(Ok(0), |(builder, (builder_config, _))| {
+                    builder_config
+                        .action_count(builder.spends().len(), builder.outputs().len())
+                        .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
                 })?;
 
         fee_rule
@@ -1418,14 +1472,15 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         let orchard_bundle = unauthed_tx
             .orchard_bundle
             .map(|b| {
-                b.create_proof(&orchard::circuit::ProvingKey::build(), &mut rng)
-                    .and_then(|b| {
-                        b.apply_signatures(
-                            &mut rng,
-                            *shielded_sig_commitment.as_ref(),
-                            orchard_saks,
-                        )
-                    })
+                b.create_proof(
+                    &orchard::circuit::ProvingKey::build(
+                        orchard::circuit::OrchardCircuitVersion::Ironwood,
+                    ),
+                    &mut rng,
+                )
+                .and_then(|b| {
+                    b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), orchard_saks)
+                })
             })
             .transpose()
             .map_err(Error::OrchardBuild)?;
@@ -1434,14 +1489,15 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         let ironwood_bundle = unauthed_tx
             .ironwood_bundle
             .map(|b| {
-                b.create_proof(&orchard::circuit::ProvingKey::build(), &mut rng)
-                    .and_then(|b| {
-                        b.apply_signatures(
-                            &mut rng,
-                            *shielded_sig_commitment.as_ref(),
-                            orchard_saks,
-                        )
-                    })
+                b.create_proof(
+                    &orchard::circuit::ProvingKey::build(
+                        orchard::circuit::OrchardCircuitVersion::Ironwood,
+                    ),
+                    &mut rng,
+                )
+                .and_then(|b| {
+                    b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), orchard_saks)
+                })
             })
             .transpose()
             .map_err(Error::IronwoodBuild)?;
@@ -2540,8 +2596,7 @@ mod tests {
         let rseed = (0u8..=255)
             .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
             .expect("at least one test rseed is valid");
-        let note =
-            orchard::Note::from_parts_with_version(recipient, value, rho, rseed, version).unwrap();
+        let note = orchard::Note::from_parts(recipient, value, rho, rseed, version).unwrap();
         let zero = orchard::tree::MerkleHashOrchard::from_bytes(&[0; 32]).unwrap();
         let merkle_path = orchard::tree::MerklePath::from_parts(0, [zero; 32]);
 
@@ -2566,8 +2621,8 @@ mod tests {
 
         assert_matches!(
             builder.add_orchard_spend::<Infallible>(fvk, note, merkle_path),
-            Err(Error::OrchardSpend(
-                orchard::builder::SpendError::UnsupportedNoteVersion
+            Err(Error::OrchardSpendUnsupportedNoteVersion(
+                orchard::note::NoteVersion::V3
             ))
         );
     }
@@ -2588,8 +2643,8 @@ mod tests {
 
         assert_matches!(
             builder.add_ironwood_spend::<Infallible>(fvk, note, merkle_path),
-            Err(Error::IronwoodSpend(
-                orchard::builder::SpendError::UnsupportedNoteVersion
+            Err(Error::IronwoodSpendUnsupportedNoteVersion(
+                orchard::note::NoteVersion::V2
             ))
         );
     }

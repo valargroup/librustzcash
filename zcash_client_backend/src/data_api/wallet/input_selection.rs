@@ -53,6 +53,20 @@ use {
 #[cfg(feature = "orchard")]
 use crate::fees::orchard as orchard_fees;
 
+#[cfg(feature = "orchard")]
+fn orchard_action_count_error(err: orchard::BundleActionCountError) -> &'static str {
+    match err {
+        orchard::BundleActionCountError::InputCountOverflow => "Orchard action count overflowed.",
+        orchard::BundleActionCountError::SpendsDisabled => {
+            "Spends are disabled, so num_spends must be zero."
+        }
+        orchard::BundleActionCountError::OutputsDisabled => {
+            "Outputs are disabled, so num_outputs must be zero."
+        }
+        _ => "Bundle action count could not be computed.",
+    }
+}
+
 #[cfg(feature = "unstable")]
 use zcash_primitives::transaction::TxVersion;
 
@@ -708,7 +722,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 ),
                 #[cfg(feature = "orchard")]
                 &(
-                    ::orchard::builder::BundleType::DEFAULT,
+                    ::orchard::BundleProtocol::Orchard,
                     &orchard_inputs[..],
                     &orchard_outputs[..],
                 ),
@@ -892,15 +906,21 @@ where
         let ironwood_input_count = 0usize;
 
         let orchard_input_count = spendable_notes.orchard().len() - ironwood_input_count;
-        let orchard_actions = orchard::builder::BundleType::DEFAULT
-            .num_actions(orchard_input_count, requested_orchard_actions)
-            .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
+        let orchard_actions = orchard::BundleProtocol::Orchard
+            .transactional_action_count(orchard_input_count, requested_orchard_actions)
+            .map_err(|e| {
+                InputSelectorError::Change(ChangeError::BundleError(orchard_action_count_error(e)))
+            })?;
 
         #[cfg(zcash_unstable = "nu7")]
         {
-            let ironwood_actions = orchard::builder::BundleType::DEFAULT
-                .num_actions(ironwood_input_count, requested_ironwood_actions)
-                .map_err(|s| InputSelectorError::Change(ChangeError::BundleError(s)))?;
+            let ironwood_actions = orchard::BundleProtocol::Ironwood
+                .transactional_action_count(ironwood_input_count, requested_ironwood_actions)
+                .map_err(|e| {
+                    InputSelectorError::Change(ChangeError::BundleError(
+                        orchard_action_count_error(e),
+                    ))
+                })?;
             orchard_actions + ironwood_actions
         }
 
@@ -1299,9 +1319,9 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             }
             #[cfg(feature = "orchard")]
             PoolType::ORCHARD => {
-                let count = orchard::builder::BundleType::DEFAULT
-                    .num_actions(0, 1)
-                    .expect("orchard DEFAULT bundle type permits any (spends, outputs) count");
+                let count = orchard::BundleProtocol::Orchard
+                    .transactional_action_count(0, 1)
+                    .expect("orchard protocol permits any transactional spend and output count");
                 (0usize, count)
             }
             // Unreachable: `resolve_shielded_destination` rejects transparent
