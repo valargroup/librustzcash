@@ -36,6 +36,9 @@ workspace.
 - Serialized v1 Orchard PCZT encodings continue to parse by defaulting missing
   note plaintext versions to V2.
 
+### Fixed
+- PCZT parsing now rejects trailing bytes after v1 and v2 payloads.
+
 ## [0.7.0] - 2026-06-02
 
 ### Changed
