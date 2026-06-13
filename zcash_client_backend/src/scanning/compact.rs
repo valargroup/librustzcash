@@ -2,8 +2,6 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::hash::Hash;
 
-#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-use incrementalmerkletree::Position;
 use incrementalmerkletree::{Marking, Retention};
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain};
 use subtle::ConditionallySelectable;
@@ -190,7 +188,7 @@ where
                 block_hash,
                 txid,
                 OrchardDomain::for_compact_action,
-                &tx.ironwood_actions
+                tx.ironwood_actions
                     .iter()
                     .enumerate()
                     .map(|(i, action)| {
@@ -938,14 +936,6 @@ impl PositionTracker {
             + u32::try_from(tx.ironwood_actions.len())
                 .expect("Ironwood action count cannot exceed a u32")
             == self.ironwood_final_tree_size
-    }
-
-    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-    fn ironwood_note_position(&self, output_idx: usize) -> Position {
-        Position::from(u64::from(
-            self.ironwood_tree_position
-                + u32::try_from(output_idx).expect("Ironwood action count cannot exceed a u32"),
-        ))
     }
 
     fn increment_over_compact_tx(&mut self, tx: &CompactTx) {

@@ -30,7 +30,7 @@ use crate::{
 #[cfg(feature = "orchard")]
 use orchard::{note_encryption::OrchardDomain, primitives::redpallas, tree::MerkleHashOrchard};
 
-#[cfg(not(feature = "orchard"))]
+#[cfg(any(not(feature = "orchard"), not(zcash_unstable = "nu7")))]
 use std::marker::PhantomData;
 
 #[cfg(feature = "transparent-inputs")]
@@ -88,6 +88,10 @@ pub(crate) struct BatchRunners<IvkTag, TS: SaplingTasks<IvkTag>, TO: OrchardTask
     orchard: TaggedOrchardBatchRunner<IvkTag, TO>,
     #[cfg(not(feature = "orchard"))]
     orchard: PhantomData<TO>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    ironwood: TaggedOrchardBatchRunner<IvkTag, TO>,
+    #[cfg(not(all(feature = "orchard", zcash_unstable = "nu7")))]
+    ironwood: PhantomData<TO>,
 }
 
 impl<IvkTag, TS, TO> BatchRunners<IvkTag, TS, TO>
@@ -124,6 +128,16 @@ where
             ),
             #[cfg(not(feature = "orchard"))]
             orchard: PhantomData,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood: BatchRunner::new(
+                orchard_batch_size_threshold,
+                scanning_keys
+                    .orchard()
+                    .iter()
+                    .map(|(id, key)| (id.clone(), key.prepare())),
+            ),
+            #[cfg(not(all(feature = "orchard", zcash_unstable = "nu7")))]
+            ironwood: PhantomData,
         }
     }
 
@@ -161,12 +175,19 @@ where
             self.orchard
                 .process_outputs(OrchardDomain::for_action, bundle.actions().iter().cloned())
         });
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let ironwood_batch = tx.ironwood_bundle().map(|bundle| {
+            self.ironwood
+                .process_outputs(OrchardDomain::for_action, bundle.actions().iter().cloned())
+        });
 
         PendingBatch {
             tx,
             sapling_batch,
             #[cfg(feature = "orchard")]
             orchard_batch,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_batch,
         }
     }
 
@@ -177,6 +198,8 @@ where
         self.sapling.flush();
         #[cfg(feature = "orchard")]
         self.orchard.flush();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        self.ironwood.flush();
     }
 }
 
@@ -186,6 +209,8 @@ pub(crate) struct PendingBatch<IvkTag> {
     sapling_batch: Option<BatchReceiver<IvkTag, SaplingDomain, <SaplingDomain as Domain>::Memo>>,
     #[cfg(feature = "orchard")]
     orchard_batch: Option<BatchReceiver<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    ironwood_batch: Option<BatchReceiver<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
 }
 
 impl<IvkTag> PendingBatch<IvkTag> {
@@ -200,6 +225,11 @@ impl<IvkTag> PendingBatch<IvkTag> {
             #[cfg(feature = "orchard")]
             orchard: self
                 .orchard_batch
+                .map(|b| b.into_results())
+                .unwrap_or_default(),
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood: self
+                .ironwood_batch
                 .map(|b| b.into_results())
                 .unwrap_or_default(),
         }
@@ -220,11 +250,18 @@ impl<IvkTag> PendingBatch<IvkTag> {
             Some(b) => b.into_results_async().await,
             None => HashMap::new(),
         };
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let ironwood = match self.ironwood_batch {
+            Some(b) => b.into_results_async().await,
+            None => HashMap::new(),
+        };
         BatchResult {
             tx: self.tx,
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood,
         }
     }
 }
@@ -239,6 +276,9 @@ pub struct BatchResult<IvkTag> {
         HashMap<usize, DecryptedOutput<IvkTag, SaplingDomain, <SaplingDomain as Domain>::Memo>>,
     #[cfg(feature = "orchard")]
     orchard:
+        HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    ironwood:
         HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
 }
 
@@ -411,6 +451,14 @@ where
     let mut orchard_nullifier_map = Vec::with_capacity(vtx.len());
     #[cfg(feature = "orchard")]
     let mut orchard_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let mut ironwood_nullifier_map = Vec::with_capacity(vtx.len());
+    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+    let ironwood_nullifier_map = Vec::with_capacity(vtx.len());
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let mut ironwood_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
+    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+    let ironwood_note_commitments: Vec<(MerkleHashOrchard, Retention<BlockHeight>)> = vec![];
 
     for (tx_index, batch) in vtx.into_iter().enumerate() {
         let BatchResult {
@@ -418,10 +466,16 @@ where
             sapling: sapling_decrypted,
             #[cfg(feature = "orchard")]
                 orchard: orchard_decrypted,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+                ironwood: ironwood_decrypted,
         } = batch;
         let txid = tx.txid();
         let tx_index =
             TxIndex::try_from(tx_index).expect("Cannot fit more than 2^16 transactions in a block");
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let orchard_action_count_for_ironwood = tx
+            .orchard_bundle()
+            .map_or(0, |bundle| bundle.actions().len());
 
         let (sapling_spends, sapling_unlinked_nullifiers) = tx
             .sapling_bundle()
@@ -453,12 +507,37 @@ where
             orchard_nullifier_map.push((tx_index, txid, orchard_unlinked_nullifiers));
             orchard_spends
         };
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let ironwood_spends = {
+            let (ironwood_spends, ironwood_unlinked_nullifiers) = tx
+                .ironwood_bundle()
+                .map(|bundle| {
+                    find_spent(
+                        bundle.actions().iter(),
+                        &nullifiers.orchard,
+                        |action| *action.nullifier(),
+                        |index, nf, account_id| {
+                            WalletSpend::from_parts(
+                                orchard_action_count_for_ironwood + index,
+                                nf,
+                                account_id,
+                            )
+                        },
+                    )
+                })
+                .unwrap_or_default();
+            ironwood_nullifier_map.push((tx_index, txid, ironwood_unlinked_nullifiers));
+            ironwood_spends
+        };
+        #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+        let ironwood_spends: Vec<WalletSpend<orchard::note::Nullifier, AccountId>> = Vec::new();
 
         // Collect the set of accounts that were spent from in this transaction
         let spent_from_accounts = sapling_spends.iter().map(|spend| spend.account_id());
         #[cfg(feature = "orchard")]
-        let spent_from_accounts =
-            spent_from_accounts.chain(orchard_spends.iter().map(|spend| spend.account_id()));
+        let spent_from_accounts = spent_from_accounts
+            .chain(orchard_spends.iter().map(|spend| spend.account_id()))
+            .chain(ironwood_spends.iter().map(|spend| spend.account_id()));
         let spent_from_accounts = spent_from_accounts.copied().collect::<HashSet<_>>();
 
         // TODO(#1305): Correctly track accounts that fund each transaction output. For now
@@ -495,6 +574,7 @@ where
                     height,
                     pos_tracker.tx_contains_last_sapling_outputs_in_block(&tx),
                     txid,
+                    |output_idx| output_idx,
                     |output_idx| pos_tracker.sapling_note_position(output_idx),
                     &scanning_keys.sapling,
                     &spent_from_accounts,
@@ -513,13 +593,14 @@ where
         let has_sapling = !(sapling_spends.is_empty() && sapling_outputs.is_empty());
 
         #[cfg(feature = "orchard")]
-        let (orchard_outputs, mut orchard_nc) = tx
+        let (mut orchard_outputs, mut orchard_nc) = tx
             .orchard_bundle()
             .map(|bundle| {
                 find_received(
                     height,
                     pos_tracker.tx_contains_last_orchard_actions_in_block(&tx),
                     txid,
+                    |output_idx| output_idx,
                     |output_idx| pos_tracker.orchard_note_position(output_idx),
                     &scanning_keys.orchard,
                     &spent_from_accounts,
@@ -538,11 +619,50 @@ where
         orchard_note_commitments.append(&mut orchard_nc);
 
         #[cfg(feature = "orchard")]
-        let has_orchard = !(orchard_spends.is_empty() && orchard_outputs.is_empty());
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let (mut ironwood_outputs, mut ironwood_nc) = tx
+            .ironwood_bundle()
+            .map(|bundle| {
+                find_received(
+                    height,
+                    pos_tracker.tx_contains_last_ironwood_actions_in_block(&tx),
+                    txid,
+                    |output_idx| orchard_action_count_for_ironwood + output_idx,
+                    |output_idx| pos_tracker.ironwood_note_position(output_idx),
+                    &scanning_keys.orchard,
+                    &spent_from_accounts,
+                    &bundle
+                        .actions()
+                        .iter()
+                        .map(|action| (OrchardDomain::for_action(action), action.clone()))
+                        .collect::<Vec<_>>(),
+                    Some(move |_| ironwood_decrypted),
+                    batch::try_note_decryption,
+                    |action| MerkleHashOrchard::from_cmx(action.cmx()),
+                )
+            })
+            .unwrap_or_default();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        ironwood_note_commitments.append(&mut ironwood_nc);
+        #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+        let mut ironwood_outputs = Vec::new();
+
+        #[cfg(feature = "orchard")]
+        let has_orchard = !(orchard_spends.is_empty()
+            && ironwood_spends.is_empty()
+            && orchard_outputs.is_empty()
+            && ironwood_outputs.is_empty());
         #[cfg(not(feature = "orchard"))]
         let has_orchard = false;
 
         if has_transparent || has_sapling || has_orchard {
+            #[cfg(feature = "orchard")]
+            let mut wallet_orchard_spends = orchard_spends;
+            #[cfg(feature = "orchard")]
+            wallet_orchard_spends.extend(ironwood_spends);
+            #[cfg(feature = "orchard")]
+            orchard_outputs.append(&mut ironwood_outputs);
+
             wtxs.push(WalletTx::new(
                 txid,
                 tx_index,
@@ -550,7 +670,7 @@ where
                 sapling_spends,
                 sapling_outputs,
                 #[cfg(feature = "orchard")]
-                orchard_spends,
+                wallet_orchard_spends,
                 #[cfg(feature = "orchard")]
                 orchard_outputs,
             ));
@@ -576,6 +696,12 @@ where
             pos_tracker.orchard_final_tree_size,
             orchard_note_commitments,
             orchard_nullifier_map,
+        ),
+        #[cfg(feature = "orchard")]
+        ScannedBundles::new(
+            pos_tracker.ironwood_final_tree_size,
+            ironwood_note_commitments,
+            ironwood_nullifier_map,
         ),
     ))
 }
@@ -652,6 +778,17 @@ fn orchard_action_count(tx: &Transaction) -> u32 {
     })
 }
 
+/// Returns the number of Ironwood actions in `tx`.
+///
+/// Note commitment tree sizes are `u32`-bounded by the protocol, so a valid transaction
+/// can never contain more than `u32::MAX` actions.
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+fn ironwood_action_count(tx: &Transaction) -> u32 {
+    tx.ironwood_bundle().map_or(0, |b| {
+        u32::try_from(b.actions().len()).expect("Ironwood action count cannot exceed a u32")
+    })
+}
+
 impl PositionTracker {
     fn for_block<P, IvkTag>(
         params: &P,
@@ -683,6 +820,18 @@ impl PositionTracker {
             ShieldedProtocol::Orchard,
         )?;
 
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        let (ironwood_prior_tree_size, ironwood_final_tree_size) = tree_sizes_around(
+            at_height,
+            params.activation_height(NetworkUpgrade::Nu7),
+            prior_block_metadata.and_then(|m| m.ironwood_tree_size()),
+            vtx.iter()
+                .map(|b| b.tx.ironwood_bundle().map_or(0, |bd| bd.actions().len())),
+            ShieldedProtocol::Orchard,
+        )?;
+        #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+        let ironwood_final_tree_size = 0;
+
         Ok(Self {
             sapling_tree_position: sapling_prior_tree_size,
             sapling_final_tree_size,
@@ -690,6 +839,10 @@ impl PositionTracker {
             orchard_tree_position: orchard_prior_tree_size,
             #[cfg(feature = "orchard")]
             orchard_final_tree_size,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_tree_position: ironwood_prior_tree_size,
+            #[cfg(feature = "orchard")]
+            ironwood_final_tree_size,
         })
     }
 
@@ -717,17 +870,35 @@ impl PositionTracker {
         self.contains_last_orchard_actions(orchard_action_count(tx))
     }
 
+    /// Returns `true` if a transaction contributing `ironwood_action_count`
+    /// actions would bring the Ironwood tree position up to the block's final
+    /// Ironwood tree size.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn contains_last_ironwood_actions(&self, ironwood_action_count: u32) -> bool {
+        self.ironwood_tree_position + ironwood_action_count == self.ironwood_final_tree_size
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn tx_contains_last_ironwood_actions_in_block(&self, tx: &Transaction) -> bool {
+        self.contains_last_ironwood_actions(ironwood_action_count(tx))
+    }
+
     /// Advances the tracked tree positions past a transaction with the given output
     /// counts.
     fn increment(
         &mut self,
         sapling_output_count: u32,
         #[cfg(feature = "orchard")] orchard_action_count: u32,
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))] ironwood_action_count: u32,
     ) {
         self.sapling_tree_position += sapling_output_count;
         #[cfg(feature = "orchard")]
         {
             self.orchard_tree_position += orchard_action_count;
+        }
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        {
+            self.ironwood_tree_position += ironwood_action_count;
         }
     }
 
@@ -736,6 +907,8 @@ impl PositionTracker {
             sapling_output_count(tx),
             #[cfg(feature = "orchard")]
             orchard_action_count(tx),
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_action_count(tx),
         );
     }
 
@@ -746,6 +919,8 @@ impl PositionTracker {
         assert_eq!(self.sapling_tree_position, self.sapling_final_tree_size);
         #[cfg(feature = "orchard")]
         assert_eq!(self.orchard_tree_position, self.orchard_final_tree_size);
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        assert_eq!(self.ironwood_tree_position, self.ironwood_final_tree_size);
 
         Ok(())
     }
@@ -925,6 +1100,10 @@ mod tests {
             orchard_tree_position: 0,
             #[cfg(feature = "orchard")]
             orchard_final_tree_size: 0,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_tree_position: 0,
+            #[cfg(feature = "orchard")]
+            ironwood_final_tree_size: 0,
         };
 
         // A transaction adding exactly the remaining outputs contains the block's last
@@ -944,6 +1123,10 @@ mod tests {
             orchard_tree_position: 0,
             #[cfg(feature = "orchard")]
             orchard_final_tree_size: 0,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_tree_position: 0,
+            #[cfg(feature = "orchard")]
+            ironwood_final_tree_size: 0,
         };
 
         // Walk a block of three transactions with 2, 0 and 4 Sapling outputs; only the
@@ -953,17 +1136,23 @@ mod tests {
             2,
             #[cfg(feature = "orchard")]
             0,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            0,
         );
         assert!(!tracker.contains_last_sapling_outputs(0));
         tracker.increment(
             0,
             #[cfg(feature = "orchard")]
             0,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            0,
         );
         assert!(tracker.contains_last_sapling_outputs(4));
         tracker.increment(
             4,
             #[cfg(feature = "orchard")]
+            0,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
             0,
         );
 
@@ -979,13 +1168,41 @@ mod tests {
             sapling_final_tree_size: 0,
             orchard_tree_position: 4,
             orchard_final_tree_size: 9,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_tree_position: 0,
+            ironwood_final_tree_size: 0,
         };
 
         assert!(tracker.contains_last_orchard_actions(5));
         assert!(!tracker.contains_last_orchard_actions(4));
-        tracker.increment(0, 5);
+        tracker.increment(
+            0,
+            5,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            0,
+        );
 
         assert_eq!(tracker.orchard_tree_position, 9);
+        tracker.check_end_of_block_consistency().unwrap();
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn increment_advances_ironwood_position_to_final_size() {
+        let mut tracker = PositionTracker {
+            sapling_tree_position: 0,
+            sapling_final_tree_size: 0,
+            orchard_tree_position: 0,
+            orchard_final_tree_size: 0,
+            ironwood_tree_position: 3,
+            ironwood_final_tree_size: 7,
+        };
+
+        assert!(tracker.contains_last_ironwood_actions(4));
+        assert!(!tracker.contains_last_ironwood_actions(3));
+        tracker.increment(0, 0, 4);
+
+        assert_eq!(tracker.ironwood_tree_position, 7);
         tracker.check_end_of_block_consistency().unwrap();
     }
 
@@ -1001,6 +1218,10 @@ mod tests {
             orchard_tree_position: 0,
             #[cfg(feature = "orchard")]
             orchard_final_tree_size: 0,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            ironwood_tree_position: 0,
+            #[cfg(feature = "orchard")]
+            ironwood_final_tree_size: 0,
         };
         let _ = tracker.check_end_of_block_consistency();
     }
