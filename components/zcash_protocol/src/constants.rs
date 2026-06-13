@@ -40,6 +40,9 @@ pub const V5_VERSION_GROUP_ID: u32 = 0x26A7270A;
 #[cfg(zcash_unstable = "nu7")]
 pub const V6_TX_VERSION: u32 = 6;
 /// The version group ID for Zcash v6 transactions.
+///
+/// This value is gated by `zcash_unstable = "nu7"` and is a placeholder until
+/// the Valar NU7 version group ID is chosen.
 #[cfg(zcash_unstable = "nu7")]
 pub const V6_VERSION_GROUP_ID: u32 = 0xFFFFFFFF;
 

@@ -730,6 +730,9 @@ pub enum BranchId {
     /// The consensus rules deployed by [`NetworkUpgrade::Nu6_2`].
     Nu6_2,
     /// The consensus rules to be deployed by [`NetworkUpgrade::Nu7`].
+    ///
+    /// This variant is gated by `zcash_unstable = "nu7"` and currently uses a
+    /// placeholder branch ID until the Valar NU7 consensus branch ID is chosen.
     #[cfg(zcash_unstable = "nu7")]
     Nu7,
     /// Candidates for future consensus rules; this branch will never

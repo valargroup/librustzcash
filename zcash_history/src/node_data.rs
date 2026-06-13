@@ -229,15 +229,17 @@ impl V2 {
 pub struct V3 {
     /// The V2 node data retained in V3.
     pub v2: V2,
-    /// Start Ironwood tree root.
+    /// Ironwood tree root at the start of this node's interval.
     ///
-    /// For leaf nodes, this is the final Ironwood note commitment tree root after
-    /// the corresponding block.
+    /// Leaf nodes represent a single block, so their start and end roots are both
+    /// the final Ironwood note commitment tree root after the corresponding block.
+    /// Internal nodes carry the start root from their leftmost leaf.
     pub start_ironwood_root: [u8; 32],
-    /// End Ironwood tree root.
+    /// Ironwood tree root at the end of this node's interval.
     ///
-    /// For leaf nodes, this is the final Ironwood note commitment tree root after
-    /// the corresponding block.
+    /// Leaf nodes represent a single block, so their start and end roots are both
+    /// the final Ironwood note commitment tree root after the corresponding block.
+    /// Internal nodes carry the end root from their rightmost leaf.
     pub end_ironwood_root: [u8; 32],
     /// Number of transactions containing an Ironwood bundle.
     pub ironwood_tx: u64,

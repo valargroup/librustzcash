@@ -12,9 +12,11 @@ workspace.
 
 ### Added
 - `zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID}` under
-  `zcash_unstable = "nu7"`.
+  `zcash_unstable = "nu7"`. The v6 version group ID is provisional until the
+  Valar NU7 value is chosen.
 - `zcash_protocol::consensus::{NetworkUpgrade::Nu7, BranchId::Nu7}` under
-  `zcash_unstable = "nu7"`.
+  `zcash_unstable = "nu7"`. The NU7 consensus branch ID is provisional until
+  the Valar NU7 value is chosen.
 - `zcash_protocol::local_consensus::LocalNetwork::nu7` under
   `zcash_unstable = "nu7"`.
 
