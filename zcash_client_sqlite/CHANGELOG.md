@@ -10,9 +10,26 @@ workspace.
 
 ## [0.22.0] - PLANNED
 
+### Added
+- SQLite wallet support for Ironwood note commitment tree persistence,
+  including Ironwood block metadata columns, `ironwood_tree_*` tables, and
+  Ironwood shard scan state views.
+- `WalletDb::generate_ironwood_witnesses_at_historical_height`, which
+  generates Ironwood Merkle witnesses at a historical height from persisted
+  Ironwood shard data and a caller-supplied frontier.
+
 ### Changed
 - Wallet summaries now count V3 Orchard-style notes as Ironwood balance instead
   of Orchard balance.
+- The `orchard_received_notes` table now stores a `note_version`, and its
+  uniqueness constraint includes `(transaction_id, action_index, note_version)`
+  so Orchard and Ironwood notes with the same action index remain distinct.
+- Public wallet output views now expose Ironwood V3 Orchard-style notes with
+  SQLite pool code `4`; existing sent-note rows for those notes are migrated
+  from Orchard pool code `3` to Ironwood pool code `4`.
+- Wallet migrations now requeue already scanned NU7-era ranges for historical
+  scanning when Ironwood tree storage is added, so existing wallets can populate
+  Ironwood tree state.
 
 ### Fixed
 - V6 transaction reconstruction now preserves Ironwood bundles when deriving the

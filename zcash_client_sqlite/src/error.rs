@@ -314,7 +314,7 @@ impl fmt::Display for SqliteClientError {
             #[cfg(feature = "orchard")]
             SqliteClientError::HistoricalFrontierInvalid(err) => write!(
                 f,
-                "The frontier supplied to generate_orchard_witnesses_at_historical_height is inconsistent with the wallet's shard data: {err}"
+                "The historical frontier supplied for witness generation is inconsistent with the wallet's shard data: {err}"
             ),
             #[cfg(feature = "orchard")]
             SqliteClientError::HistoricalWitnessUnavailable { position, height } => write!(
