@@ -120,19 +120,20 @@ impl Updater {
         self.pczt
     }
 
-    /// Sets the Orchard bundle anchor for a v6 PCZT.
+    /// Sets the Orchard bundle anchor for a version 6 PCZT on NU7.
     ///
     /// Orchard signatures in v6 do not commit to this anchor, so this may be
     /// called after shielded signatures have been added. Orchard proofs do
     /// depend on the anchor, so this must be called before proof creation.
     ///
-    /// Returns an error if the PCZT is not v6 or if an Orchard proof is already present.
+    /// Returns an error if the PCZT is not version 6 on NU7, or if an Orchard proof is
+    /// already present.
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     pub fn set_v6_orchard_anchor(
         mut self,
         anchor: ::orchard::Anchor,
     ) -> Result<Self, OrchardSpendWitnessError> {
-        ensure_v6(&self.pczt.global)?;
+        ensure_v6_nu7(&self.pczt.global)?;
         ensure_no_orchard_proof(&self.pczt.orchard)?;
         self.pczt.orchard.anchor = anchor.to_bytes();
         Ok(self)
@@ -167,19 +168,20 @@ impl Updater {
         Ok(self)
     }
 
-    /// Sets the Ironwood bundle anchor for a v6 PCZT.
+    /// Sets the Ironwood bundle anchor for a version 6 PCZT on NU7.
     ///
     /// Ironwood signatures in v6 do not commit to this anchor, so this may be
     /// called after shielded signatures have been added. Ironwood proofs do
     /// depend on the anchor, so this must be called before proof creation.
     ///
-    /// Returns an error if the PCZT is not v6 or if an Ironwood proof is already present.
+    /// Returns an error if the PCZT is not version 6 on NU7, or if an Ironwood proof is
+    /// already present.
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     pub fn set_v6_ironwood_anchor(
         mut self,
         anchor: ::orchard::Anchor,
     ) -> Result<Self, OrchardSpendWitnessError> {
-        ensure_v6(&self.pczt.global)?;
+        ensure_v6_nu7(&self.pczt.global)?;
         ensure_no_orchard_proof(&self.pczt.ironwood)?;
         self.pczt.ironwood.anchor = anchor.to_bytes();
         Ok(self)
@@ -187,14 +189,14 @@ impl Updater {
 
     /// Sets spend witnesses for Ironwood actions by action index.
     ///
-    /// Returns an error if the PCZT is not v6, if any witness references an action index
-    /// that does not exist, or if an Ironwood proof is already present.
+    /// Returns an error if the PCZT is not version 6 on NU7, if any witness references
+    /// an action index that does not exist, or if an Ironwood proof is already present.
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     pub fn set_ironwood_spend_witnesses(
         mut self,
         witnesses: impl IntoIterator<Item = OrchardSpendWitness>,
     ) -> Result<Self, OrchardSpendWitnessError> {
-        ensure_v6(&self.pczt.global)?;
+        ensure_v6_nu7(&self.pczt.global)?;
         self.pczt
             .ironwood
             .validate_ironwood_note_plaintext_versions()
@@ -228,14 +230,11 @@ fn ensure_no_orchard_proof(
 }
 
 #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-fn ensure_v6(global: &Global) -> Result<(), OrchardSpendWitnessError> {
-    if global.tx_version == zcash_protocol::constants::V6_TX_VERSION
-        && global.version_group_id == zcash_protocol::constants::V6_VERSION_GROUP_ID
-    {
-        Ok(())
-    } else {
-        Err(OrchardSpendWitnessError::RequiresV6)
-    }
+fn ensure_v6_nu7(global: &Global) -> Result<(), OrchardSpendWitnessError> {
+    crate::common::ensure_v6_nu7(global).map_err(|e| match e {
+        crate::common::V6Nu7Error::RequiresV6 => OrchardSpendWitnessError::RequiresV6,
+        e => OrchardSpendWitnessError::V6Nu7(e),
+    })
 }
 
 /// An updater for a transparent PCZT output.
@@ -260,6 +259,9 @@ pub enum OrchardSpendWitnessError {
     /// The PCZT must be version 6 for this update.
     #[cfg(zcash_unstable = "nu7")]
     RequiresV6,
+    /// The PCZT global fields do not identify version 6 on NU7.
+    #[cfg(zcash_unstable = "nu7")]
+    V6Nu7(crate::common::V6Nu7Error),
     /// The bundle already contains a proof that depends on the current witness data.
     ProofAlreadyPresent,
     /// The bundle uses a note plaintext version that is not valid for its pool.
@@ -274,6 +276,8 @@ impl core::fmt::Display for OrchardSpendWitnessError {
                 write!(f, "Orchard or Ironwood action index {index} does not exist")
             }
             OrchardSpendWitnessError::InvalidWitness => write!(f, "invalid Orchard-style witness"),
+            #[cfg(zcash_unstable = "nu7")]
+            OrchardSpendWitnessError::V6Nu7(e) => e.fmt(f),
             #[cfg(zcash_unstable = "nu7")]
             OrchardSpendWitnessError::RequiresV6 => {
                 write!(

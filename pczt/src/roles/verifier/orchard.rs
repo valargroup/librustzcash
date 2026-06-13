@@ -32,6 +32,9 @@ impl super::Verifier {
     }
 
     /// Parses the Ironwood bundle and then verifies it in the given closure.
+    ///
+    /// Returns an error without invoking the closure if the PCZT is not version 6 on
+    /// NU7.
     #[cfg(zcash_unstable = "nu7")]
     pub fn with_ironwood<E, F>(self, f: F) -> Result<Self, OrchardError<E>>
     where
@@ -44,6 +47,10 @@ impl super::Verifier {
             orchard,
             ironwood,
         } = self.pczt;
+
+        crate::common::ensure_v6_nu7(&global)
+            .map_err(crate::orchard::BundleParseError::from)
+            .map_err(OrchardError::Parse)?;
 
         let bundle = ironwood
             .into_parsed_ironwood()

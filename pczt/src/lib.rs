@@ -791,6 +791,37 @@ mod tests {
     }
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn pczt_with_one_v5_ironwood_action() -> Pczt {
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+        set_orchard_style_note_version(&mut pczt.ironwood, orchard::NotePlaintextVersion::V3);
+        pczt.global.tx_version = V5_TX_VERSION;
+        pczt.global.version_group_id = V5_VERSION_GROUP_ID;
+        pczt.global.consensus_branch_id = u32::from(BranchId::Nu5);
+        pczt
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn pczt_with_one_v6_pre_nu7_ironwood_action() -> Pczt {
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+        set_orchard_style_note_version(&mut pczt.ironwood, orchard::NotePlaintextVersion::V3);
+        pczt.global.consensus_branch_id = u32::from(BranchId::Nu5);
+        pczt
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn assert_v6_nu7_parse_error(
+        err: crate::orchard::BundleParseError,
+        expected: common::V6Nu7Error,
+    ) {
+        assert!(matches!(
+            err,
+            crate::orchard::BundleParseError::V6Nu7(e) if e == expected
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     fn valid_anchor(byte: u8) -> ::orchard::Anchor {
         let mut bytes = [0; 32];
         bytes[0] = byte;
@@ -1047,6 +1078,25 @@ mod tests {
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     #[test]
+    fn updater_rejects_v6_orchard_anchor_update_for_pre_nu7_branch() {
+        use roles::updater::{OrchardSpendWitnessError, Updater};
+
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.global.consensus_branch_id = u32::from(BranchId::Nu5);
+        let result = Updater::new(pczt).set_v6_orchard_anchor(valid_anchor(1));
+
+        assert!(matches!(
+            result,
+            Err(OrchardSpendWitnessError::V6Nu7(
+                common::V6Nu7Error::VersionInvalidForConsensusBranch {
+                    consensus_branch_id: BranchId::Nu5
+                }
+            ))
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
     fn extraction_rejects_v5_pczt_with_ironwood_actions() {
         let mut pczt = pczt_with_one_v6_orchard_action();
         pczt.ironwood = pczt.orchard.clone();
@@ -1073,6 +1123,121 @@ mod tests {
                 version: zcash_primitives::transaction::TxVersion::V6,
                 consensus_branch_id: BranchId::Nu5,
             })
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn direct_ironwood_roles_reject_v5_pczt_before_callbacks() {
+        use roles::{low_level_signer, updater::Updater, verifier::Verifier};
+
+        let pczt = pczt_with_one_v5_ironwood_action();
+
+        let mut update_called = false;
+        let update_result = Updater::new(pczt.clone()).update_ironwood_with(|_| {
+            update_called = true;
+            Ok(())
+        });
+        match update_result {
+            Err(roles::updater::OrchardError::Parser(e)) => {
+                assert_v6_nu7_parse_error(e, common::V6Nu7Error::RequiresV6)
+            }
+            Err(_) => panic!("expected v6/NU7 parse error"),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+        assert!(!update_called);
+
+        let mut verify_called = false;
+        let verify_result = Verifier::new(pczt.clone()).with_ironwood(|_| {
+            verify_called = true;
+            Ok::<(), roles::verifier::OrchardError<()>>(())
+        });
+        match verify_result {
+            Err(roles::verifier::OrchardError::Parse(e)) => {
+                assert_v6_nu7_parse_error(e, common::V6Nu7Error::RequiresV6)
+            }
+            Err(_) => panic!("expected v6/NU7 parse error"),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+        assert!(!verify_called);
+
+        let mut sign_called = false;
+        let sign_result = low_level_signer::Signer::new(pczt).sign_ironwood_with(
+            |_, _, _| -> Result<(), crate::orchard::BundleParseError> {
+                sign_called = true;
+                Ok(())
+            },
+        );
+        match sign_result {
+            Err(e) => assert_v6_nu7_parse_error(e, common::V6Nu7Error::RequiresV6),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+        assert!(!sign_called);
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn prover_rejects_v5_ironwood_proof() {
+        use roles::prover::Prover;
+
+        let pk = ::orchard::circuit::ProvingKey::build();
+        let result = Prover::new(pczt_with_one_v5_ironwood_action()).create_ironwood_proof(&pk);
+
+        match result {
+            Err(roles::prover::OrchardError::Parser(e)) => {
+                assert_v6_nu7_parse_error(e, common::V6Nu7Error::RequiresV6)
+            }
+            Err(_) => panic!("expected v6/NU7 parse error"),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn direct_ironwood_roles_reject_v6_pczt_for_pre_nu7_branch() {
+        use roles::{prover::Prover, updater::Updater, verifier::Verifier};
+
+        let pczt = pczt_with_one_v6_pre_nu7_ironwood_action();
+        let expected = common::V6Nu7Error::VersionInvalidForConsensusBranch {
+            consensus_branch_id: BranchId::Nu5,
+        };
+
+        assert!(!Prover::new(pczt.clone()).requires_ironwood_proof());
+
+        let update_result = Updater::new(pczt.clone()).update_ironwood_with(|_| Ok(()));
+        match update_result {
+            Err(roles::updater::OrchardError::Parser(e)) => assert_v6_nu7_parse_error(e, expected),
+            Err(_) => panic!("expected v6/NU7 parse error"),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+
+        let verify_result = Verifier::new(pczt.clone())
+            .with_ironwood(|_| Ok::<(), roles::verifier::OrchardError<()>>(()));
+        match verify_result {
+            Err(roles::verifier::OrchardError::Parse(e)) => assert_v6_nu7_parse_error(e, expected),
+            Err(_) => panic!("expected v6/NU7 parse error"),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+
+        let pk = ::orchard::circuit::ProvingKey::build();
+        let proof_result = Prover::new(pczt.clone()).create_ironwood_proof(&pk);
+        match proof_result {
+            Err(roles::prover::OrchardError::Parser(e)) => assert_v6_nu7_parse_error(e, expected),
+            Err(_) => panic!("expected v6/NU7 parse error"),
+            Ok(_) => panic!("expected v6/NU7 parse error"),
+        }
+
+        let witness_result =
+            Updater::new(pczt.clone()).set_ironwood_spend_witnesses([orchard_witness(0, 9)]);
+        assert!(matches!(
+            witness_result,
+            Err(roles::updater::OrchardSpendWitnessError::V6Nu7(e)) if e == expected
+        ));
+
+        let anchor_result = Updater::new(pczt).set_v6_ironwood_anchor(valid_anchor(2));
+        assert!(matches!(
+            anchor_result,
+            Err(roles::updater::OrchardSpendWitnessError::V6Nu7(e)) if e == expected
         ));
     }
 

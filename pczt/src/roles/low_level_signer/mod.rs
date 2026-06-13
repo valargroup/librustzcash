@@ -34,6 +34,9 @@ impl Signer {
     }
 
     /// Exposes the capability to sign the Ironwood spends.
+    ///
+    /// Returns an error without invoking the closure if the PCZT is not version 6 on
+    /// NU7.
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     pub fn sign_ironwood_with<E, F>(self, f: F) -> Result<Self, E>
     where
@@ -41,6 +44,9 @@ impl Signer {
         F: FnOnce(&Pczt, &mut orchard::pczt::Bundle, &mut u8) -> Result<(), E>,
     {
         let mut pczt = self.pczt;
+
+        crate::common::ensure_v6_nu7(&pczt.global)
+            .map_err(crate::orchard::BundleParseError::from)?;
 
         let mut tx_modifiable = pczt.global.tx_modifiable;
 

@@ -6,6 +6,11 @@ use alloc::vec::Vec;
 
 use getset::Getters;
 use serde::{Deserialize, Serialize};
+#[cfg(zcash_unstable = "nu7")]
+use zcash_protocol::{
+    consensus::BranchId,
+    constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID},
+};
 
 use crate::roles::combiner::merge_map;
 
@@ -13,6 +18,56 @@ pub(crate) const FLAG_TRANSPARENT_INPUTS_MODIFIABLE: u8 = 0b0000_0001;
 pub(crate) const FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE: u8 = 0b0000_0010;
 pub(crate) const FLAG_HAS_SIGHASH_SINGLE: u8 = 0b0000_0100;
 pub(crate) const FLAG_SHIELDED_MODIFIABLE: u8 = 0b1000_0000;
+
+/// Errors that can occur when a role requires a PCZT for version 6 on NU7.
+#[cfg(zcash_unstable = "nu7")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum V6Nu7Error {
+    /// The PCZT does not specify transaction version 6 with the version 6 version group ID.
+    RequiresV6,
+    /// The PCZT consensus branch ID is unknown.
+    UnknownConsensusBranchId,
+    /// The PCZT does not specify the NU7 consensus branch.
+    VersionInvalidForConsensusBranch { consensus_branch_id: BranchId },
+}
+
+#[cfg(zcash_unstable = "nu7")]
+impl core::fmt::Display for V6Nu7Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            V6Nu7Error::RequiresV6 => {
+                write!(f, "PCZT must be version 6 for this role")
+            }
+            V6Nu7Error::UnknownConsensusBranchId => {
+                write!(f, "PCZT consensus branch ID is unknown")
+            }
+            V6Nu7Error::VersionInvalidForConsensusBranch {
+                consensus_branch_id,
+            } => write!(
+                f,
+                "PCZT version 6 roles require the NU7 consensus branch, got {consensus_branch_id:?}"
+            ),
+        }
+    }
+}
+
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) fn ensure_v6_nu7(global: &Global) -> Result<(), V6Nu7Error> {
+    if global.tx_version != V6_TX_VERSION || global.version_group_id != V6_VERSION_GROUP_ID {
+        return Err(V6Nu7Error::RequiresV6);
+    }
+
+    let consensus_branch_id = BranchId::try_from(global.consensus_branch_id)
+        .map_err(|_| V6Nu7Error::UnknownConsensusBranchId)?;
+    if consensus_branch_id == BranchId::Nu7 {
+        Ok(())
+    } else {
+        Err(V6Nu7Error::VersionInvalidForConsensusBranch {
+            consensus_branch_id,
+        })
+    }
+}
 
 /// Global fields that are relevant to the transaction as a whole.
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]

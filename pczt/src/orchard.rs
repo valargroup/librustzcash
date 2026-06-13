@@ -110,15 +110,25 @@ impl core::fmt::Display for NotePlaintextVersionError {
     }
 }
 
-/// Errors that can occur while parsing an Orchard-shaped PCZT bundle.
+/// Errors that can occur while preparing an Orchard-shaped PCZT bundle for a role.
 #[cfg(feature = "orchard")]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BundleParseError {
+    /// A role requiring version 6 on NU7 was used with unsupported global fields.
+    #[cfg(zcash_unstable = "nu7")]
+    V6Nu7(crate::common::V6Nu7Error),
     /// The bundle uses a note plaintext version that is not valid for its pool.
     NotePlaintextVersion(NotePlaintextVersionError),
     /// The bundle failed Orchard PCZT parsing.
     Parse(orchard::pczt::ParseError),
+}
+
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+impl From<crate::common::V6Nu7Error> for BundleParseError {
+    fn from(e: crate::common::V6Nu7Error) -> Self {
+        BundleParseError::V6Nu7(e)
+    }
 }
 
 #[cfg(feature = "orchard")]
@@ -139,6 +149,8 @@ impl From<orchard::pczt::ParseError> for BundleParseError {
 impl core::fmt::Display for BundleParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            #[cfg(zcash_unstable = "nu7")]
+            BundleParseError::V6Nu7(e) => e.fmt(f),
             BundleParseError::NotePlaintextVersion(e) => e.fmt(f),
             BundleParseError::Parse(_) => write!(f, "invalid Orchard-shaped PCZT bundle"),
         }
