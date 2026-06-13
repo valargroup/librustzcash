@@ -1069,11 +1069,13 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
     /// - the [final transaction],
     /// - the [Sapling metadata], and
     /// - the [Orchard metadata]
+    /// - the [Ironwood metadata], if `zcash_unstable = "nu7"` is enabled
     ///
     /// generated during the build process.
     ///
     /// [Sapling metadata]: ::sapling::builder::SaplingMetadata
     /// [Orchard metadata]: ::orchard::builder::BundleMetadata
+    /// [Ironwood metadata]: ::orchard::builder::BundleMetadata
     /// [final transaction]: Transaction
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "circuits")]
@@ -1478,7 +1480,8 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
     ///
     /// Upon success, returns a struct containing the PCZT components, and the
     /// [`SaplingMetadata`] and [`orchard::builder::BundleMetadata`] generated during the
-    /// build process.
+    /// build process. If `zcash_unstable = "nu7"` is enabled, the result also contains
+    /// Ironwood metadata generated during the build process.
     pub fn build_for_pczt<R: RngCore + CryptoRng, FR: FeeRule>(
         self,
         mut rng: R,
@@ -1552,17 +1555,21 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         };
 
         #[cfg(zcash_unstable = "nu7")]
-        let (ironwood_bundle, ironwood_meta) = match self
-            .ironwood_builder
-            .map(|builder| {
-                builder
-                    .build_for_pczt(&mut rng)
-                    .map_err(Error::IronwoodBuild)
-            })
-            .transpose()?
-        {
-            Some((bundle, meta)) => (Some(bundle), meta),
-            None => (None, orchard::builder::BundleMetadata::empty()),
+        let (ironwood_bundle, ironwood_meta) = if pczt_tx_version.has_ironwood() {
+            match self
+                .ironwood_builder
+                .map(|builder| {
+                    builder
+                        .build_for_pczt(&mut rng)
+                        .map_err(Error::IronwoodBuild)
+                })
+                .transpose()?
+            {
+                Some((bundle, meta)) => (Some(bundle), meta),
+                None => (None, orchard::builder::BundleMetadata::empty()),
+            }
+        } else {
+            (None, orchard::builder::BundleMetadata::empty())
         };
 
         Ok(PcztResult {

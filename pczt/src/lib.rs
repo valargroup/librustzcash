@@ -334,7 +334,7 @@ impl Pczt {
             .validate_ironwood_note_plaintext_versions()
             .map_err(ParseError::NotePlaintextVersion)?;
 
-        Ok(pczt)
+        Ok(pczt.normalize())
     }
 
     #[cfg(zcash_unstable = "nu7")]
@@ -362,6 +362,25 @@ impl Pczt {
             && self.ironwood.anchor == EMPTY_IRONWOOD_ANCHOR
             && self.ironwood.zkproof.is_none()
             && self.ironwood.bsk.is_none()
+    }
+
+    fn normalize(self) -> Self {
+        #[cfg(zcash_unstable = "nu7")]
+        {
+            let mut pczt = self;
+            if (pczt.global.tx_version != zcash_protocol::constants::V6_TX_VERSION
+                || pczt.global.version_group_id != zcash_protocol::constants::V6_VERSION_GROUP_ID)
+                && pczt.ironwood.actions.is_empty()
+            {
+                pczt.ironwood = empty_ironwood_bundle();
+            }
+            pczt
+        }
+
+        #[cfg(not(zcash_unstable = "nu7"))]
+        {
+            self
+        }
     }
 
     /// Serializes this PCZT.
@@ -446,10 +465,30 @@ impl Pczt {
             }),
         }?;
 
-        #[cfg(zcash_unstable = "nu7")]
-        if !version.has_ironwood() && !ironwood.actions.is_empty() {
-            return Err(ExtractError::IronwoodRequiresV6.into());
+        let consensus_branch_id = BranchId::try_from(global.consensus_branch_id)
+            .map_err(|_| ExtractError::UnknownConsensusBranchId)?;
+        if !version.valid_in_branch(consensus_branch_id) {
+            return Err(ExtractError::VersionInvalidForConsensusBranch {
+                version,
+                consensus_branch_id,
+            }
+            .into());
         }
+
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood = if version.has_ironwood() {
+            ironwood
+                .into_parsed_ironwood()
+                .map_err(ExtractError::IronwoodParse)?
+        } else {
+            if !ironwood.actions.is_empty() {
+                return Err(ExtractError::IronwoodRequiresV6.into());
+            }
+
+            crate::empty_ironwood_bundle()
+                .into_parsed_ironwood()
+                .map_err(ExtractError::IronwoodParse)?
+        };
 
         let transparent = transparent
             .into_parsed()
@@ -458,13 +497,6 @@ impl Pczt {
         let orchard = orchard
             .into_parsed_orchard()
             .map_err(ExtractError::OrchardParse)?;
-        #[cfg(zcash_unstable = "nu7")]
-        let ironwood = ironwood
-            .into_parsed_ironwood()
-            .map_err(ExtractError::IronwoodParse)?;
-
-        let consensus_branch_id = BranchId::try_from(global.consensus_branch_id)
-            .map_err(|_| ExtractError::UnknownConsensusBranchId)?;
 
         let lock_time = determine_lock_time(&global, transparent.inputs())
             .ok_or(ExtractError::IncompatibleLockTimes)?;
@@ -626,6 +658,11 @@ pub enum ExtractError {
     TransparentParse(::transparent::pczt::ParseError),
     /// The consensus branch ID requested by the PCZT does not correspond to a known network upgrade.
     UnknownConsensusBranchId,
+    /// The transaction version is not valid for the specified consensus branch ID.
+    VersionInvalidForConsensusBranch {
+        version: TxVersion,
+        consensus_branch_id: BranchId,
+    },
     /// The PCZT specifies an unsupported transaction version.
     UnsupportedTxVersion { version: u32, version_group_id: u32 },
 }
@@ -1026,6 +1063,21 @@ mod tests {
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     #[test]
+    fn extraction_rejects_v6_pczt_with_pre_nu7_branch_id() {
+        let mut pczt = pczt_with_one_v6_orchard_action();
+        pczt.global.consensus_branch_id = u32::from(BranchId::Nu5);
+
+        assert!(matches!(
+            pczt.into_effects(),
+            Err(ExtractError::VersionInvalidForConsensusBranch {
+                version: zcash_primitives::transaction::TxVersion::V6,
+                consensus_branch_id: BranchId::Nu5,
+            })
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
     fn updater_sets_ironwood_anchor_and_witness() {
         use roles::updater::Updater;
 
@@ -1118,10 +1170,7 @@ mod tests {
         let mut encoded = pczt_with_one_orchard_action().serialize();
         encoded.push(0);
 
-        assert!(matches!(
-            Pczt::parse(&encoded),
-            Err(ParseError::Invalid(postcard::Error::DeserializeBadEncoding))
-        ));
+        assert!(matches!(Pczt::parse(&encoded), Err(ParseError::Invalid(_))));
     }
 
     #[cfg(zcash_unstable = "nu7")]
@@ -1167,6 +1216,32 @@ mod tests {
         let expected = postcard::to_extend(&legacy_pczt, expected).unwrap();
 
         assert_eq!(pczt.serialize(), expected);
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn parse_normalizes_empty_ironwood_metadata_for_v5() {
+        let mut pczt =
+            roles::creator::Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+                .build();
+        let legacy_serialized = pczt.serialize();
+        pczt.ironwood.anchor = [1; 32];
+
+        let mut encoded = vec![];
+        encoded.extend_from_slice(MAGIC_BYTES);
+        encoded.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
+        let encoded = postcard::to_extend(&pczt, encoded).unwrap();
+
+        let parsed = Pczt::parse(&encoded).unwrap();
+        let fallback = empty_ironwood_bundle();
+
+        assert!(parsed.ironwood.actions.is_empty());
+        assert_eq!(parsed.ironwood.flags, fallback.flags);
+        assert_eq!(parsed.ironwood.value_sum, fallback.value_sum);
+        assert_eq!(parsed.ironwood.anchor, fallback.anchor);
+        assert_eq!(parsed.ironwood.zkproof, fallback.zkproof);
+        assert_eq!(parsed.ironwood.bsk, fallback.bsk);
+        assert_eq!(parsed.serialize(), legacy_serialized);
     }
 
     #[cfg(zcash_unstable = "nu7")]

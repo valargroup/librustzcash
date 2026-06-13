@@ -14,7 +14,10 @@ use crate::{
 
 use zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID};
 #[cfg(zcash_unstable = "nu7")]
-use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
+use zcash_protocol::{
+    consensus::BranchId,
+    constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID},
+};
 
 /// Initial flags allowing any modification.
 const INITIAL_TX_MODIFIABLE: u8 = FLAG_TRANSPARENT_INPUTS_MODIFIABLE
@@ -92,11 +95,27 @@ impl Creator {
 
     #[cfg(zcash_unstable = "nu7")]
     fn select_v6(&mut self) {
-        self.tx_version = V6_TX_VERSION;
-        self.version_group_id = V6_VERSION_GROUP_ID;
+        if BranchId::try_from(self.consensus_branch_id) == Ok(BranchId::Nu7) {
+            self.tx_version = V6_TX_VERSION;
+            self.version_group_id = V6_VERSION_GROUP_ID;
+        }
     }
 
     pub fn build(self) -> Pczt {
+        #[cfg(zcash_unstable = "nu7")]
+        let ironwood = if self.tx_version == V6_TX_VERSION {
+            crate::orchard::Bundle {
+                actions: vec![],
+                flags: self.ironwood_flags,
+                value_sum: (0, true),
+                anchor: self.ironwood_anchor,
+                zkproof: None,
+                bsk: None,
+            }
+        } else {
+            crate::empty_ironwood_bundle()
+        };
+
         Pczt {
             global: crate::common::Global {
                 tx_version: self.tx_version,
@@ -128,14 +147,7 @@ impl Creator {
                 bsk: None,
             },
             #[cfg(zcash_unstable = "nu7")]
-            ironwood: crate::orchard::Bundle {
-                actions: vec![],
-                flags: self.ironwood_flags,
-                value_sum: (0, true),
-                anchor: self.ironwood_anchor,
-                zkproof: None,
-                bsk: None,
-            },
+            ironwood,
         }
     }
 
@@ -166,6 +178,9 @@ impl Creator {
             #[cfg(zcash_unstable = "zfuture")]
             zcash_primitives::transaction::TxVersion::ZFuture => None,
         }?;
+        if !parts.version.valid_in_branch(parts.consensus_branch_id) {
+            return None;
+        }
 
         // Spends and outputs not modifiable.
         let mut tx_modifiable = 0b0000_0000;
@@ -192,13 +207,16 @@ impl Creator {
         orchard.validate_orchard_note_plaintext_versions().ok()?;
 
         #[cfg(zcash_unstable = "nu7")]
-        let ironwood = parts
+        let mut ironwood = parts
             .ironwood
             .map(crate::orchard::Bundle::serialize_from)
             .unwrap_or_else(crate::empty_ironwood_bundle);
         #[cfg(zcash_unstable = "nu7")]
-        if !parts.version.has_ironwood() && !ironwood.actions.is_empty() {
-            return None;
+        if !parts.version.has_ironwood() {
+            if !ironwood.actions.is_empty() {
+                return None;
+            }
+            ironwood = crate::empty_ironwood_bundle();
         }
         #[cfg(zcash_unstable = "nu7")]
         ironwood.validate_ironwood_note_plaintext_versions().ok()?;
@@ -257,6 +275,24 @@ mod tests {
         assert_eq!(pczt.ironwood.anchor, [1; 32]);
     }
 
+    #[cfg(zcash_unstable = "nu7")]
+    #[test]
+    fn ironwood_anchor_for_pre_nu7_branch_remains_legacy_v5() {
+        let pczt = Creator::new(BranchId::Nu5.into(), 10_000_000, 133, [0; 32], [0; 32])
+            .with_ironwood_anchor([1; 32])
+            .build();
+        let fallback = crate::empty_ironwood_bundle();
+
+        assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
+        assert_eq!(pczt.global.version_group_id, V5_VERSION_GROUP_ID);
+        assert_eq!(pczt.ironwood.anchor, fallback.anchor);
+        assert_eq!(pczt.ironwood.bsk, None);
+        assert_eq!(
+            Pczt::parse(&pczt.serialize()).unwrap().ironwood.anchor,
+            fallback.anchor
+        );
+    }
+
     #[cfg(all(zcash_unstable = "nu7", feature = "zcp-builder"))]
     #[test]
     fn build_from_parts_uses_empty_ironwood_bundle() {
@@ -270,6 +306,52 @@ mod tests {
             sapling: None,
             orchard: None,
             ironwood: None,
+        })
+        .unwrap();
+        let fallback = crate::empty_ironwood_bundle();
+
+        assert!(pczt.ironwood.actions.is_empty());
+        assert_eq!(pczt.ironwood.flags, fallback.flags);
+        assert_eq!(pczt.ironwood.value_sum, fallback.value_sum);
+        assert_eq!(pczt.ironwood.anchor, fallback.anchor);
+        assert_eq!(pczt.ironwood.zkproof, fallback.zkproof);
+        assert_eq!(pczt.ironwood.bsk, fallback.bsk);
+    }
+
+    #[cfg(all(zcash_unstable = "nu7", feature = "zcp-builder"))]
+    #[test]
+    fn build_from_parts_rejects_version_invalid_for_branch() {
+        assert!(
+            Creator::build_from_parts(zcash_primitives::transaction::builder::PcztParts {
+                params: zcash_protocol::consensus::Network::TestNetwork,
+                version: zcash_primitives::transaction::TxVersion::V6,
+                consensus_branch_id: BranchId::Nu5,
+                lock_time: 0,
+                expiry_height: 0u32.into(),
+                transparent: None,
+                sapling: None,
+                orchard: None,
+                ironwood: None,
+            })
+            .is_none()
+        );
+    }
+
+    #[cfg(all(zcash_unstable = "nu7", feature = "zcp-builder"))]
+    #[test]
+    fn build_from_parts_normalizes_metadata_only_ironwood_for_v5() {
+        let mut ironwood = crate::empty_ironwood_bundle();
+        ironwood.anchor = [1; 32];
+        let pczt = Creator::build_from_parts(zcash_primitives::transaction::builder::PcztParts {
+            params: zcash_protocol::consensus::Network::TestNetwork,
+            version: zcash_primitives::transaction::TxVersion::V5,
+            consensus_branch_id: BranchId::Nu5,
+            lock_time: 0,
+            expiry_height: 0u32.into(),
+            transparent: None,
+            sapling: None,
+            orchard: None,
+            ironwood: Some(ironwood.into_parsed_ironwood().unwrap()),
         })
         .unwrap();
         let fallback = crate::empty_ironwood_bundle();

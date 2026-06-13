@@ -86,9 +86,14 @@ impl IoFinalizer {
             .finalize_io(shielded_sighash, OsRng)
             .map_err(Error::OrchardFinalize)?;
         #[cfg(zcash_unstable = "nu7")]
-        ironwood
-            .finalize_io(shielded_sighash, OsRng)
-            .map_err(Error::IronwoodFinalize)?;
+        let ironwood = if tx_data.version().has_ironwood() {
+            ironwood
+                .finalize_io(shielded_sighash, OsRng)
+                .map_err(Error::IronwoodFinalize)?;
+            crate::orchard::Bundle::serialize_from(ironwood)
+        } else {
+            crate::empty_ironwood_bundle()
+        };
 
         Ok(Pczt {
             global,
@@ -96,7 +101,7 @@ impl IoFinalizer {
             sapling: crate::sapling::Bundle::serialize_from(sapling),
             orchard: crate::orchard::Bundle::serialize_from(orchard),
             #[cfg(zcash_unstable = "nu7")]
-            ironwood: crate::orchard::Bundle::serialize_from(ironwood),
+            ironwood,
         })
     }
 }
