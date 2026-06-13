@@ -1138,6 +1138,15 @@ impl MigrationTransaction {
 /// The Ironwood output is inserted as a wallet-internal received note using
 /// the wallet's existing Orchard note storage. It is distinguished from
 /// Orchard notes by its `V3` note version.
+///
+/// # Errors
+///
+/// Returns an error if the wallet cannot identify the spending account, if the account
+/// does not have Orchard key material, if the wallet needs additional scan data to
+/// construct an anchor, if note selection cannot provide the requested minimum amount,
+/// if fee calculation or balance arithmetic fails, if the transaction builder, prover,
+/// or signer fails, or if the wallet data source fails while reading or persisting the
+/// migration transaction.
 #[allow(clippy::too_many_arguments)]
 #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
 pub fn create_orchard_to_ironwood_transaction<DbT, ParamsT, FeeRuleT>(

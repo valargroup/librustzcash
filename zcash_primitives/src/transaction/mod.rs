@@ -604,6 +604,11 @@ impl<A: Authorization> TransactionData<A> {
             .map_err(E::from)
     }
 
+    /// Computes this transaction's digest using the provided digest strategy.
+    ///
+    /// When `zcash_unstable = "nu7"` is enabled, version 6 transactions include the Ironwood
+    /// bundle digest as a separate Orchard-shaped digest with Ironwood personalization. Earlier
+    /// transaction versions do not include Ironwood in their digest.
     pub fn digest<D: TransactionDigest<A>>(&self, digester: D) -> D::Digest {
         digester.combine(
             digester.digest_header(
@@ -1287,6 +1292,11 @@ pub struct TxDigests<A> {
     pub transparent_digests: Option<TransparentDigests<A>>,
     pub sapling_digest: Option<A>,
     pub orchard_digest: Option<A>,
+    /// The digest of the Ironwood bundle used by version 6 transactions.
+    ///
+    /// This is `None` when the transaction has no Ironwood bundle. When a version 6 transaction
+    /// ID is derived from these digests, `None` is combined as the empty Ironwood bundle digest
+    /// using the Ironwood bundle personalization.
     #[cfg(zcash_unstable = "nu7")]
     pub ironwood_digest: Option<A>,
     #[cfg(zcash_unstable = "zfuture")]
@@ -1298,6 +1308,7 @@ pub trait TransactionDigest<A: Authorization> {
     type TransparentDigest;
     type SaplingDigest;
     type OrchardDigest;
+    /// The digest type produced for the Ironwood bundle in version 6 transactions.
     #[cfg(zcash_unstable = "nu7")]
     type IronwoodDigest;
 
@@ -1331,6 +1342,14 @@ pub trait TransactionDigest<A: Authorization> {
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest;
 
+    /// Computes the digest for the Ironwood bundle.
+    ///
+    /// Ironwood bundles are Orchard-shaped, but they use a distinct bundle personalization.
+    /// Transaction ID digesters should return `None` when no Ironwood bundle is present;
+    /// version 6 transaction ID combination substitutes the empty Ironwood bundle digest for
+    /// `None`. Transaction commitment digesters may instead return an empty authorizing data
+    /// digest when no Ironwood bundle is present, and may use a different anchor commitment
+    /// policy than transaction ID digesters.
     #[cfg(zcash_unstable = "nu7")]
     fn digest_ironwood(
         &self,

@@ -53,6 +53,9 @@
 //! This view exposes the history of transaction outputs received by and sent from the wallet,
 //! keyed by transaction ID, pool type, and output index. The contents of this view are useful for
 //! producing a detailed report of the effects of a transaction. Each row of this view contains:
+//! - `output_pool` the pool code for the output. Transparent outputs use `0`, Sapling outputs
+//!   use `2`, Orchard outputs use `3`, and Ironwood outputs use `4`. Ironwood outputs are stored
+//!   as Orchard-shaped `V3` notes and are surfaced through this view with pool code `4`.
 //! - `from_account_id` for sent outputs, the account from which the value was sent.
 //! - `to_account_id` in the case that the output was received by an account in the wallet, the
 //!   identifier for the account receiving the funds.
