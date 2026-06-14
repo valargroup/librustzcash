@@ -2145,7 +2145,7 @@ mod tests {
         );
         let recipient = fvk.address_at(0u32, orchard::keys::Scope::Internal);
         let mut builder = Builder::new(
-            TEST_NETWORK,
+            Nu7Network,
             tx_height,
             BuildConfig::Standard {
                 sapling_anchor: None,
@@ -2153,6 +2153,9 @@ mod tests {
                 ironwood_anchor: None,
             },
         );
+        builder
+            .propose_version::<Infallible>(TxVersion::V6)
+            .unwrap();
 
         assert_matches!(
             builder.add_orchard_output::<Infallible>(
