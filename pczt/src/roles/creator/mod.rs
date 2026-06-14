@@ -215,6 +215,15 @@ impl Creator {
         if !parts.version.valid_in_branch(parts.consensus_branch_id) {
             return None;
         }
+        #[cfg(zcash_unstable = "nu7")]
+        if !parts.version.has_ironwood()
+            && parts
+                .ironwood
+                .as_ref()
+                .is_some_and(|bundle| !bundle.actions().is_empty())
+        {
+            return None;
+        }
 
         // Spends and outputs not modifiable.
         let mut tx_modifiable = 0b0000_0000;
@@ -256,19 +265,26 @@ impl Creator {
         orchard.validate_orchard_note_plaintext_versions().ok()?;
 
         #[cfg(zcash_unstable = "nu7")]
-        let mut ironwood = parts
-            .ironwood
-            .map(|bundle| {
-                crate::orchard::Bundle::serialize_from(bundle, orchard::bundle::BundleFormat::Nu6_3)
-            })
-            .unwrap_or_else(crate::empty_ironwood_bundle);
-        #[cfg(zcash_unstable = "nu7")]
-        if !parts.version.has_ironwood() {
-            if !ironwood.actions.is_empty() {
+        let ironwood = if parts.version.has_ironwood() {
+            parts
+                .ironwood
+                .map(|bundle| {
+                    crate::orchard::Bundle::serialize_from(
+                        bundle,
+                        orchard::bundle::BundleFormat::Nu6_3,
+                    )
+                })
+                .unwrap_or_else(crate::empty_ironwood_bundle)
+        } else {
+            if parts
+                .ironwood
+                .as_ref()
+                .is_some_and(|bundle| !bundle.actions().is_empty())
+            {
                 return None;
             }
-            ironwood = crate::empty_ironwood_bundle();
-        }
+            crate::empty_ironwood_bundle()
+        };
         #[cfg(zcash_unstable = "nu7")]
         ironwood.validate_ironwood_note_plaintext_versions().ok()?;
 
