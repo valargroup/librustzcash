@@ -374,12 +374,12 @@ impl BuildConfig {
         match self {
             BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor.as_ref().map(|a| {
                 (
-                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::Orchard),
+                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::LegacyOrchard),
                     *a,
                 )
             }),
             BuildConfig::Coinbase { .. } => Some((
-                OrchardBuilderConfig::Coinbase(orchard::BundleProtocol::Orchard),
+                OrchardBuilderConfig::Coinbase(orchard::BundleProtocol::LegacyOrchard),
                 orchard::Anchor::empty_tree(),
             )),
         }
@@ -635,9 +635,24 @@ impl<P, U> Builder<'_, P, U> {
     /// added after this call.
     pub fn propose_version<FE>(&mut self, version: TxVersion) -> Result<(), Error<FE>> {
         self.check_version_compatibility(version)?;
+        #[cfg(zcash_unstable = "nu7")]
+        self.configure_orchard_builder_for_version(version);
         self.tx_version = version;
         self.tx_version_proposed = true;
         Ok(())
+    }
+
+    #[cfg(zcash_unstable = "nu7")]
+    fn configure_orchard_builder_for_version(&mut self, version: TxVersion) {
+        let protocol = if matches!(version, TxVersion::V6) {
+            orchard::BundleProtocol::Orchard
+        } else {
+            orchard::BundleProtocol::LegacyOrchard
+        };
+
+        if let Some(builder) = &mut self.orchard_builder {
+            builder.set_protocol(protocol);
+        }
     }
 }
 
@@ -1050,27 +1065,25 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .as_ref()
             .map_or(0, |builder| builder.inputs().len());
 
-        let orchard_actions = self
-            .orchard_builder
-            .as_ref()
-            .zip(self.build_config.orchard_builder_config())
-            .map_or(Ok(0), |(builder, (builder_config, _))| {
-                builder_config
-                    .action_count(builder.spends().len(), builder.outputs().len())
-                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-            })?;
+        let orchard_actions = self.orchard_builder.as_ref().map_or(Ok(0), |builder| {
+            let builder_config = if self.build_config.is_coinbase() {
+                OrchardBuilderConfig::Coinbase(builder.protocol())
+            } else {
+                OrchardBuilderConfig::Transactional(builder.protocol())
+            };
+
+            builder_config
+                .action_count(builder.spends().len(), builder.outputs().len())
+                .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
+        })?;
 
         #[cfg(zcash_unstable = "nu7")]
         let orchard_actions = orchard_actions
-            + self
-                .ironwood_builder
-                .as_ref()
-                .zip(self.build_config.ironwood_builder_config())
-                .map_or(Ok(0), |(builder, (builder_config, _))| {
-                    builder_config
-                        .action_count(builder.spends().len(), builder.outputs().len())
-                        .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-                })?;
+            + self.ironwood_builder.as_ref().map_or(Ok(0), |builder| {
+                OrchardBuilderConfig::Transactional(builder.protocol())
+                    .action_count(builder.spends().len(), builder.outputs().len())
+                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
+            })?;
 
         fee_rule
             .fee_required(
@@ -1111,27 +1124,25 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .as_ref()
             .map_or(0, |builder| builder.inputs().len());
 
-        let orchard_actions = self
-            .orchard_builder
-            .as_ref()
-            .zip(self.build_config.orchard_builder_config())
-            .map_or(Ok(0), |(builder, (builder_config, _))| {
-                builder_config
-                    .action_count(builder.spends().len(), builder.outputs().len())
-                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-            })?;
+        let orchard_actions = self.orchard_builder.as_ref().map_or(Ok(0), |builder| {
+            let builder_config = if self.build_config.is_coinbase() {
+                OrchardBuilderConfig::Coinbase(builder.protocol())
+            } else {
+                OrchardBuilderConfig::Transactional(builder.protocol())
+            };
+
+            builder_config
+                .action_count(builder.spends().len(), builder.outputs().len())
+                .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
+        })?;
 
         #[cfg(zcash_unstable = "nu7")]
         let orchard_actions = orchard_actions
-            + self
-                .ironwood_builder
-                .as_ref()
-                .zip(self.build_config.ironwood_builder_config())
-                .map_or(Ok(0), |(builder, (builder_config, _))| {
-                    builder_config
-                        .action_count(builder.spends().len(), builder.outputs().len())
-                        .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-                })?;
+            + self.ironwood_builder.as_ref().map_or(Ok(0), |builder| {
+                OrchardBuilderConfig::Transactional(builder.protocol())
+                    .action_count(builder.spends().len(), builder.outputs().len())
+                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
+            })?;
 
         fee_rule
             .fee_required_zfuture(
@@ -1181,9 +1192,10 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
     /// [Ironwood metadata]: ::orchard::builder::BundleMetadata
     /// [final transaction]: Transaction
     #[allow(clippy::too_many_arguments)]
+    #[allow(unused_mut)]
     #[cfg(feature = "circuits")]
     pub fn build<R: RngCore + CryptoRng, SP: SpendProver, OP: OutputProver, FR: FeeRule>(
-        self,
+        mut self,
         transparent_signing_set: &TransparentSigningSet,
         sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
         orchard_saks: &[orchard::keys::SpendAuthorizingKey],
@@ -1192,6 +1204,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         output_prover: &OP,
         fee_rule: &FR,
     ) -> Result<BuildResult, Error<FR::Error>> {
+        #[cfg(zcash_unstable = "nu7")]
+        self.configure_orchard_builder_for_version(self.tx_version);
+
         match &self.build_config {
             BuildConfig::Coinbase { miner_data } => {
                 let target_height = self.target_height;
@@ -1252,6 +1267,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
     /// [Sapling metadata]: ::sapling::builder::SaplingMetadata
     /// [Orchard metadata]: ::orchard::builder::BundleMetadata
     /// [final transaction]: Transaction
+    #[allow(unused_mut)]
     #[cfg(zcash_unstable = "zfuture")]
     pub fn build_zfuture<
         R: RngCore + CryptoRng,
@@ -1259,7 +1275,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         OP: OutputProver,
         FR: FutureFeeRule,
     >(
-        self,
+        mut self,
         transparent_signing_set: &TransparentSigningSet,
         sapling_extsks: &[sapling::zip32::ExtendedSpendingKey],
         orchard_saks: &[orchard::keys::SpendAuthorizingKey],
@@ -1268,6 +1284,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         output_prover: &OP,
         fee_rule: &FR,
     ) -> Result<BuildResult, Error<FR::Error>> {
+        #[cfg(zcash_unstable = "nu7")]
+        self.configure_orchard_builder_for_version(self.tx_version);
+
         match &self.build_config {
             BuildConfig::Coinbase { miner_data } => {
                 let target_height = self.target_height;
@@ -1521,10 +1540,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         let orchard_bundle = unauthed_tx
             .orchard_bundle
             .map(|b| {
+                let circuit_version = b.circuit_version();
                 b.create_proof(
-                    &orchard::circuit::ProvingKey::build(
-                        orchard::circuit::OrchardCircuitVersion::Ironwood,
-                    ),
+                    &orchard::circuit::ProvingKey::build(circuit_version),
                     &mut rng,
                 )
                 .and_then(|b| {
@@ -1538,10 +1556,9 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         let ironwood_bundle = unauthed_tx
             .ironwood_bundle
             .map(|b| {
+                let circuit_version = b.circuit_version();
                 b.create_proof(
-                    &orchard::circuit::ProvingKey::build(
-                        orchard::circuit::OrchardCircuitVersion::Ironwood,
-                    ),
+                    &orchard::circuit::ProvingKey::build(circuit_version),
                     &mut rng,
                 )
                 .and_then(|b| {
@@ -1587,8 +1604,9 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
     /// [`SaplingMetadata`] and [`orchard::builder::BundleMetadata`] generated during the
     /// build process. If `zcash_unstable = "nu7"` is enabled, the result also contains
     /// Ironwood metadata generated during the build process.
+    #[allow(unused_mut)]
     pub fn build_for_pczt<R: RngCore + CryptoRng, FR: FeeRule>(
-        self,
+        mut self,
         mut rng: R,
         fee_rule: &FR,
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
@@ -1611,6 +1629,8 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         self.check_coinbase_expiry_height::<FR::Error>()?;
         #[cfg(zcash_unstable = "nu7")]
         debug_assert!(!self.ironwood_in_use() || pczt_tx_version.has_ironwood());
+        #[cfg(zcash_unstable = "nu7")]
+        self.configure_orchard_builder_for_version(pczt_tx_version);
 
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
 

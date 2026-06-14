@@ -135,7 +135,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     orchard_outputs: usize,
     ironwood_outputs: usize,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
-    let orchard_actions = orchard::BundleProtocol::Orchard
+    let orchard_actions = orchard::BundleProtocol::LegacyOrchard
         .transactional_action_count(orchard_inputs, orchard_outputs)
         .map_err(|e| ChangeError::BundleError(orchard_action_count_error(e)))?;
 

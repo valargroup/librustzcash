@@ -68,7 +68,7 @@ redjubjub = { version = "0.8", default-features = false }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false }
 
 # - Orchard
-orchard = { git = "https://github.com/valargroup/qr_orchard", rev = "3d83aa6dc36c5e7af9c385ab0af579609d327254", default-features = false }
+orchard = { git = "https://github.com/valargroup/qr_orchard", rev = "6e73dc1d8b21bbcaefea82ae67d2028366fe3b89", default-features = false }
 pasta_curves = "0.5"
 
 # - Transparent
