@@ -3489,7 +3489,8 @@ mod tests {
 
         let note =
             orchard_note_from_pczt_parts(recipient, value, rho, rseed, NoteVersion::V3).unwrap();
-        let default_note = orchard::Note::from_parts(recipient, value, rho, rseed).unwrap();
+        let default_note =
+            orchard::Note::from_parts(recipient, value, rho, rseed, NoteVersion::V2).unwrap();
 
         assert_eq!(note.version(), NoteVersion::V3);
         assert_eq!(default_note.version(), NoteVersion::V2);
