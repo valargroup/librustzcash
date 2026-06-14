@@ -22,13 +22,14 @@ impl Signer {
         let mut pczt = self.pczt;
 
         let mut tx_modifiable = pczt.global.tx_modifiable;
+        let bundle_format = crate::orchard_bundle_format(&pczt.global);
 
-        let mut bundle = pczt.orchard.clone().into_parsed_orchard()?;
+        let mut bundle = pczt.orchard.clone().into_parsed_orchard(bundle_format)?;
 
         f(&pczt, &mut bundle, &mut tx_modifiable)?;
 
         pczt.global.tx_modifiable = tx_modifiable;
-        pczt.orchard = crate::orchard::Bundle::serialize_from(bundle);
+        pczt.orchard = crate::orchard::Bundle::serialize_from(bundle, bundle_format);
 
         Ok(Self { pczt })
     }
@@ -55,7 +56,8 @@ impl Signer {
         f(&pczt, &mut bundle, &mut tx_modifiable)?;
 
         pczt.global.tx_modifiable = tx_modifiable;
-        pczt.ironwood = crate::orchard::Bundle::serialize_from(bundle);
+        pczt.ironwood =
+            crate::orchard::Bundle::serialize_from(bundle, orchard::bundle::BundleFormat::Nu6_3);
 
         Ok(Self { pczt })
     }

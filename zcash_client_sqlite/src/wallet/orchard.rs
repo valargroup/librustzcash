@@ -1341,6 +1341,18 @@ pub(crate) mod tests {
         testing::pool::pczt_single_step_orchard_to_ironwood()
     }
 
+    #[cfg(all(feature = "pczt-tests", feature = "unstable", zcash_unstable = "nu7"))]
+    #[test]
+    fn pczt_legacy_v5_orchard_partial_unshield_after_nu7() {
+        testing::pool::pczt_legacy_v5_orchard_partial_unshield_after_nu7()
+    }
+
+    #[cfg(all(feature = "pczt-tests", feature = "unstable", zcash_unstable = "nu7"))]
+    #[test]
+    fn pczt_legacy_v5_orchard_full_unshield_after_nu7() {
+        testing::pool::pczt_legacy_v5_orchard_full_unshield_after_nu7()
+    }
+
     #[cfg(feature = "transparent-inputs")]
     #[test]
     fn wallet_recovery_compute_fees() {

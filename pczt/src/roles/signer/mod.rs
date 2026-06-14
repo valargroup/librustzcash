@@ -407,9 +407,14 @@ impl Signer {
 
     /// Finishes the Signer role, returning the updated PCZT.
     pub fn finish(self) -> Pczt {
+        let orchard_bundle_format = crate::orchard_bundle_format(&self.global);
+
         #[cfg(zcash_unstable = "nu7")]
         let ironwood = if self.tx_data.version().has_ironwood() {
-            crate::orchard::Bundle::serialize_from(self.ironwood)
+            crate::orchard::Bundle::serialize_from(
+                self.ironwood,
+                orchard::bundle::BundleFormat::Nu6_3,
+            )
         } else {
             crate::empty_ironwood_bundle()
         };
@@ -418,7 +423,7 @@ impl Signer {
             global: self.global,
             transparent: crate::transparent::Bundle::serialize_from(self.transparent),
             sapling: crate::sapling::Bundle::serialize_from(self.sapling),
-            orchard: crate::orchard::Bundle::serialize_from(self.orchard),
+            orchard: crate::orchard::Bundle::serialize_from(self.orchard, orchard_bundle_format),
             #[cfg(zcash_unstable = "nu7")]
             ironwood,
         }

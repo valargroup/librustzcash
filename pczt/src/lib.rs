@@ -69,6 +69,25 @@ const MAGIC_BYTES: &[u8] = b"PCZT";
 const PCZT_VERSION_1: u32 = 1;
 const PCZT_VERSION_2: u32 = 2;
 
+#[cfg(feature = "orchard")]
+pub(crate) fn orchard_bundle_format(_global: &common::Global) -> ::orchard::bundle::BundleFormat {
+    #[cfg(zcash_unstable = "nu7")]
+    {
+        if _global.tx_version == zcash_protocol::constants::V6_TX_VERSION
+            && _global.version_group_id == zcash_protocol::constants::V6_VERSION_GROUP_ID
+        {
+            ::orchard::bundle::BundleFormat::Nu6_3
+        } else {
+            ::orchard::bundle::BundleFormat::PreNu6_3
+        }
+    }
+
+    #[cfg(not(zcash_unstable = "nu7"))]
+    {
+        ::orchard::bundle::BundleFormat::PreNu6_3
+    }
+}
+
 fn postcard_from_exact<'de, T>(bytes: &'de [u8]) -> Result<T, postcard::Error>
 where
     T: Deserialize<'de>,
@@ -108,6 +127,61 @@ pub struct Pczt {
     #[serde(default = "empty_ironwood_bundle")]
     #[getset(get = "pub")]
     ironwood: orchard::Bundle,
+}
+
+/// Errors that can occur while serializing a PCZT using the legacy v1 encoding.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum LegacyV1SerializeError {
+    /// The legacy v1 encoding is only supported for transaction version 5.
+    UnsupportedTxVersion {
+        /// The transaction version in the PCZT.
+        tx_version: u32,
+        /// The transaction version group ID in the PCZT.
+        version_group_id: u32,
+    },
+    /// The Orchard bundle flags cannot be represented by the legacy v1 encoding.
+    OrchardFlags {
+        /// The Orchard bundle flags in the PCZT.
+        flags: u8,
+    },
+    /// The PCZT contains Orchard-shaped notes that cannot be represented as Orchard v2 notes.
+    NotePlaintextVersion(orchard::NotePlaintextVersionError),
+    /// The PCZT contains Ironwood bundle data, which the v1 encoding cannot represent.
+    #[cfg(zcash_unstable = "nu7")]
+    IronwoodBundlePresent,
+}
+
+impl core::fmt::Display for LegacyV1SerializeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            LegacyV1SerializeError::UnsupportedTxVersion {
+                tx_version,
+                version_group_id,
+            } => write!(
+                f,
+                "legacy PCZT v1 serialization only supports transaction v5, got version {tx_version} with version group ID {version_group_id:#x}"
+            ),
+            LegacyV1SerializeError::OrchardFlags { flags } => write!(
+                f,
+                "legacy PCZT v1 serialization cannot represent Orchard bundle flags {flags:#x}"
+            ),
+            LegacyV1SerializeError::NotePlaintextVersion(e) => write!(f, "{e:?}"),
+            #[cfg(zcash_unstable = "nu7")]
+            LegacyV1SerializeError::IronwoodBundlePresent => {
+                write!(
+                    f,
+                    "legacy PCZT v1 serialization cannot represent Ironwood bundle data"
+                )
+            }
+        }
+    }
+}
+
+impl From<orchard::NotePlaintextVersionError> for LegacyV1SerializeError {
+    fn from(e: orchard::NotePlaintextVersionError) -> Self {
+        LegacyV1SerializeError::NotePlaintextVersion(e)
+    }
 }
 
 #[cfg(zcash_unstable = "nu7")]
@@ -408,6 +482,96 @@ impl Pczt {
         postcard::to_extend(self, bytes).expect("can serialize into memory")
     }
 
+    /// Serializes this PCZT using the original version 1 encoding.
+    ///
+    /// The v1 encoding cannot represent transaction version 6, Ironwood bundle
+    /// data, or Orchard-shaped note plaintext versions other than v2. Use
+    /// [`Pczt::serialize`] for normal output.
+    pub fn serialize_legacy_v1(&self) -> Result<Vec<u8>, LegacyV1SerializeError> {
+        if self.global.tx_version != zcash_protocol::constants::V5_TX_VERSION
+            || self.global.version_group_id != zcash_protocol::constants::V5_VERSION_GROUP_ID
+        {
+            return Err(LegacyV1SerializeError::UnsupportedTxVersion {
+                tx_version: self.global.tx_version,
+                version_group_id: self.global.version_group_id,
+            });
+        }
+
+        self.orchard.validate_orchard_note_plaintext_versions()?;
+        if self.orchard.flags & !0b0000_0011 != 0 {
+            return Err(LegacyV1SerializeError::OrchardFlags {
+                flags: self.orchard.flags,
+            });
+        }
+
+        #[cfg(zcash_unstable = "nu7")]
+        if !self.ironwood.actions.is_empty()
+            || self.ironwood.flags != IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED
+            || self.ironwood.value_sum != (0, true)
+            || self.ironwood.anchor != EMPTY_IRONWOOD_ANCHOR
+            || self.ironwood.zkproof.is_some()
+            || self.ironwood.bsk.is_some()
+        {
+            return Err(LegacyV1SerializeError::IronwoodBundlePresent);
+        }
+
+        let legacy = v1::Pczt {
+            global: self.global.clone(),
+            transparent: self.transparent.clone(),
+            sapling: self.sapling.clone(),
+            orchard: v1::Bundle {
+                actions: self
+                    .orchard
+                    .actions
+                    .iter()
+                    .cloned()
+                    .map(|action| v1::Action {
+                        cv_net: action.cv_net,
+                        spend: v1::Spend {
+                            nullifier: action.spend.nullifier,
+                            rk: action.spend.rk,
+                            spend_auth_sig: action.spend.spend_auth_sig,
+                            recipient: action.spend.recipient,
+                            value: action.spend.value,
+                            rho: action.spend.rho,
+                            rseed: action.spend.rseed,
+                            fvk: action.spend.fvk,
+                            witness: action.spend.witness,
+                            alpha: action.spend.alpha,
+                            zip32_derivation: action.spend.zip32_derivation,
+                            dummy_sk: action.spend.dummy_sk,
+                            proprietary: action.spend.proprietary,
+                        },
+                        output: v1::Output {
+                            cmx: action.output.cmx,
+                            ephemeral_key: action.output.ephemeral_key,
+                            enc_ciphertext: action.output.enc_ciphertext,
+                            out_ciphertext: action.output.out_ciphertext,
+                            recipient: action.output.recipient,
+                            value: action.output.value,
+                            rseed: action.output.rseed,
+                            ock: action.output.ock,
+                            zip32_derivation: action.output.zip32_derivation,
+                            user_address: action.output.user_address,
+                            proprietary: action.output.proprietary,
+                        },
+                        rcv: action.rcv,
+                    })
+                    .collect(),
+                flags: self.orchard.flags,
+                value_sum: self.orchard.value_sum,
+                anchor: self.orchard.anchor,
+                zkproof: self.orchard.zkproof.clone(),
+                bsk: self.orchard.bsk,
+            },
+        };
+
+        let mut bytes = vec![];
+        bytes.extend_from_slice(MAGIC_BYTES);
+        bytes.extend_from_slice(&PCZT_VERSION_1.to_le_bytes());
+        Ok(postcard::to_extend(&legacy, bytes).expect("can serialize into memory"))
+    }
+
     /// Parses this PCZT's bundles and constructs a `TransactionData` using caller-provided
     /// bundle extraction closures.
     ///
@@ -490,12 +654,15 @@ impl Pczt {
                 .map_err(ExtractError::IronwoodParse)?
         };
 
+        #[cfg(feature = "orchard")]
+        let orchard_bundle_format = crate::orchard_bundle_format(&global);
+
         let transparent = transparent
             .into_parsed()
             .map_err(ExtractError::TransparentParse)?;
         let sapling = sapling.into_parsed().map_err(ExtractError::SaplingParse)?;
         let orchard = orchard
-            .into_parsed_orchard()
+            .into_parsed_orchard(orchard_bundle_format)
             .map_err(ExtractError::OrchardParse)?;
 
         let lock_time = determine_lock_time(&global, transparent.inputs())
@@ -896,6 +1063,107 @@ mod tests {
         encoded.extend_from_slice(MAGIC_BYTES);
         encoded.extend_from_slice(&PCZT_VERSION_1.to_le_bytes());
         postcard::to_extend(&legacy, encoded).unwrap()
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn v5_orchard_bundle_uses_pre_nu6_3_flags() {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.orchard.actions.clear();
+        pczt.orchard.flags = 0b0000_0011;
+        pczt.orchard.value_sum = (0, true);
+        pczt.orchard.anchor = ::orchard::Anchor::empty_tree().to_bytes();
+
+        let bundle_format = orchard_bundle_format(&pczt.global);
+        assert_eq!(bundle_format, ::orchard::bundle::BundleFormat::PreNu6_3);
+
+        let parsed = pczt
+            .orchard
+            .clone()
+            .into_parsed_orchard(bundle_format)
+            .unwrap();
+        assert_eq!(parsed.flags().to_byte(bundle_format), Some(0b0000_0011));
+
+        let serialized = orchard::Bundle::serialize_from(parsed, bundle_format);
+        assert_eq!(serialized.flags, 0b0000_0011);
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn serialize_legacy_v1_round_trips_to_current_pczt() {
+        let pczt = pczt_with_one_orchard_action();
+        let encoded = pczt.serialize_legacy_v1().unwrap();
+
+        assert_eq!(&encoded[..4], MAGIC_BYTES);
+        assert_eq!(
+            u32::from_le_bytes(encoded[4..8].try_into().unwrap()),
+            PCZT_VERSION_1
+        );
+
+        let reparsed = Pczt::parse(&encoded).unwrap();
+        assert_eq!(reparsed.orchard.actions.len(), 1);
+        assert_eq!(
+            reparsed.orchard.actions[0].spend.note_version,
+            orchard::NotePlaintextVersion::V2
+        );
+        assert_eq!(
+            reparsed.orchard.actions[0].output.note_version,
+            orchard::NotePlaintextVersion::V2
+        );
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn serialize_legacy_v1_preserves_orchard_flags_for_old_v5_verifiers() {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.orchard.flags = 0b0000_0011;
+
+        let encoded = pczt.serialize_legacy_v1().unwrap();
+        let reparsed = Pczt::parse(&encoded).unwrap();
+
+        assert_eq!(reparsed.orchard.flags, 0b0000_0011);
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn serialize_legacy_v1_rejects_non_legacy_orchard_flags() {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.orchard.flags = 0b0000_0111;
+
+        assert!(matches!(
+            pczt.serialize_legacy_v1(),
+            Err(LegacyV1SerializeError::OrchardFlags { flags: 0b0000_0111 })
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn serialize_legacy_v1_rejects_v3_orchard_note_plaintext_version() {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.orchard.actions[0].spend.note_version = orchard::NotePlaintextVersion::V3;
+
+        assert!(matches!(
+            pczt.serialize_legacy_v1(),
+            Err(LegacyV1SerializeError::NotePlaintextVersion(
+                orchard::NotePlaintextVersionError::OrchardSpend {
+                    action_index: 0,
+                    version: orchard::NotePlaintextVersion::V3
+                }
+            ))
+        ));
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn serialize_legacy_v1_rejects_ironwood_bundle_data() {
+        let mut pczt = pczt_with_one_orchard_action();
+        pczt.ironwood = pczt.orchard.clone();
+        set_orchard_style_note_version(&mut pczt.ironwood, orchard::NotePlaintextVersion::V3);
+
+        assert!(matches!(
+            pczt.serialize_legacy_v1(),
+            Err(LegacyV1SerializeError::IronwoodBundlePresent)
+        ));
     }
 
     #[cfg(feature = "orchard")]

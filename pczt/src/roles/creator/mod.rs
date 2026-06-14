@@ -34,6 +34,8 @@ pub struct Creator {
     expiry_height: u32,
     coin_type: u32,
     orchard_flags: u8,
+    #[cfg(feature = "orchard")]
+    orchard_flags_override: Option<orchard::bundle::Flags>,
     #[cfg(zcash_unstable = "nu7")]
     ironwood_flags: u8,
     sapling_anchor: [u8; 32],
@@ -59,6 +61,8 @@ impl Creator {
             expiry_height,
             coin_type,
             orchard_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            #[cfg(feature = "orchard")]
+            orchard_flags_override: None,
             #[cfg(zcash_unstable = "nu7")]
             ironwood_flags: crate::IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
             sapling_anchor,
@@ -75,9 +79,7 @@ impl Creator {
 
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
-        self.orchard_flags = orchard_flags
-            .to_byte(orchard::bundle::BundleFormat::PreNu6_3)
-            .expect("Orchard flags must be encodable in the pre-NU6.3 format");
+        self.orchard_flags_override = Some(orchard_flags);
         self
     }
 
@@ -106,6 +108,34 @@ impl Creator {
     }
 
     pub fn build(self) -> Pczt {
+        #[cfg(feature = "orchard")]
+        let orchard_bundle_format = {
+            #[cfg(zcash_unstable = "nu7")]
+            {
+                if self.tx_version == V6_TX_VERSION {
+                    orchard::bundle::BundleFormat::Nu6_3
+                } else {
+                    orchard::bundle::BundleFormat::PreNu6_3
+                }
+            }
+
+            #[cfg(not(zcash_unstable = "nu7"))]
+            {
+                orchard::bundle::BundleFormat::PreNu6_3
+            }
+        };
+        #[cfg(feature = "orchard")]
+        let orchard_flags = self
+            .orchard_flags_override
+            .map(|flags| {
+                flags
+                    .to_byte(orchard_bundle_format)
+                    .expect("Orchard flags must be encodable for the selected transaction format")
+            })
+            .unwrap_or(self.orchard_flags);
+        #[cfg(not(feature = "orchard"))]
+        let orchard_flags = self.orchard_flags;
+
         #[cfg(zcash_unstable = "nu7")]
         let ironwood = if self.tx_version == V6_TX_VERSION {
             crate::orchard::Bundle {
@@ -144,7 +174,7 @@ impl Creator {
             },
             orchard: crate::orchard::Bundle {
                 actions: vec![],
-                flags: self.orchard_flags,
+                flags: orchard_flags,
                 value_sum: (0, true),
                 anchor: self.orchard_anchor,
                 zkproof: None,
@@ -197,9 +227,24 @@ impl Creator {
             tx_modifiable |= FLAG_HAS_SIGHASH_SINGLE;
         }
 
+        let orchard_bundle_format = {
+            #[cfg(zcash_unstable = "nu7")]
+            {
+                if parts.version == zcash_primitives::transaction::TxVersion::V6 {
+                    orchard::bundle::BundleFormat::Nu6_3
+                } else {
+                    orchard::bundle::BundleFormat::PreNu6_3
+                }
+            }
+
+            #[cfg(not(zcash_unstable = "nu7"))]
+            {
+                orchard::bundle::BundleFormat::PreNu6_3
+            }
+        };
         let orchard = parts
             .orchard
-            .map(crate::orchard::Bundle::serialize_from)
+            .map(|bundle| crate::orchard::Bundle::serialize_from(bundle, orchard_bundle_format))
             .unwrap_or_else(|| crate::orchard::Bundle {
                 actions: vec![],
                 flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
@@ -213,7 +258,9 @@ impl Creator {
         #[cfg(zcash_unstable = "nu7")]
         let mut ironwood = parts
             .ironwood
-            .map(crate::orchard::Bundle::serialize_from)
+            .map(|bundle| {
+                crate::orchard::Bundle::serialize_from(bundle, orchard::bundle::BundleFormat::Nu6_3)
+            })
             .unwrap_or_else(crate::empty_ironwood_bundle);
         #[cfg(zcash_unstable = "nu7")]
         if !parts.version.has_ironwood() {
@@ -277,6 +324,26 @@ mod tests {
         assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
         assert_eq!(pczt.global.version_group_id, V6_VERSION_GROUP_ID);
         assert_eq!(pczt.ironwood.anchor, [1; 32]);
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    #[test]
+    fn explicit_orchard_flags_use_v6_format_when_v6_is_selected() {
+        let pczt = Creator::new(BranchId::Nu7.into(), 10_000_000, 133, [0; 32], [0; 32])
+            .with_orchard_flags(orchard::bundle::Flags::ENABLED)
+            .with_ironwood_anchor([1; 32])
+            .build();
+
+        assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
+        assert_eq!(pczt.orchard.flags, 0b0000_0111);
+
+        let pczt = Creator::new(BranchId::Nu7.into(), 10_000_000, 133, [0; 32], [0; 32])
+            .with_orchard_flags(orchard::bundle::Flags::CROSS_ADDRESS_DISABLED)
+            .with_ironwood_anchor([1; 32])
+            .build();
+
+        assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
+        assert_eq!(pczt.orchard.flags, 0b0000_0011);
     }
 
     #[cfg(zcash_unstable = "nu7")]

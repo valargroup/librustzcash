@@ -67,6 +67,8 @@ pub struct SingleOutputChangeStrategy<R, I> {
     change_memo: Option<MemoBytes>,
     fallback_change_pool: ShieldedProtocol,
     dust_output_policy: DustOutputPolicy,
+    #[cfg(zcash_unstable = "nu7")]
+    force_legacy_orchard_change: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -87,8 +89,21 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
             change_memo,
             fallback_change_pool,
             dust_output_policy,
+            #[cfg(zcash_unstable = "nu7")]
+            force_legacy_orchard_change: false,
             meta_source: PhantomData,
         }
+    }
+
+    /// Requests legacy Orchard change instead of Ironwood change after NU7.
+    ///
+    /// This is intended for callers that explicitly build a transaction version
+    /// 5 PCZT for compatibility with signers that cannot parse v6 or Ironwood
+    /// bundle data.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn with_legacy_orchard_change(mut self) -> Self {
+        self.force_legacy_orchard_change = true;
+        self
     }
 }
 
@@ -138,6 +153,8 @@ where
             self.fallback_change_pool,
             self.fee_rule.marginal_fee(),
             self.fee_rule.grace_actions(),
+            #[cfg(zcash_unstable = "nu7")]
+            self.force_legacy_orchard_change,
         );
 
         single_pool_output_balance(
@@ -163,6 +180,8 @@ pub struct MultiOutputChangeStrategy<R, I> {
     fallback_change_pool: ShieldedProtocol,
     dust_output_policy: DustOutputPolicy,
     split_policy: SplitPolicy,
+    #[cfg(zcash_unstable = "nu7")]
+    force_legacy_orchard_change: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -191,8 +210,21 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
             fallback_change_pool,
             dust_output_policy,
             split_policy,
+            #[cfg(zcash_unstable = "nu7")]
+            force_legacy_orchard_change: false,
             meta_source: PhantomData,
         }
+    }
+
+    /// Requests legacy Orchard change instead of Ironwood change after NU7.
+    ///
+    /// This is intended for callers that explicitly build a transaction version
+    /// 5 PCZT for compatibility with signers that cannot parse v6 or Ironwood
+    /// bundle data.
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn with_legacy_orchard_change(mut self) -> Self {
+        self.force_legacy_orchard_change = true;
+        self
     }
 }
 
@@ -247,6 +279,8 @@ where
             self.fallback_change_pool,
             self.fee_rule.marginal_fee(),
             self.fee_rule.grace_actions(),
+            #[cfg(zcash_unstable = "nu7")]
+            self.force_legacy_orchard_change,
         );
 
         single_pool_output_balance(
@@ -1023,6 +1057,66 @@ mod tests {
             Ok(balance) if
                 balance.proposed_change() == [ChangeValue::orchard(Zatoshis::const_from_u64(10000), None)] &&
                 balance.fee_required() == Zatoshis::const_from_u64(20000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    fn legacy_orchard_change_disallows_ironwood_dust_after_nu7() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu7_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu7: Some(nu7_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        )
+        .with_legacy_orchard_change();
+
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu7_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[] as &[TxOut],
+            &sapling_fees::EmptyBundleView,
+            &(
+                orchard::BundleProtocol::LegacyOrchard,
+                &[
+                    TestOrchardInput {
+                        note_id: 0,
+                        value: Zatoshis::const_from_u64(1000),
+                        is_ironwood: true,
+                    },
+                    TestOrchardInput {
+                        note_id: 1,
+                        value: Zatoshis::const_from_u64(59000),
+                        is_ironwood: false,
+                    },
+                ][..],
+                &[OrchardPayment::new(Zatoshis::const_from_u64(30000))][..],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Err(ChangeError::DustInputs { orchard, .. }) if orchard == vec![0]
         );
     }
 }

@@ -860,6 +860,12 @@ where
         fallback_change_pool,
         DustOutputPolicy::default(),
     );
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
+    let change_strategy = if matches!(proposed_version, Some(TxVersion::V5)) {
+        change_strategy.with_legacy_orchard_change()
+    } else {
+        change_strategy
+    };
 
     propose_transfer(
         wallet_db,
@@ -1618,6 +1624,17 @@ where
 {
     #[cfg(feature = "transparent-inputs")]
     let step_index = prior_step_results.len();
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let legacy_v5_orchard = {
+        #[cfg(feature = "unstable")]
+        {
+            matches!(proposed_version, Some(TxVersion::V5))
+        }
+        #[cfg(not(feature = "unstable"))]
+        {
+            false
+        }
+    };
 
     // We only support spending transparent payments or transparent ephemeral outputs from a
     // prior step (when "transparent-inputs" is enabled).
@@ -1766,9 +1783,23 @@ where
     let orchard_anchor = None;
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-    let (ironwood_anchor, ironwood_inputs) = if proposal_step
-        .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
-    {
+    let (ironwood_anchor, ironwood_inputs) = if legacy_v5_orchard {
+        if let Some(inputs) = proposal_step.shielded_inputs() {
+            if inputs.notes().iter().any(|selected| {
+                matches!(
+                    selected.note(),
+                    Note::Orchard(note) if note.version() == orchard::note::NoteVersion::V3
+                )
+            }) {
+                return Err(Error::ProposalNotSupported);
+            }
+        }
+
+        (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
+    } else if proposal_step.involves(PoolType::Shielded(ShieldedProtocol::Orchard)) {
         proposal_step.shielded_inputs().map_or_else(
             || {
                 Ok((
@@ -2180,7 +2211,8 @@ where
                     if params.is_nu_active(
                         consensus::NetworkUpgrade::Nu7,
                         BlockHeight::from(min_target_height),
-                    ) {
+                    ) && !legacy_v5_orchard
+                    {
                         add_ironwood_output(&mut builder, &mut ironwood_output_meta, to)?;
                     } else {
                         add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
@@ -2260,7 +2292,8 @@ where
                     if params.is_nu_active(
                         consensus::NetworkUpgrade::Nu7,
                         BlockHeight::from(min_target_height),
-                    ) {
+                    ) && !legacy_v5_orchard
+                    {
                         builder.add_ironwood_change_output(
                             orchard_fvk.clone(),
                             internal_ovk.map(|k| k.into()),
@@ -2650,6 +2683,76 @@ where
     FeeRuleT: FeeRule,
     DbT::AccountId: serde::Serialize,
 {
+    create_pczt_from_proposal_internal(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        #[cfg(feature = "unstable")]
+        None,
+    )
+}
+
+/// Constructs a PCZT with an explicitly requested transaction version.
+///
+/// This can be used to create a version 5 PCZT after NU7 for compatibility
+/// with signers that cannot parse version 6 or Ironwood bundle data.
+///
+/// The supplied proposal should have been created for the same requested
+/// transaction version. For standard transfers, pass the same `TxVersion` to
+/// [`propose_standard_transfer_to_address`] before calling this function.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(all(feature = "pczt", feature = "unstable"))]
+pub fn create_pczt_from_proposal_with_tx_version<
+    DbT,
+    ParamsT,
+    InputsErrT,
+    FeeRuleT,
+    ChangeErrT,
+    N,
+>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    proposed_version: TxVersion,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
+    create_pczt_from_proposal_internal(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        Some(proposed_version),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "pczt")]
+fn create_pczt_from_proposal_internal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
     use std::collections::HashSet;
 
     let account = wallet_db
@@ -2682,7 +2785,7 @@ where
         #[cfg(feature = "transparent-inputs")]
         unused_transparent_outputs,
         #[cfg(feature = "unstable")]
-        None,
+        proposed_version,
     )?;
 
     // Build the transaction with the specified fee rule

@@ -258,6 +258,8 @@ pub(crate) struct SinglePoolBalanceConfig<'a, P, F> {
     fallback_change_pool: ShieldedProtocol,
     marginal_fee: Zatoshis,
     grace_actions: usize,
+    #[cfg(zcash_unstable = "nu7")]
+    force_legacy_orchard_change: bool,
 }
 
 impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
@@ -271,6 +273,7 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
         fallback_change_pool: ShieldedProtocol,
         marginal_fee: Zatoshis,
         grace_actions: usize,
+        #[cfg(zcash_unstable = "nu7")] force_legacy_orchard_change: bool,
     ) -> Self {
         Self {
             params,
@@ -281,6 +284,8 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
             fallback_change_pool,
             marginal_fee,
             grace_actions,
+            #[cfg(zcash_unstable = "nu7")]
+            force_legacy_orchard_change,
         }
     }
 }
@@ -319,10 +324,11 @@ where
 
     let change_pool = select_change_pool(&net_flows, cfg.fallback_change_pool);
     #[cfg(zcash_unstable = "nu7")]
-    let orchard_outputs_are_ironwood = cfg.params.is_nu_active(
-        consensus::NetworkUpgrade::Nu7,
-        BlockHeight::from(target_height),
-    );
+    let orchard_outputs_are_ironwood = !cfg.force_legacy_orchard_change
+        && cfg.params.is_nu_active(
+            consensus::NetworkUpgrade::Nu7,
+            BlockHeight::from(target_height),
+        );
     let target_change_count = wallet_meta.map_or(1, |m| {
         usize::from(cfg.split_policy.target_output_count)
             // If we cannot determine a total note count, fall back to a single output

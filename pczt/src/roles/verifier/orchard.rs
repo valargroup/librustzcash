@@ -15,7 +15,10 @@ impl super::Verifier {
             ironwood,
         } = self.pczt;
 
-        let bundle = orchard.into_parsed_orchard().map_err(OrchardError::Parse)?;
+        let bundle_format = crate::orchard_bundle_format(&global);
+        let bundle = orchard
+            .into_parsed_orchard(bundle_format)
+            .map_err(OrchardError::Parse)?;
 
         f(&bundle)?;
 
@@ -24,7 +27,7 @@ impl super::Verifier {
                 global,
                 transparent,
                 sapling,
-                orchard: crate::orchard::Bundle::serialize_from(bundle),
+                orchard: crate::orchard::Bundle::serialize_from(bundle, bundle_format),
                 #[cfg(zcash_unstable = "nu7")]
                 ironwood,
             },
@@ -64,7 +67,10 @@ impl super::Verifier {
                 transparent,
                 sapling,
                 orchard,
-                ironwood: crate::orchard::Bundle::serialize_from(bundle),
+                ironwood: crate::orchard::Bundle::serialize_from(
+                    bundle,
+                    orchard::bundle::BundleFormat::Nu6_3,
+                ),
             },
         })
     }

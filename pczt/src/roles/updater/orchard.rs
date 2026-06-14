@@ -17,8 +17,9 @@ impl super::Updater {
             ironwood,
         } = self.pczt;
 
+        let bundle_format = crate::orchard_bundle_format(&global);
         let mut bundle = orchard
-            .into_parsed_orchard()
+            .into_parsed_orchard(bundle_format)
             .map_err(OrchardError::Parser)?;
 
         bundle.update_with(f).map_err(OrchardError::Updater)?;
@@ -28,7 +29,7 @@ impl super::Updater {
                 global,
                 transparent,
                 sapling,
-                orchard: crate::orchard::Bundle::serialize_from(bundle),
+                orchard: crate::orchard::Bundle::serialize_from(bundle, bundle_format),
                 #[cfg(zcash_unstable = "nu7")]
                 ironwood,
             },
@@ -68,7 +69,10 @@ impl super::Updater {
                 transparent,
                 sapling,
                 orchard,
-                ironwood: crate::orchard::Bundle::serialize_from(bundle),
+                ironwood: crate::orchard::Bundle::serialize_from(
+                    bundle,
+                    orchard::bundle::BundleFormat::Nu6_3,
+                ),
             },
         })
     }

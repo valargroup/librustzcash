@@ -631,9 +631,12 @@ impl Bundle {
 
 #[cfg(feature = "orchard")]
 impl Bundle {
-    pub(crate) fn into_parsed_orchard(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
+    pub(crate) fn into_parsed_orchard(
+        self,
+        bundle_format: orchard::bundle::BundleFormat,
+    ) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_orchard_note_plaintext_versions()?;
-        self.into_parsed(orchard::bundle::BundleFormat::Nu6_3)
+        self.into_parsed(bundle_format)
             .map_err(BundleParseError::Parse)
     }
 
@@ -718,7 +721,10 @@ impl Bundle {
         )
     }
 
-    pub(crate) fn serialize_from(bundle: orchard::pczt::Bundle) -> Self {
+    pub(crate) fn serialize_from(
+        bundle: orchard::pczt::Bundle,
+        bundle_format: orchard::bundle::BundleFormat,
+    ) -> Self {
         let actions = bundle
             .actions()
             .iter()
@@ -811,8 +817,8 @@ impl Bundle {
             actions,
             flags: bundle
                 .flags()
-                .to_byte(orchard::bundle::BundleFormat::Nu6_3)
-                .expect("PCZT Orchard-style flags must encode in the NU6.3 format"),
+                .to_byte(bundle_format)
+                .expect("PCZT Orchard-style flags must encode in the requested bundle format"),
             value_sum,
             anchor: bundle.anchor().to_bytes(),
             zkproof: bundle

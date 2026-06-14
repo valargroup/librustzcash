@@ -90,16 +90,17 @@ impl IoFinalizer {
             ironwood
                 .finalize_io(shielded_sighash, OsRng)
                 .map_err(Error::IronwoodFinalize)?;
-            crate::orchard::Bundle::serialize_from(ironwood)
+            crate::orchard::Bundle::serialize_from(ironwood, orchard::bundle::BundleFormat::Nu6_3)
         } else {
             crate::empty_ironwood_bundle()
         };
+        let orchard_bundle_format = crate::orchard_bundle_format(&global);
 
         Ok(Pczt {
             global,
             transparent: crate::transparent::Bundle::serialize_from(transparent),
             sapling: crate::sapling::Bundle::serialize_from(sapling),
-            orchard: crate::orchard::Bundle::serialize_from(orchard),
+            orchard: crate::orchard::Bundle::serialize_from(orchard, orchard_bundle_format),
             #[cfg(zcash_unstable = "nu7")]
             ironwood,
         })

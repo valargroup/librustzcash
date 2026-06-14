@@ -6123,6 +6123,207 @@ where
     );
 }
 
+#[cfg(all(
+    feature = "pczt",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu7"
+))]
+pub fn pczt_legacy_v5_orchard_partial_unshield_after_nu7<Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    pczt_legacy_v5_orchard_unshield_after_nu7(ds_factory, cache, false);
+}
+
+#[cfg(all(
+    feature = "pczt",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu7"
+))]
+pub fn pczt_legacy_v5_orchard_full_unshield_after_nu7<Dsf>(ds_factory: Dsf, cache: impl TestCache)
+where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    pczt_legacy_v5_orchard_unshield_after_nu7(ds_factory, cache, true);
+}
+
+#[cfg(all(
+    feature = "pczt",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu7"
+))]
+fn pczt_legacy_v5_orchard_unshield_after_nu7<Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+    full_note_withdrawal: bool,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use super::orchard::OrchardPoolTester;
+    use zcash_primitives::transaction::TxVersion;
+    use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
+
+    let zip212_enforcement_height = std::cmp::max(
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Nu5)
+            .unwrap(),
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Canopy)
+            .unwrap()
+            + ZIP212_GRACE_PERIOD,
+    );
+    let network = LocalNetwork {
+        nu7: Some(zip212_enforcement_height + 1),
+        ..TestBuilder::DEFAULT_NETWORK
+    };
+
+    let mut st = TestBuilder::new()
+        .with_network(network)
+        .with_data_store_factory(ds_factory)
+        .with_block_cache(cache)
+        .with_initial_chain_state(|_, network| {
+            let birthday_height = std::cmp::max(
+                network.activation_height(NetworkUpgrade::Nu5).unwrap(),
+                network.activation_height(NetworkUpgrade::Canopy).unwrap() + ZIP212_GRACE_PERIOD,
+            );
+
+            InitialChainState {
+                chain_state: ChainState::new(
+                    birthday_height - 1,
+                    BlockHash([5; 32]),
+                    Frontier::empty(),
+                    Frontier::empty(),
+                    Frontier::empty(),
+                ),
+                prior_sapling_roots: vec![],
+                prior_orchard_roots: vec![],
+            }
+        })
+        .with_account_having_current_birthday()
+        .build();
+
+    let account = st.test_account().cloned().unwrap();
+    let orchard_fvk = OrchardPoolTester::test_account_fvk(&st);
+
+    let note_value = Zatoshis::const_from_u64(350000);
+    st.generate_next_block(&orchard_fvk, AddressType::DefaultExternal, note_value);
+    st.scan_cached_blocks(account.birthday().height(), 1);
+
+    assert_eq!(st.get_total_balance(account.id()), note_value);
+    assert_eq!(
+        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+        note_value
+    );
+
+    let transparent_recipient = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+    let transfer_amount = if full_note_withdrawal {
+        (note_value - Zatoshis::const_from_u64(15000)).unwrap()
+    } else {
+        Zatoshis::const_from_u64(200000)
+    };
+
+    let proposal = st
+        .propose_standard_transfer_with_tx_version::<Infallible>(
+            account.id(),
+            StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+            &transparent_recipient,
+            transfer_amount,
+            None,
+            None,
+            ShieldedProtocol::Orchard,
+            TxVersion::V5,
+        )
+        .unwrap();
+
+    assert_eq!(proposal.steps().len(), 1);
+    let step = proposal.steps().first();
+    if full_note_withdrawal {
+        assert_eq!(step.balance().proposed_change().len(), 1);
+        assert_eq!(
+            step.balance().proposed_change()[0].output_pool(),
+            PoolType::ORCHARD
+        );
+        assert_eq!(step.balance().proposed_change()[0].value(), Zatoshis::ZERO);
+    } else {
+        assert_eq!(step.balance().proposed_change().len(), 1);
+        assert_eq!(
+            step.balance().proposed_change()[0].output_pool(),
+            PoolType::ORCHARD
+        );
+    }
+
+    let pczt_created = st
+        .create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
+            account.id(),
+            OvkPolicy::Sender,
+            &proposal,
+            TxVersion::V5,
+        )
+        .unwrap();
+
+    assert_eq!(
+        *pczt_created.global().tx_version(),
+        zcash_protocol::constants::V5_TX_VERSION
+    );
+    assert!(pczt_created.ironwood().actions().is_empty());
+    assert_eq!(
+        u32::from_le_bytes(
+            pczt_created.serialize_legacy_v1().unwrap()[4..8]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
+
+    assert_matches!(
+        st.extract_and_store_transaction_from_pczt(pczt_created.clone()),
+        Err(Error::Pczt(data_api::error::PcztError::Extraction(_)))
+    );
+
+    let pczt_updated =
+        OrchardPoolTester::add_proof_generation_keys(pczt_created, account.usk()).unwrap();
+    let orchard_pk = ::orchard::circuit::ProvingKey::build(
+        ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+    );
+    let sapling_prover = LocalTxProver::bundled();
+    let pczt_proven = Prover::new(pczt_updated)
+        .create_orchard_proof(&orchard_pk)
+        .unwrap()
+        .create_sapling_proofs(&sapling_prover, &sapling_prover)
+        .unwrap()
+        .finish();
+
+    let mut signer = Signer::new(pczt_proven).unwrap();
+    OrchardPoolTester::apply_signatures_to_pczt(&mut signer, account.usk()).unwrap();
+    let pczt_authorized = signer.finish();
+
+    let txid = st
+        .extract_and_store_transaction_from_pczt(pczt_authorized)
+        .unwrap();
+
+    let tx = st
+        .wallet()
+        .get_transaction(txid)
+        .unwrap()
+        .expect("extracted PCZT transaction was stored");
+    assert!(tx.ironwood_bundle().is_none());
+
+    let sent_outputs = st.wallet().get_sent_outputs(&txid).unwrap();
+    assert!(sent_outputs.iter().any(|output| {
+        output.value() == transfer_amount
+            && output.external_recipient() == Some(&transparent_recipient)
+    }));
+}
+
 #[cfg(feature = "pczt")]
 fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,

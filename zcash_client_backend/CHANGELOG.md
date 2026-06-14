@@ -20,6 +20,8 @@ workspace.
 - The NU7-gated Orchard to Ironwood migration API:
   `data_api::wallet::create_orchard_to_ironwood_transaction` and
   `data_api::wallet::MigrationTransaction`.
+- `data_api::wallet::create_pczt_from_proposal_with_tx_version`, for creating
+  a PCZT with an explicitly requested transaction version.
 - `zcash_client_backend::wallet::WalletTransparentOutput`:
   - `recipient_account`
   - `recipient_key_scope`
@@ -91,6 +93,9 @@ workspace.
 - `zcash_client_backend::scanning::ScanError` variants for invalid encodings
   and tree-size failures now report a `NoteCommitmentTree`, so Ironwood scan
   failures are labeled separately from Orchard failures.
+- `data_api::wallet::propose_standard_transfer_to_address` and
+  `create_pczt_from_proposal_with_tx_version` keep Orchard change in legacy
+  Orchard form when transaction version 5 is explicitly requested after NU7.
 
 ### Fixed
 - `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
