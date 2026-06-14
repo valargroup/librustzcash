@@ -1362,7 +1362,7 @@ mod tests {
 
         let parsed = Pczt::parse(&bytes).unwrap();
         assert!(parsed.ironwood.actions.is_empty());
-        assert_eq!(parsed.ironwood.flags, 0b0000_0011);
+        assert_eq!(parsed.ironwood.flags, empty_ironwood_bundle().flags);
         assert_eq!(parsed.ironwood.value_sum, (0, true));
     }
 
