@@ -51,7 +51,9 @@ use crate::data_api::TargetValue;
 use crate::{
     data_api::{
         Account, MaxSpendMode, SentTransaction, SentTransactionOutput, WalletCommitmentTrees,
-        WalletRead, WalletWrite, error::Error, wallet::input_selection::propose_send_max,
+        WalletRead, WalletWrite,
+        error::Error,
+        wallet::input_selection::{GreedyInputSelectorError, propose_send_max},
     },
     decrypt_transaction,
     fees::{
@@ -348,7 +350,7 @@ pub type ProposeTransferErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT> = Error<
 pub type ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT> = Error<
     <DbT as WalletRead>::Error,
     CommitmentTreeErrT,
-    BalanceError,
+    GreedyInputSelectorError,
     <FeeRuleT as FeeRule>::Error,
     <FeeRuleT as FeeRule>::Error,
     <DbT as InputSource>::NoteRef,
@@ -883,6 +885,10 @@ where
 /// Select transaction inputs, compute fees, and construct a proposal for a transaction or series
 /// of transactions that would spend all available funds from the given `spend_pool`s that can then
 /// be authorized and made ready for submission to the network with [`create_proposed_transactions`].
+///
+/// Under the `unstable` feature, `proposed_version` can be used to request a
+/// particular transaction version. A legacy version 5 request after NU7 keeps
+/// Orchard outputs in the legacy Orchard bundle and rejects Ironwood notes.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
@@ -895,6 +901,7 @@ pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
     memo: Option<MemoBytes>,
     mode: MaxSpendMode,
     confirmations_policy: ConfirmationsPolicy,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
     ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT>,
@@ -926,6 +933,8 @@ where
         confirmations_policy,
         recipient,
         memo,
+        #[cfg(feature = "unstable")]
+        proposed_version,
     )?;
 
     Ok(proposal)
@@ -2699,7 +2708,7 @@ where
 /// This can be used to create a version 5 PCZT after NU7 for compatibility
 /// with signers that cannot parse version 6 or Ironwood bundle data.
 ///
-/// The supplied proposal should have been created for the same requested
+/// The supplied proposal must have been created for the same requested
 /// transaction version. For standard transfers, pass the same `TxVersion` to
 /// [`propose_standard_transfer_to_address`] before calling this function.
 #[allow(clippy::too_many_arguments)]
@@ -2734,6 +2743,27 @@ where
         proposal,
         Some(proposed_version),
     )
+}
+
+#[cfg(all(feature = "pczt", feature = "unstable"))]
+fn ensure_created_pczt_matches_requested_version(
+    pczt: &pczt::Pczt,
+    requested_version: TxVersion,
+) -> Result<(), PcztError> {
+    let requested_tx_version = requested_version.header() & 0x7fff_ffff;
+    let global = pczt.global();
+
+    if *global.tx_version() != requested_tx_version
+        || *global.version_group_id() != requested_version.version_group_id()
+    {
+        return Err(PcztError::Invalid(format!(
+            "requested transaction version {requested_version:?} produced PCZT version {} with version group ID {}",
+            global.tx_version(),
+            global.version_group_id()
+        )));
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2792,6 +2822,10 @@ where
     let build_result = build_state.builder.build_for_pczt(OsRng, fee_rule)?;
 
     let created = Creator::build_from_parts(build_result.pczt_parts).ok_or(PcztError::Build)?;
+    #[cfg(feature = "unstable")]
+    if let Some(proposed_version) = proposed_version {
+        ensure_created_pczt_matches_requested_version(&created, proposed_version)?;
+    }
 
     let io_finalized = IoFinalizer::new(created).finalize_io()?;
 
@@ -2838,6 +2872,13 @@ where
         .take_while(|item| item.is_some())
         .flatten()
         .collect::<HashSet<_>>();
+
+    #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu7"))]
+    if matches!(proposed_version, Some(TxVersion::V5))
+        && (!ironwood_spends.is_empty() || !ironwood_outputs.is_empty())
+    {
+        return Err(Error::ProposalNotSupported);
+    }
 
     let sapling_outputs = build_state
         .sapling_output_meta
@@ -3581,6 +3622,10 @@ mod tests {
     };
 
     use super::orchard_note_from_pczt_parts;
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
+    use zcash_primitives::transaction::TxVersion;
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
+    use zcash_protocol::consensus::BranchId;
 
     fn test_rseed(rho: &Rho) -> RandomSeed {
         (0u8..=u8::MAX)
@@ -3607,5 +3652,26 @@ mod tests {
             ExtractedNoteCommitment::from(note.commitment()),
             ExtractedNoteCommitment::from(default_note.commitment())
         );
+    }
+
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
+    #[test]
+    fn requested_pczt_version_rejects_mismatched_created_pczt() {
+        let pczt = pczt::roles::creator::Creator::new(
+            BranchId::Nu7.into(),
+            10_000_000,
+            133,
+            [0; 32],
+            [0; 32],
+        )
+        .with_ironwood_anchor([1; 32])
+        .build();
+
+        match super::ensure_created_pczt_matches_requested_version(&pczt, TxVersion::V5) {
+            Err(crate::data_api::error::PcztError::Invalid(msg)) => {
+                assert!(msg.contains("requested transaction version V5"));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 }

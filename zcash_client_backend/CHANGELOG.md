@@ -55,6 +55,11 @@ workspace.
     Tokio-based batch decryption engine for full blocks and transactions.
 
 ### Changed
+- `zcash_client_backend::data_api::wallet::propose_send_max_transfer` now
+  accepts an explicit transaction version under the `unstable` feature, so
+  callers can request legacy version 5 Orchard send-max proposals after NU7.
+  Its `ProposeSendMaxErrT` selection-error parameter is now
+  `GreedyInputSelectorError` instead of `BalanceError`.
 - `zcash_client_backend::data_api`:
   - Changes to the `InputSource` trait:
     - The result types of `InputSource::get_unspent_transparent_output` and

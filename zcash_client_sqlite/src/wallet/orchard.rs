@@ -548,6 +548,8 @@ pub(crate) mod tests {
         wallet::OvkPolicy,
     };
     use zcash_primitives::block::BlockHash;
+    #[cfg(all(zcash_unstable = "nu7", feature = "unstable", feature = "pczt-tests"))]
+    use zcash_primitives::transaction::TxVersion;
     use zcash_protocol::value::Zatoshis;
     #[cfg(zcash_unstable = "nu7")]
     use zcash_protocol::{ShieldedProtocol, consensus::BlockHeight};
@@ -1066,6 +1068,64 @@ pub(crate) mod tests {
         let min_action_index = usize::try_from(min_action_index).unwrap();
         assert!(min_action_index >= orchard_action_count);
         assert!(min_action_index < orchard_action_count + ironwood_action_count);
+    }
+
+    #[test]
+    #[cfg(all(zcash_unstable = "nu7", feature = "unstable", feature = "pczt-tests"))]
+    fn send_max_from_orchard_note_after_nu7_can_create_legacy_v5_pczt() {
+        let network = network_with_nu7();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let to = OrchardPoolTester::fvk_default_address(&dfvk);
+        let proposal = st
+            .propose_send_max_transfer_with_tx_version(
+                account.id(),
+                &StandardFeeRule::Zip317,
+                to.to_zcash_address(st.network()),
+                None,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+                TxVersion::V5,
+            )
+            .unwrap();
+        let step = proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(10000)
+        );
+        assert!(step.balance().proposed_change().is_empty());
+        assert_eq!(
+            step.transaction_request().payments()[&0].amount(),
+            Some(Zatoshis::const_from_u64(90000))
+        );
+
+        let pczt = st
+            .create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
+                account.id(),
+                OvkPolicy::Sender,
+                &proposal,
+                TxVersion::V5,
+            )
+            .unwrap();
+
+        assert_eq!(
+            *pczt.global().tx_version(),
+            zcash_protocol::constants::V5_TX_VERSION
+        );
+        assert!(!pczt.orchard().actions().is_empty());
+        assert!(pczt.ironwood().actions().is_empty());
+        pczt.serialize_legacy_v1().unwrap();
     }
 
     #[test]

@@ -10,6 +10,8 @@ use std::{
 use transparent::bundle::TxOut;
 use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
+#[cfg(feature = "unstable")]
+use zcash_primitives::transaction::TxVersion;
 #[cfg(feature = "transparent-inputs")]
 use zcash_primitives::transaction::fees::transparent as transparent_fees;
 use zcash_primitives::transaction::fees::{
@@ -66,9 +68,6 @@ fn orchard_action_count_error(err: orchard::BundleActionCountError) -> &'static 
         _ => "Bundle action count could not be computed.",
     }
 }
-
-#[cfg(feature = "unstable")]
-use zcash_primitives::transaction::TxVersion;
 
 /// The type of errors that may be produced in input selection.
 #[derive(Debug)]
@@ -357,6 +356,9 @@ pub enum GreedyInputSelectorError {
     UnsupportedAddress(Box<UnifiedAddress>),
     /// Support for transparent-source-only (TEX) addresses requires the transparent-inputs feature.
     UnsupportedTexAddress,
+    /// A legacy v5 Orchard proposal cannot spend Ironwood notes.
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
+    UnsupportedLegacyOrchardNoteVersion,
 }
 
 impl fmt::Display for GreedyInputSelectorError {
@@ -375,6 +377,13 @@ impl fmt::Display for GreedyInputSelectorError {
                 write!(
                     f,
                     "Support for transparent-source-only (TEX) addresses requires the transparent-inputs feature."
+                )
+            }
+            #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
+            GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion => {
+                write!(
+                    f,
+                    "Legacy v5 Orchard transactions cannot spend Ironwood notes."
                 )
             }
         }
@@ -828,15 +837,31 @@ pub(crate) fn propose_send_max<ParamsT, InputSourceT, FeeRuleT>(
     confirmations_policy: ConfirmationsPolicy,
     recipient: ZcashAddress,
     memo: Option<MemoBytes>,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<FeeRuleT, InputSourceT::NoteRef>,
-    InputSelectorError<InputSourceT::Error, BalanceError, FeeRuleT::Error, InputSourceT::NoteRef>,
+    InputSelectorError<
+        InputSourceT::Error,
+        GreedyInputSelectorError,
+        FeeRuleT::Error,
+        InputSourceT::NoteRef,
+    >,
 >
 where
     ParamsT: consensus::Parameters,
     InputSourceT: InputSource,
     FeeRuleT: FeeRule + Clone,
 {
+    #[cfg(feature = "unstable")]
+    if let Some(version) = proposed_version {
+        let branch_id = consensus::BranchId::for_height(params, BlockHeight::from(target_height));
+        if !version.valid_in_branch(branch_id) {
+            return Err(InputSelectorError::Proposal(
+                ProposalError::IncompatibleTxVersion(branch_id),
+            ));
+        }
+    }
+
     let spendable_notes = wallet_db
         .select_spendable_notes(
             source_account,
@@ -850,7 +875,30 @@ where
 
     let input_total = spendable_notes
         .total_value()
-        .map_err(InputSelectorError::Selection)?;
+        .map_err(|e| InputSelectorError::Selection(GreedyInputSelectorError::Balance(e)))?;
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let legacy_v5_orchard = {
+        #[cfg(feature = "unstable")]
+        {
+            matches!(proposed_version, Some(TxVersion::V5))
+        }
+        #[cfg(not(feature = "unstable"))]
+        {
+            false
+        }
+    };
+    #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu7"))]
+    if legacy_v5_orchard
+        && spendable_notes
+            .orchard()
+            .iter()
+            .any(|note| note.note().version() == orchard::note::NoteVersion::V3)
+    {
+        return Err(InputSelectorError::Selection(
+            GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion,
+        ));
+    }
 
     let mut payment_pools = BTreeMap::new();
 
@@ -885,7 +933,7 @@ where
         let orchard_outputs_are_ironwood = params.is_nu_active(
             consensus::NetworkUpgrade::Nu7,
             BlockHeight::from(target_height),
-        );
+        ) && !legacy_v5_orchard;
         #[cfg(zcash_unstable = "nu7")]
         let (requested_orchard_actions, requested_ironwood_actions) =
             if orchard_outputs_are_ironwood {
