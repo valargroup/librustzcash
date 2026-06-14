@@ -6227,9 +6227,16 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
 
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
-    let orchard_pk = ::orchard::circuit::ProvingKey::build(
-        ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
-    );
+    #[cfg(zcash_unstable = "nu7")]
+    let orchard_circuit_version =
+        if *pczt_updated.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION {
+            ::orchard::circuit::OrchardCircuitVersion::Ironwood
+        } else {
+            ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2
+        };
+    #[cfg(not(zcash_unstable = "nu7"))]
+    let orchard_circuit_version = ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2;
+    let orchard_pk = ::orchard::circuit::ProvingKey::build(orchard_circuit_version);
     #[cfg(zcash_unstable = "nu7")]
     let ironwood_pk =
         ::orchard::circuit::ProvingKey::build(::orchard::circuit::OrchardCircuitVersion::Ironwood);
