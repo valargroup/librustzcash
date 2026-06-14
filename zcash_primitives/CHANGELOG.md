@@ -28,6 +28,9 @@ workspace.
     anchor for the separate Ironwood note commitment tree.
   - `Builder::add_ironwood_spend` and `Builder::add_ironwood_output`, which
     build Ironwood actions using the QR/Ironwood note plaintext format.
+  - `Builder::add_orchard_change_output` and
+    `Builder::add_ironwood_change_output`, which add wallet-controlled retained
+    value outputs for Orchard and Ironwood bundles.
   - `Builder::with_expiry_height`, enabling callers to override the default
     transaction expiry height when constructing transactions or PCZTs.
   - `Error::CoinbaseExpiryHeightMismatch`, returned when a coinbase builder's

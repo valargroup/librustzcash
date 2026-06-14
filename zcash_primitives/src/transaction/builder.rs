@@ -809,6 +809,30 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .map_err(Error::OrchardRecipient)
     }
 
+    /// Adds a wallet-controlled Orchard change output to the transaction.
+    ///
+    /// This uses [`orchard::note::NoteVersion::V2`].
+    pub fn add_orchard_change_output<FE>(
+        &mut self,
+        fvk: orchard::keys::FullViewingKey,
+        ovk: Option<orchard::keys::OutgoingViewingKey>,
+        recipient: orchard::Address,
+        value: Zatoshis,
+        memo: MemoBytes,
+    ) -> Result<(), Error<FE>> {
+        self.orchard_builder
+            .as_mut()
+            .ok_or(Error::OrchardBuilderNotAvailable)?
+            .add_change_output(
+                fvk,
+                ovk,
+                recipient,
+                orchard::value::NoteValue::from_raw(value.into()),
+                memo.into_bytes(),
+            )
+            .map_err(Error::OrchardRecipient)
+    }
+
     /// Adds an Ironwood note to be spent in this bundle.
     ///
     /// The note must use [`orchard::note::NoteVersion::V3`], the QR/Ironwood
@@ -860,6 +884,31 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 orchard::value::NoteValue::from_raw(value.into()),
                 memo.into_bytes(),
                 orchard::note::NoteVersion::V3,
+            )
+            .map_err(Error::IronwoodRecipient)
+    }
+
+    /// Adds a wallet-controlled Ironwood change output to the transaction.
+    ///
+    /// This uses [`orchard::note::NoteVersion::V3`].
+    #[cfg(zcash_unstable = "nu7")]
+    pub fn add_ironwood_change_output<FE>(
+        &mut self,
+        fvk: orchard::keys::FullViewingKey,
+        ovk: Option<orchard::keys::OutgoingViewingKey>,
+        recipient: orchard::Address,
+        value: Zatoshis,
+        memo: MemoBytes,
+    ) -> Result<(), Error<FE>> {
+        self.ironwood_builder
+            .as_mut()
+            .ok_or(Error::IronwoodBuilderNotAvailable)?
+            .add_change_output(
+                fvk,
+                ovk,
+                recipient,
+                orchard::value::NoteValue::from_raw(value.into()),
+                memo.into_bytes(),
             )
             .map_err(Error::IronwoodRecipient)
     }
@@ -2065,6 +2114,47 @@ mod tests {
             ),
             Err(Error::OrchardBuilderNotAvailable)
         );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu7"))]
+    fn orchard_change_output_accepts_wallet_controlled_retained_value() {
+        let tx_height = TEST_NETWORK.activation_height(NetworkUpgrade::Nu5).unwrap();
+        let fvk = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        );
+        let recipient = fvk.address_at(0u32, orchard::keys::Scope::Internal);
+        let mut builder = Builder::new(
+            TEST_NETWORK,
+            tx_height,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                ironwood_anchor: None,
+            },
+        );
+
+        assert_matches!(
+            builder.add_orchard_output::<Infallible>(
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            ),
+            Err(Error::OrchardRecipient(
+                orchard::builder::OutputError::CrossAddressDisabled
+            ))
+        );
+
+        builder
+            .add_orchard_change_output::<Infallible>(
+                fvk,
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
     }
 
     #[test]
