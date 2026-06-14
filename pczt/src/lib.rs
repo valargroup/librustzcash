@@ -113,7 +113,7 @@ pub struct Pczt {
 #[cfg(zcash_unstable = "nu7")]
 pub(crate) const EMPTY_IRONWOOD_ANCHOR: [u8; 32] = [0; 32];
 #[cfg(zcash_unstable = "nu7")]
-pub(crate) const IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED: u8 = 0b0000_0011;
+pub(crate) const IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED: u8 = 0b0000_0111;
 
 #[cfg(zcash_unstable = "nu7")]
 pub(crate) fn empty_ironwood_bundle() -> orchard::Bundle {
@@ -1180,7 +1180,9 @@ mod tests {
     fn prover_rejects_v5_ironwood_proof() {
         use roles::prover::Prover;
 
-        let pk = ::orchard::circuit::ProvingKey::build();
+        let pk = ::orchard::circuit::ProvingKey::build(
+            ::orchard::circuit::OrchardCircuitVersion::Ironwood,
+        );
         let result = Prover::new(pczt_with_one_v5_ironwood_action()).create_ironwood_proof(&pk);
 
         match result {
@@ -1219,7 +1221,9 @@ mod tests {
             Ok(_) => panic!("expected v6/NU7 parse error"),
         }
 
-        let pk = ::orchard::circuit::ProvingKey::build();
+        let pk = ::orchard::circuit::ProvingKey::build(
+            ::orchard::circuit::OrchardCircuitVersion::Ironwood,
+        );
         let proof_result = Prover::new(pczt.clone()).create_ironwood_proof(&pk);
         match proof_result {
             Err(roles::prover::OrchardError::Parser(e)) => assert_v6_nu7_parse_error(e, expected),
@@ -1358,7 +1362,7 @@ mod tests {
 
         let parsed = Pczt::parse(&bytes).unwrap();
         assert!(parsed.ironwood.actions.is_empty());
-        assert_eq!(parsed.ironwood.flags, 0b0000_0011);
+        assert_eq!(parsed.ironwood.flags, empty_ironwood_bundle().flags);
         assert_eq!(parsed.ironwood.value_sum, (0, true));
     }
 

@@ -123,7 +123,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                     SqliteClientError::CorruptedData("Diversifier invalid.".to_owned())
                 })?;
 
-            let note = Option::from(Note::from_parts_with_version(
+            let note = Option::from(Note::from_parts(
                 recipient,
                 orchard::value::NoteValue::from_raw(note_value),
                 rho,

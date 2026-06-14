@@ -115,22 +115,35 @@ where
 }
 
 #[cfg(feature = "orchard")]
+fn orchard_action_count_error(err: orchard::BundleActionCountError) -> &'static str {
+    match err {
+        orchard::BundleActionCountError::InputCountOverflow => "Orchard action count overflowed.",
+        orchard::BundleActionCountError::SpendsDisabled => {
+            "Spends are disabled, so num_spends must be zero."
+        }
+        orchard::BundleActionCountError::OutputsDisabled => {
+            "Outputs are disabled, so num_outputs must be zero."
+        }
+        _ => "Bundle action count could not be computed.",
+    }
+}
+
+#[cfg(feature = "orchard")]
 fn orchard_action_count_from_parts<E, NoteRefT>(
-    bundle_type: orchard::builder::BundleType,
     orchard_inputs: usize,
     ironwood_inputs: usize,
     orchard_outputs: usize,
     ironwood_outputs: usize,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
-    let orchard_actions = bundle_type
-        .num_actions(orchard_inputs, orchard_outputs)
-        .map_err(ChangeError::BundleError)?;
+    let orchard_actions = orchard::BundleProtocol::LegacyOrchard
+        .transactional_action_count(orchard_inputs, orchard_outputs)
+        .map_err(|e| ChangeError::BundleError(orchard_action_count_error(e)))?;
 
     #[cfg(zcash_unstable = "nu7")]
     {
-        let ironwood_actions = bundle_type
-            .num_actions(ironwood_inputs, ironwood_outputs)
-            .map_err(ChangeError::BundleError)?;
+        let ironwood_actions = orchard::BundleProtocol::Ironwood
+            .transactional_action_count(ironwood_inputs, ironwood_outputs)
+            .map_err(|e| ChangeError::BundleError(orchard_action_count_error(e)))?;
 
         orchard_actions
             .checked_add(ironwood_actions)
@@ -161,7 +174,6 @@ fn orchard_action_count<NoteRefT: Clone, E>(
     let ironwood_inputs = 0usize;
 
     orchard_action_count_from_parts(
-        orchard.bundle_type(),
         orchard.inputs().len() - ironwood_inputs,
         ironwood_inputs,
         orchard_output_count,
@@ -930,7 +942,6 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
 
             #[cfg(feature = "orchard")]
             let o_action_count = orchard_action_count_from_parts(
-                orchard.bundle_type(),
                 o_req_orchard_inputs + usize::from(matches!(_o_extra, Some(false))),
                 o_req_ironwood_inputs + usize::from(matches!(_o_extra, Some(true))),
                 o_base_orchard_outputs_len + change.orchard,

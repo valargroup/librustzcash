@@ -136,7 +136,7 @@ fn orchard_note_from_pczt_parts(
     rseed: orchard::note::RandomSeed,
     note_version: orchard::note::NoteVersion,
 ) -> Option<orchard::Note> {
-    orchard::Note::from_parts_with_version(recipient, value, rho, rseed, note_version).into()
+    orchard::Note::from_parts(recipient, value, rho, rseed, note_version).into()
 }
 
 #[cfg(all(feature = "pczt", feature = "orchard"))]
@@ -1280,7 +1280,8 @@ where
                 builder.add_orchard_spend(orchard_fvk.clone(), *note, merkle_path.clone())?;
             }
 
-            builder.add_ironwood_output(
+            builder.add_ironwood_change_output(
+                orchard_fvk.clone(),
                 internal_ovk.map(Into::into),
                 recipient,
                 ironwood_amount,
@@ -2248,17 +2249,20 @@ where
 
                 #[cfg(feature = "orchard")]
                 {
-                    let change_address = ufvk
+                    let orchard_fvk = ufvk
                         .orchard()
-                        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
-                        .address_at(0u32, orchard::keys::Scope::Internal);
+                        .cloned()
+                        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+                    let change_address =
+                        orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
 
                     #[cfg(zcash_unstable = "nu7")]
                     if params.is_nu_active(
                         consensus::NetworkUpgrade::Nu7,
                         BlockHeight::from(min_target_height),
                     ) {
-                        builder.add_ironwood_output(
+                        builder.add_ironwood_change_output(
+                            orchard_fvk.clone(),
                             internal_ovk.map(|k| k.into()),
                             change_address,
                             change_value.value(),
@@ -2273,7 +2277,8 @@ where
                             Some(memo),
                         ))
                     } else {
-                        builder.add_orchard_output(
+                        builder.add_orchard_change_output(
+                            orchard_fvk.clone(),
                             internal_ovk.map(|k| k.into()),
                             change_address,
                             change_value.value(),
@@ -2291,7 +2296,8 @@ where
 
                     #[cfg(not(zcash_unstable = "nu7"))]
                     {
-                        builder.add_orchard_output(
+                        builder.add_orchard_change_output(
+                            orchard_fvk.clone(),
                             internal_ovk.map(|k| k.into()),
                             change_address,
                             change_value.value(),
@@ -3489,7 +3495,8 @@ mod tests {
 
         let note =
             orchard_note_from_pczt_parts(recipient, value, rho, rseed, NoteVersion::V3).unwrap();
-        let default_note = orchard::Note::from_parts(recipient, value, rho, rseed).unwrap();
+        let default_note =
+            orchard::Note::from_parts(recipient, value, rho, rseed, NoteVersion::V2).unwrap();
 
         assert_eq!(note.version(), NoteVersion::V3);
         assert_eq!(default_note.version(), NoteVersion::V2);

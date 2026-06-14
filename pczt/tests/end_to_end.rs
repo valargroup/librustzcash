@@ -39,9 +39,20 @@ use zcash_protocol::{
 use zcash_script::script::{self, Evaluable};
 
 static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
+#[cfg(zcash_unstable = "nu7")]
+static IRONWOOD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
 
 fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    ORCHARD_PROVING_KEY.get_or_init(orchard::circuit::ProvingKey::build)
+    ORCHARD_PROVING_KEY.get_or_init(|| {
+        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2)
+    })
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn ironwood_proving_key() -> &'static orchard::circuit::ProvingKey {
+    IRONWOOD_PROVING_KEY.get_or_init(|| {
+        orchard::circuit::ProvingKey::build(orchard::circuit::OrchardCircuitVersion::Ironwood)
+    })
 }
 
 fn check_round_trip(pczt: &Pczt) {
@@ -765,8 +776,7 @@ fn orchard_to_orchard() {
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleProtocol::Orchard,
-            orchard::builder::BundleType::DEFAULT,
+            orchard::BundleProtocol::LegacyOrchard,
             orchard::Anchor::empty_tree(),
         );
         orchard_builder
@@ -885,8 +895,7 @@ fn v6_orchard_anchor_can_be_updated_after_signing() {
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleProtocol::Orchard,
-            orchard::builder::BundleType::DEFAULT,
+            orchard::BundleProtocol::LegacyOrchard,
             orchard::Anchor::empty_tree(),
         );
         orchard_builder
@@ -934,9 +943,6 @@ fn v6_orchard_anchor_can_be_updated_after_signing() {
             ironwood_anchor: Some(orchard::Anchor::empty_tree()),
         },
     );
-    builder
-        .propose_version::<std::convert::Infallible>(TxVersion::V6)
-        .unwrap();
     builder
         .add_orchard_spend::<zip317::FeeRule>(orchard_fvk.clone(), note, dummy)
         .unwrap();
@@ -997,9 +1003,9 @@ fn v6_orchard_anchor_can_be_updated_after_signing() {
     );
 
     let pczt_with_proofs = Prover::new(updated_base)
-        .create_orchard_proof(orchard_proving_key())
+        .create_orchard_proof(ironwood_proving_key())
         .unwrap()
-        .create_ironwood_proof(orchard_proving_key())
+        .create_ironwood_proof(ironwood_proving_key())
         .unwrap()
         .finish();
     check_round_trip(&pczt_with_proofs);
@@ -1046,8 +1052,7 @@ fn ironwood_to_ironwood() {
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::builder::BundleProtocol::Ironwood,
-            orchard::builder::BundleType::DEFAULT,
+            orchard::BundleProtocol::Ironwood,
             orchard::Anchor::empty_tree(),
         );
         orchard_builder
@@ -1127,7 +1132,7 @@ fn ironwood_to_ironwood() {
 
     // Create proofs.
     let pczt = Prover::new(pczt)
-        .create_ironwood_proof(orchard_proving_key())
+        .create_ironwood_proof(ironwood_proving_key())
         .unwrap()
         .finish();
     check_round_trip(&pczt);

@@ -75,13 +75,17 @@ impl Creator {
 
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
-        self.orchard_flags = orchard_flags.to_byte();
+        self.orchard_flags = orchard_flags
+            .to_byte(orchard::bundle::BundleFormat::PreNu6_3)
+            .expect("Orchard flags must be encodable in the pre-NU6.3 format");
         self
     }
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
-        self.ironwood_flags = ironwood_flags.to_byte();
+        self.ironwood_flags = ironwood_flags
+            .to_byte(orchard::bundle::BundleFormat::Nu6_3)
+            .expect("Ironwood flags must be encodable in the NU6.3 format");
         self.select_v6();
         self
     }

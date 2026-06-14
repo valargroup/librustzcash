@@ -53,7 +53,7 @@ fn wallet_summary_counts_v3_notes_as_ironwood() {
         .unwrap();
     if let Note::Orchard(note) = received_note.note {
         received_note.note = Note::Orchard(
-            orchard::Note::from_parts_with_version(
+            orchard::Note::from_parts(
                 note.recipient(),
                 note.value(),
                 note.rho(),
@@ -101,7 +101,7 @@ fn v3_ironwood_notes_in_ironwood_unscanned_ranges_are_not_spendable() {
             .unwrap();
         if let Note::Orchard(note) = received_note.note {
             received_note.note = Note::Orchard(
-                orchard::Note::from_parts_with_version(
+                orchard::Note::from_parts(
                     note.recipient(),
                     note.value(),
                     note.rho(),

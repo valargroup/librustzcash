@@ -587,7 +587,7 @@ mod tests {
                 &[] as &[Infallible],
             ),
             &(
-                orchard::builder::BundleType::DEFAULT,
+                orchard::BundleProtocol::LegacyOrchard,
                 &[] as &[Infallible],
                 &[OrchardPayment::new(Zatoshis::const_from_u64(30000))][..],
             ),
@@ -938,7 +938,7 @@ mod tests {
             &[] as &[TxOut],
             &sapling_fees::EmptyBundleView,
             &(
-                orchard::builder::BundleType::DEFAULT,
+                orchard::BundleProtocol::LegacyOrchard,
                 &[
                     TestOrchardInput {
                         note_id: 0,
@@ -999,7 +999,7 @@ mod tests {
             &[] as &[TxOut],
             &sapling_fees::EmptyBundleView,
             &(
-                orchard::builder::BundleType::DEFAULT,
+                orchard::BundleProtocol::LegacyOrchard,
                 &[
                     TestOrchardInput {
                         note_id: 0,
