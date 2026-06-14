@@ -548,7 +548,7 @@ pub(crate) mod tests {
         wallet::OvkPolicy,
     };
     use zcash_primitives::block::BlockHash;
-    #[cfg(all(zcash_unstable = "nu7", feature = "unstable", feature = "pczt-tests"))]
+    #[cfg(all(zcash_unstable = "nu7", feature = "unstable"))]
     use zcash_primitives::transaction::TxVersion;
     use zcash_protocol::value::Zatoshis;
     #[cfg(zcash_unstable = "nu7")]
@@ -1195,6 +1195,50 @@ pub(crate) mod tests {
             "the source Orchard note is spent from the Orchard bundle"
         );
         assert_eq!(tx.ironwood_bundle().unwrap().actions().len(), 2);
+    }
+
+    #[test]
+    #[cfg(all(zcash_unstable = "nu7", feature = "unstable"))]
+    fn fixed_legacy_v5_send_rejects_v3_ironwood_note() {
+        let network = network_with_nu7();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+        mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
+
+        let recipient = OrchardPoolTester::fvk_default_address(&dfvk);
+        let proposal = st.propose_standard_transfer_with_tx_version::<Infallible>(
+            account.id(),
+            StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+            &recipient,
+            Zatoshis::const_from_u64(10000),
+            None,
+            None,
+            ShieldedProtocol::Orchard,
+            TxVersion::V5,
+        );
+
+        assert_matches!(
+            proposal,
+            Err(zcash_client_backend::data_api::error::Error::NoteSelection(
+                zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion
+            ))
+        );
     }
 
     #[test]

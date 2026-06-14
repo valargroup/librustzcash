@@ -651,6 +651,14 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             } else {
                 vec![]
             };
+            #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu7"))]
+            if matches!(proposed_version, Some(TxVersion::V5))
+                && orchard_inputs
+                    .iter()
+                    .any(|note| note.note().version() == orchard::note::NoteVersion::V3)
+            {
+                return Err(GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion.into());
+            }
 
             let selected_input_ids = sapling_inputs.iter().map(|(id, _)| id);
             #[cfg(feature = "orchard")]
