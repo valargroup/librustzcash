@@ -62,7 +62,9 @@ impl Creator {
 
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
-        self.orchard_flags = orchard_flags.to_byte();
+        self.orchard_flags = orchard_flags
+            .to_byte(crate::orchard::legacy_bundle_format())
+            .expect("legacy Orchard PCZT flags are encodable");
         self
     }
 

@@ -16,6 +16,27 @@ use crate::{
     roles::combiner::{merge_map, merge_optional},
 };
 
+#[cfg(feature = "orchard")]
+pub(crate) fn legacy_bundle_protocol() -> orchard::BundleProtocol {
+    // TODO: This is a PR52 compatibility shim. The txid/sighash split needs
+    // qr_orchard's format-aware bundle flag API, but the later PCZT split has
+    // not yet introduced explicit Orchard versus Ironwood PCZT bundle semantics.
+    // Treat existing PCZT Orchard data as legacy V5 Orchard for now, then
+    // remove this helper when the PCZT split carries bundle format, note
+    // version, and circuit version from the transaction being constructed.
+    orchard::BundleProtocol::LegacyOrchard
+}
+
+#[cfg(feature = "orchard")]
+pub(crate) fn legacy_bundle_format() -> orchard::bundle::BundleFormat {
+    legacy_bundle_protocol().bundle_format()
+}
+
+#[cfg(feature = "orchard")]
+pub(crate) fn legacy_note_version() -> orchard::note::NoteVersion {
+    legacy_bundle_protocol().default_note_version()
+}
+
 /// PCZT fields that are specific to producing the transaction's Orchard bundle (if any).
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
 pub struct Bundle {
@@ -419,6 +440,7 @@ impl Bundle {
                     action.spend.value,
                     action.spend.rho,
                     action.spend.rseed,
+                    legacy_note_version(),
                     action.spend.fvk,
                     action.spend.witness,
                     action.spend.alpha,
@@ -439,6 +461,7 @@ impl Bundle {
                 let output = orchard::pczt::Output::parse(
                     *spend.nullifier(),
                     action.output.cmx,
+                    legacy_note_version(),
                     action.output.ephemeral_key,
                     action.output.enc_ciphertext,
                     action.output.out_ciphertext,
@@ -467,6 +490,7 @@ impl Bundle {
         orchard::pczt::Bundle::parse(
             actions,
             self.flags,
+            legacy_bundle_format(),
             self.value_sum,
             self.anchor,
             self.zkproof,
@@ -563,7 +587,10 @@ impl Bundle {
 
         Self {
             actions,
-            flags: bundle.flags().to_byte(),
+            flags: bundle
+                .flags()
+                .to_byte(legacy_bundle_format())
+                .expect("legacy Orchard PCZT flags are encodable"),
             value_sum,
             anchor: bundle.anchor().to_bytes(),
             zkproof: bundle

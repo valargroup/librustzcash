@@ -20,7 +20,7 @@ pub(super) fn verify_bundle(
         }
     } else {
         // PCZT extraction produces new transactions, which use the NU6.2 (fixed) circuit.
-        let vk = VerifyingKey::build();
+        let vk = VerifyingKey::build(crate::orchard::legacy_bundle_protocol().circuit_version());
         if validator.validate(&vk, rng) {
             Ok(())
         } else {
