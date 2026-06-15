@@ -30,6 +30,8 @@ use crate::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
 ///         nu6: Some(BlockHeight::from_u32(1)),
 ///         nu6_1: Some(BlockHeight::from_u32(1)),
 ///         nu6_2: Some(BlockHeight::from_u32(1)),
+///         #[cfg(zcash_unstable = "nu6.3")]
+///         nu6_3: Some(BlockHeight::from_u32(1)),
 ///     };
 ///     ```
 ///     
@@ -44,8 +46,8 @@ pub struct LocalNetwork {
     pub nu6: Option<BlockHeight>,
     pub nu6_1: Option<BlockHeight>,
     pub nu6_2: Option<BlockHeight>,
-    #[cfg(zcash_unstable = "nu7")]
-    pub nu7: Option<BlockHeight>,
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub nu6_3: Option<BlockHeight>,
     #[cfg(zcash_unstable = "zfuture")]
     pub z_future: Option<BlockHeight>,
 }
@@ -67,8 +69,8 @@ impl Parameters for LocalNetwork {
             NetworkUpgrade::Nu6 => self.nu6,
             NetworkUpgrade::Nu6_1 => self.nu6_1,
             NetworkUpgrade::Nu6_2 => self.nu6_2,
-            #[cfg(zcash_unstable = "nu7")]
-            NetworkUpgrade::Nu7 => self.nu7,
+            #[cfg(zcash_unstable = "nu6.3")]
+            NetworkUpgrade::Nu6_3 => self.nu6_3,
             #[cfg(zcash_unstable = "zfuture")]
             NetworkUpgrade::ZFuture => self.z_future,
         }
@@ -94,8 +96,8 @@ mod tests {
         let expected_nu6 = BlockHeight::from_u32(7);
         let expected_nu6_1 = BlockHeight::from_u32(8);
         let expected_nu6_2 = BlockHeight::from_u32(9);
-        #[cfg(zcash_unstable = "nu7")]
-        let expected_nu7 = BlockHeight::from_u32(10);
+        #[cfg(zcash_unstable = "nu6.3")]
+        let expected_nu6_3 = BlockHeight::from_u32(10);
         #[cfg(zcash_unstable = "zfuture")]
         let expected_z_future = BlockHeight::from_u32(10);
 
@@ -109,8 +111,8 @@ mod tests {
             nu6: Some(expected_nu6),
             nu6_1: Some(expected_nu6_1),
             nu6_2: Some(expected_nu6_2),
-            #[cfg(zcash_unstable = "nu7")]
-            nu7: Some(expected_nu7),
+            #[cfg(zcash_unstable = "nu6.3")]
+            nu6_3: Some(expected_nu6_3),
             #[cfg(zcash_unstable = "zfuture")]
             z_future: Some(expected_z_future),
         };
@@ -124,9 +126,9 @@ mod tests {
         assert!(regtest.is_nu_active(NetworkUpgrade::Nu6, expected_nu6));
         assert!(regtest.is_nu_active(NetworkUpgrade::Nu6_1, expected_nu6_1));
         assert!(regtest.is_nu_active(NetworkUpgrade::Nu6_2, expected_nu6_2));
-        // nu7 must not be activated at or below the nu6_2 height
-        #[cfg(zcash_unstable = "nu7")]
-        assert!(!regtest.is_nu_active(NetworkUpgrade::Nu7, expected_nu6_2));
+        // nu6_3 must not be activated at or below the nu6_2 height
+        #[cfg(zcash_unstable = "nu6.3")]
+        assert!(!regtest.is_nu_active(NetworkUpgrade::Nu6_3, expected_nu6_2));
         // zfuture must not be activated at or below the nu6_2 height
         #[cfg(zcash_unstable = "zfuture")]
         assert!(!regtest.is_nu_active(NetworkUpgrade::ZFuture, expected_nu6_2));
@@ -143,8 +145,8 @@ mod tests {
         let expected_nu6 = BlockHeight::from_u32(7);
         let expected_nu6_1 = BlockHeight::from_u32(8);
         let expected_nu6_2 = BlockHeight::from_u32(9);
-        #[cfg(zcash_unstable = "nu7")]
-        let expected_nu7 = BlockHeight::from_u32(10);
+        #[cfg(zcash_unstable = "nu6.3")]
+        let expected_nu6_3 = BlockHeight::from_u32(10);
         #[cfg(zcash_unstable = "zfuture")]
         let expected_z_future = BlockHeight::from_u32(10);
 
@@ -158,8 +160,8 @@ mod tests {
             nu6: Some(expected_nu6),
             nu6_1: Some(expected_nu6_1),
             nu6_2: Some(expected_nu6_2),
-            #[cfg(zcash_unstable = "nu7")]
-            nu7: Some(expected_nu7),
+            #[cfg(zcash_unstable = "nu6.3")]
+            nu6_3: Some(expected_nu6_3),
             #[cfg(zcash_unstable = "zfuture")]
             z_future: Some(expected_z_future),
         };
@@ -200,10 +202,10 @@ mod tests {
             regtest.activation_height(NetworkUpgrade::Nu6_2),
             Some(expected_nu6_2)
         );
-        #[cfg(zcash_unstable = "nu7")]
+        #[cfg(zcash_unstable = "nu6.3")]
         assert_eq!(
-            regtest.activation_height(NetworkUpgrade::Nu7),
-            Some(expected_nu7)
+            regtest.activation_height(NetworkUpgrade::Nu6_3),
+            Some(expected_nu6_3)
         );
         #[cfg(zcash_unstable = "zfuture")]
         assert_eq!(
@@ -223,8 +225,8 @@ mod tests {
         let expected_nu6 = BlockHeight::from_u32(7);
         let expected_nu6_1 = BlockHeight::from_u32(8);
         let expected_nu6_2 = BlockHeight::from_u32(9);
-        #[cfg(zcash_unstable = "nu7")]
-        let expected_nu7 = BlockHeight::from_u32(10);
+        #[cfg(zcash_unstable = "nu6.3")]
+        let expected_nu6_3 = BlockHeight::from_u32(10);
         #[cfg(zcash_unstable = "zfuture")]
         let expected_z_future = BlockHeight::from_u32(10);
 
@@ -238,8 +240,8 @@ mod tests {
             nu6: Some(expected_nu6),
             nu6_1: Some(expected_nu6_1),
             nu6_2: Some(expected_nu6_2),
-            #[cfg(zcash_unstable = "nu7")]
-            nu7: Some(expected_nu7),
+            #[cfg(zcash_unstable = "nu6.3")]
+            nu6_3: Some(expected_nu6_3),
             #[cfg(zcash_unstable = "zfuture")]
             z_future: Some(expected_z_future),
         };

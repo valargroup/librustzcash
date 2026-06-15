@@ -27,7 +27,7 @@ jobs:
           - Orchard
           - all-pools
           - all-features
-          - NU7
+          - NU6.3
 
         include:
           - target: Linux
@@ -45,9 +45,9 @@ jobs:
             all-pools: true
           - state: all-features
             all-features: true
-          - state: NU7
+          - state: NU6.3
             all-features: true
-            rustflags: '--cfg zcash_unstable="nu7"'
+            rustflags: '--cfg zcash_unstable="nu6.3"'
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -92,7 +92,7 @@ jobs:
           - Orchard
           - all-pools
           - all-features
-          - NU7
+          - NU6.3
 
         include:
           - target: macOS
@@ -108,15 +108,15 @@ jobs:
             all-pools: true
           - state: all-features
             all-features: true
-          - state: NU7
+          - state: NU6.3
             all-features: true
-            rustflags: '--cfg zcash_unstable="nu7"'
+            rustflags: '--cfg zcash_unstable="nu6.3"'
 
         exclude:
           - target: macOS
             state: all-features
           - target: macOS
-            state: NU7
+            state: NU6.3
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -159,7 +159,7 @@ jobs:
           - Sapling-only
           - Orchard
           - all-features
-          - NU7
+          - NU6.3
 
         include:
           - target: Linux
@@ -171,9 +171,9 @@ jobs:
             orchard-pool: true
           - state: all-features
             all-features: true
-          - state: NU7
+          - state: NU6.3
             all-features: true
-            rustflags: '--cfg zcash_unstable="nu7"'
+            rustflags: '--cfg zcash_unstable="nu6.3"'
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
