@@ -420,6 +420,15 @@ pub(crate) fn scan_cached_blocks_recovers_internal_change_for_unmined_non_expiri
     )
 }
 
+pub(crate) fn scan_cached_blocks_recovers_internal_change_after_mined_status_update<
+    T: ShieldedPoolTester,
+>() {
+    zcash_client_backend::data_api::testing::pool::scan_cached_blocks_recovers_internal_change_after_mined_status_update::<
+        T,
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
+}
+
 pub(crate) fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::scan_cached_blocks_detects_spends_out_of_order::<
         T,

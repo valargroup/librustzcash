@@ -516,6 +516,21 @@ mod tests {
     }
 
     #[test]
+    fn scan_cached_blocks_recovers_internal_change_after_mined_sapling_status_update() {
+        testing::pool::scan_cached_blocks_recovers_internal_change_after_mined_status_update::<
+            SaplingPoolTester,
+        >()
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn scan_cached_blocks_recovers_internal_change_after_mined_orchard_status_update() {
+        testing::pool::scan_cached_blocks_recovers_internal_change_after_mined_status_update::<
+            OrchardPoolTester,
+        >()
+    }
+
+    #[test]
     fn scan_cached_blocks_detects_spends_out_of_order_sapling() {
         testing::pool::scan_cached_blocks_detects_spends_out_of_order::<SaplingPoolTester>()
     }
