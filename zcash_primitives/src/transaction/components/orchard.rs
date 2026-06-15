@@ -9,7 +9,7 @@ use nonempty::NonEmpty;
 
 use orchard::{
     Action, Anchor,
-    bundle::{Authorization, Authorized, Flags, ProofSizeEnforcement},
+    bundle::{Authorization, Authorized, BundleFormat, Flags, ProofSizeEnforcement},
     note::{ExtractedNoteCommitment, Nullifier, TransmittedNoteCiphertext},
     primitives::redpallas::{self, SigType, Signature, SpendAuth, VerificationKey},
     value::ValueCommitment,
@@ -47,17 +47,17 @@ impl MapAuth<Authorized, Authorized> for () {
     }
 }
 
-/// Reads an [`orchard::Bundle`] from a v5 transaction format.
-pub fn read_v5_bundle<R: Read>(
+fn read_bundle<R: Read>(
     mut reader: R,
     proof_size_enforcement: ProofSizeEnforcement,
+    bundle_format: BundleFormat,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
     #[allow(clippy::redundant_closure)]
     let actions_without_auth = Vector::read(&mut reader, |r| read_action_without_auth(r))?;
     if actions_without_auth.is_empty() {
         Ok(None)
     } else {
-        let flags = read_flags(&mut reader)?;
+        let flags = read_flags(&mut reader, bundle_format)?;
         let value_balance = Transaction::read_amount(&mut reader)?;
         let anchor = read_anchor(&mut reader)?;
         let proof_bytes = Vector::read(&mut reader, |r| r.read_u8())?;
@@ -90,11 +90,19 @@ pub fn read_v5_bundle<R: Read>(
     }
 }
 
-#[cfg(any(zcash_unstable = "zfuture", zcash_unstable = "nu7"))]
+/// Reads an [`orchard::Bundle`] from a v5 transaction format.
+pub fn read_v5_bundle<R: Read>(
+    reader: R,
+    proof_size_enforcement: ProofSizeEnforcement,
+) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
+    read_bundle(reader, proof_size_enforcement, BundleFormat::PreNu6_3)
+}
+
+#[cfg(any(zcash_unstable = "zfuture", zcash_unstable = "nu6.3"))]
 pub fn read_v6_bundle<R: Read>(
     reader: R,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
-    read_v5_bundle(reader, ProofSizeEnforcement::Strict)
+    read_bundle(reader, ProofSizeEnforcement::Strict, BundleFormat::Nu6_3)
 }
 
 pub fn read_value_commitment<R: Read>(mut reader: R) -> io::Result<ValueCommitment> {
@@ -170,10 +178,10 @@ pub fn read_action_without_auth<R: Read>(mut reader: R) -> io::Result<Action<()>
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-pub fn read_flags<R: Read>(mut reader: R) -> io::Result<Flags> {
+pub fn read_flags<R: Read>(mut reader: R, bundle_format: BundleFormat) -> io::Result<Flags> {
     let mut byte = [0u8; 1];
     reader.read_exact(&mut byte)?;
-    Flags::from_byte(byte[0])
+    Flags::from_byte(byte[0], bundle_format)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid Orchard flags"))
 }
 
@@ -190,17 +198,23 @@ pub fn read_signature<R: Read, T: SigType>(mut reader: R) -> io::Result<Signatur
     Ok(Signature::from(bytes))
 }
 
-/// Writes an [`orchard::Bundle`] in the v5 transaction format.
-pub fn write_v5_bundle<W: Write>(
+fn write_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     mut writer: W,
+    bundle_format: BundleFormat,
 ) -> io::Result<()> {
     if let Some(bundle) = &bundle {
         Vector::write_nonempty(&mut writer, bundle.actions(), |w, a| {
             write_action_without_auth(w, a)
         })?;
 
-        writer.write_all(&[bundle.flags().to_byte()])?;
+        let flags = bundle.flags().to_byte(bundle_format).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Orchard flags cannot be encoded in this transaction format",
+            )
+        })?;
+        writer.write_all(&[flags])?;
         writer.write_all(&bundle.value_balance().to_i64_le_bytes())?;
         writer.write_all(&bundle.anchor().to_bytes())?;
         Vector::write(
@@ -223,12 +237,20 @@ pub fn write_v5_bundle<W: Write>(
     Ok(())
 }
 
-#[cfg(any(zcash_unstable = "zfuture", zcash_unstable = "nu7"))]
+/// Writes an [`orchard::Bundle`] in the v5 transaction format.
+pub fn write_v5_bundle<W: Write>(
+    bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
+    writer: W,
+) -> io::Result<()> {
+    write_bundle(bundle, writer, BundleFormat::PreNu6_3)
+}
+
+#[cfg(any(zcash_unstable = "zfuture", zcash_unstable = "nu6.3"))]
 pub fn write_v6_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     writer: W,
 ) -> io::Result<()> {
-    write_v5_bundle(bundle, writer)
+    write_bundle(bundle, writer, BundleFormat::Nu6_3)
 }
 
 pub fn write_value_commitment<W: Write>(mut writer: W, cv: &ValueCommitment) -> io::Result<()> {

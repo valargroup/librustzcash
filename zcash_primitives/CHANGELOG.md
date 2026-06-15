@@ -13,10 +13,40 @@ workspace.
 ### Added
 - `zcash_primitives::block::Block::from_parts` (behind the `test-dependencies`
   feature flag).
+- `zcash_primitives::transaction`:
+  - `TxVersion::V6`, the NU6.3 transaction format supporting Transparent,
+    Sapling, Orchard, and Ironwood bundles.
+  - `TransactionData::from_parts_v6`, for constructing v6 transactions with
+    separate Orchard and Ironwood bundles.
+  - `TransactionData::ironwood_bundle`, for accessing the Ironwood bundle on a
+    transaction.
+  - `TxDigests::ironwood_digest`, for carrying the Ironwood bundle digest.
+  - `TransactionDigest::{IronwoodDigest, digest_ironwood}`, for digest
+    implementations that commit to Ironwood bundles.
+- `zcash_primitives::transaction::builder`:
+  - `BuildConfig::Standard::ironwood_anchor`, enabling callers to provide the
+    anchor for the separate Ironwood note commitment tree.
+  - `Builder::add_ironwood_spend` and `Builder::add_ironwood_output`, which
+    build Ironwood actions using the Ironwood note plaintext format.
+  - `Builder::add_orchard_change_output` and
+    `Builder::add_ironwood_change_output`, which add wallet-controlled retained
+    value outputs for Orchard and Ironwood bundles.
+  - `Builder::with_expiry_height`, enabling callers to override the default
+    transaction expiry height when constructing transactions or PCZTs.
+  - `Error::CoinbaseExpiryHeightMismatch`, returned when a coinbase builder's
+    expiry height does not match its target block height.
+  - `BuildResult::ironwood_meta`, which exposes the randomized action
+    positions for Ironwood bundles.
+  - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
+    Ironwood PCZT bundle data and randomized action positions.
 
 ### Changed
-
-### Fixed
+- `zcash_primitives::transaction::builder`:
+  - NU6.3 coinbase builders no longer expose Orchard outputs.
+  - `Builder::add_orchard_spend` and `Builder::add_ironwood_spend` now
+    explicitly enforce their note-version requirements.
+- `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest
+  implementations can distinguish Orchard commitments by transaction format.
 
 ## [0.28.0] - 2026-06-02
 
@@ -42,7 +72,6 @@ workspace.
   arbitrary data (GHSA-2x4w-pxqw-58v9). Proof-size enforcement is `Strict` for
   transactions parsed under NU6.2 and later consensus branches, and `Unenforced`
   for earlier branches to preserve the ability to parse historical transactions.
-
 ## [0.27.1] - 2026-05-14
 
 ### Fixed
@@ -193,8 +222,8 @@ workspace.
   `test-dependencies` feature to provide access to test vectors.
 
 ### Changed
-- This release provides pre-release support for some planned Network Upgrade 7
-  features under the `zcash_unstable=nu7` configuration flag. This
+- This release provides pre-release support for some planned Ironwood / NU6.3
+  features under the `zcash_unstable="nu6.3"` configuration flag. This
   configuration flag guards SemVer-breaking changes that will appear in a
   future `zcash_primitives` release.
 

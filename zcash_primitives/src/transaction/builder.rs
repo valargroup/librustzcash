@@ -80,6 +80,19 @@ impl<FE: fmt::Display> fmt::Display for FeeError<FE> {
     }
 }
 
+fn orchard_action_count_error(err: orchard::BundleActionCountError) -> &'static str {
+    match err {
+        orchard::BundleActionCountError::InputCountOverflow => "Orchard action count overflowed.",
+        orchard::BundleActionCountError::SpendsDisabled => {
+            "Spends are disabled, so num_spends must be zero."
+        }
+        orchard::BundleActionCountError::OutputsDisabled => {
+            "Outputs are disabled, so num_outputs must be zero."
+        }
+        _ => "Bundle action count could not be computed.",
+    }
+}
+
 /// Errors that can occur during transaction construction.
 #[derive(Debug)]
 pub enum Error<FE> {
@@ -245,6 +258,47 @@ pub enum BuildConfig {
     },
 }
 
+/// Rules for constructing an Orchard bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrchardBuilderConfig {
+    /// Construct a standard transactional bundle using the given protocol.
+    Transactional(orchard::BundleProtocol),
+    /// Construct a coinbase bundle using the given protocol.
+    Coinbase(orchard::BundleProtocol),
+}
+
+impl OrchardBuilderConfig {
+    fn builder(self, anchor: orchard::Anchor) -> orchard::builder::Builder {
+        match self {
+            OrchardBuilderConfig::Transactional(protocol) => {
+                orchard::builder::Builder::new(protocol, anchor)
+            }
+            OrchardBuilderConfig::Coinbase(protocol) => {
+                orchard::builder::Builder::new_coinbase(protocol, anchor)
+            }
+        }
+    }
+
+    fn action_count(
+        self,
+        num_spends: usize,
+        num_outputs: usize,
+    ) -> Result<usize, orchard::BundleActionCountError> {
+        match self {
+            OrchardBuilderConfig::Transactional(protocol) => {
+                protocol.transactional_action_count(num_spends, num_outputs)
+            }
+            OrchardBuilderConfig::Coinbase(protocol) => {
+                if num_spends > 0 {
+                    Err(orchard::BundleActionCountError::SpendsDisabled)
+                } else {
+                    Ok(protocol.coinbase_action_count(num_outputs))
+                }
+            }
+        }
+    }
+}
+
 impl BuildConfig {
     /// Returns the Sapling bundle type and anchor for this configuration.
     pub fn sapling_builder_config(
@@ -262,15 +316,16 @@ impl BuildConfig {
     }
 
     /// Returns the Orchard bundle type and anchor for this configuration.
-    pub fn orchard_builder_config(
-        &self,
-    ) -> Option<(orchard::builder::BundleType, orchard::Anchor)> {
+    pub fn orchard_builder_config(&self) -> Option<(OrchardBuilderConfig, orchard::Anchor)> {
         match self {
-            BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor
-                .as_ref()
-                .map(|a| (orchard::builder::BundleType::DEFAULT, *a)),
+            BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor.as_ref().map(|a| {
+                (
+                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::LegacyOrchard),
+                    *a,
+                )
+            }),
             BuildConfig::Coinbase { .. } => Some((
-                orchard::builder::BundleType::Coinbase,
+                OrchardBuilderConfig::Coinbase(orchard::BundleProtocol::LegacyOrchard),
                 orchard::Anchor::empty_tree(),
             )),
         }
@@ -343,10 +398,7 @@ pub struct Builder<'a, P, U> {
     build_config: BuildConfig,
     target_height: BlockHeight,
     expiry_height: BlockHeight,
-    #[cfg(all(
-        any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-        feature = "zip-233"
-    ))]
+    #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
     zip233_amount: Zatoshis,
     transparent_builder: TransparentBuilder,
     sapling_builder: Option<sapling::builder::Builder>,
@@ -463,7 +515,7 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
         let orchard_builder = if params.is_nu_active(NetworkUpgrade::Nu5, target_height) {
             build_config
                 .orchard_builder_config()
-                .map(|(bundle_type, anchor)| orchard::builder::Builder::new(bundle_type, anchor))
+                .map(|(builder_config, anchor)| builder_config.builder(anchor))
         } else {
             None
         };
@@ -504,10 +556,7 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
             build_config,
             target_height,
             expiry_height,
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             zip233_amount: Zatoshis::ZERO,
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder,
@@ -538,10 +587,7 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
             build_config: self.build_config,
             target_height: self.target_height,
             expiry_height: self.expiry_height,
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             zip233_amount: self.zip233_amount,
             transparent_builder: self.transparent_builder,
             sapling_builder: self.sapling_builder,
@@ -691,10 +737,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                         .map_err(|_| BalanceError::Overflow)
                 },
             )?,
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             -ZatBalance::from(self.zip233_amount),
             #[cfg(zcash_unstable = "zfuture")]
             self.tze_builder.value_balance()?,
@@ -740,14 +783,17 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                             .num_outputs(sapling_spends, builder.outputs().len())
                             .map_err(FeeError::Bundle)
                     })?,
-                self.orchard_builder
-                    .as_ref()
-                    .zip(self.build_config.orchard_builder_config())
-                    .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                        bundle_type
-                            .num_actions(builder.spends().len(), builder.outputs().len())
-                            .map_err(FeeError::Bundle)
-                    })?,
+                self.orchard_builder.as_ref().map_or(Ok(0), |builder| {
+                    let builder_config = if self.build_config.is_coinbase() {
+                        OrchardBuilderConfig::Coinbase(builder.protocol())
+                    } else {
+                        OrchardBuilderConfig::Transactional(builder.protocol())
+                    };
+
+                    builder_config
+                        .action_count(builder.spends().len(), builder.outputs().len())
+                        .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
+                })?,
             )
             .map_err(FeeError::FeeRule)
     }
@@ -786,24 +832,24 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                             .num_outputs(sapling_spends, builder.outputs().len())
                             .map_err(FeeError::Bundle)
                     })?,
-                self.orchard_builder
-                    .as_ref()
-                    .zip(self.build_config.orchard_builder_config())
-                    .map_or(Ok(0), |(builder, (bundle_type, _))| {
-                        bundle_type
-                            .num_actions(builder.spends().len(), builder.outputs().len())
-                            .map_err(FeeError::Bundle)
-                    })?,
+                self.orchard_builder.as_ref().map_or(Ok(0), |builder| {
+                    let builder_config = if self.build_config.is_coinbase() {
+                        OrchardBuilderConfig::Coinbase(builder.protocol())
+                    } else {
+                        OrchardBuilderConfig::Transactional(builder.protocol())
+                    };
+
+                    builder_config
+                        .action_count(builder.spends().len(), builder.outputs().len())
+                        .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
+                })?,
                 self.tze_builder.inputs(),
                 self.tze_builder.outputs(),
             )
             .map_err(FeeError::FeeRule)
     }
 
-    #[cfg(all(
-        any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-        feature = "zip-233"
-    ))]
+    #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
     pub fn set_zip233_amount(&mut self, zip233_amount: Zatoshis) {
         self.zip233_amount = zip233_amount;
     }
@@ -1088,10 +1134,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             consensus_branch_id: self.consensus_branch_id,
             lock_time: 0,
             expiry_height: self.expiry_height,
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             zip233_amount: self.zip233_amount,
             transparent_bundle,
             // We don't support constructing Sprout bundles.
@@ -1106,6 +1149,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             sprout_bundle: None,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood_bundle: None,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };
@@ -1149,14 +1194,14 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
         let orchard_bundle = unauthed_tx
             .orchard_bundle
             .map(|b| {
-                b.create_proof(&orchard::circuit::ProvingKey::build(), &mut rng)
-                    .and_then(|b| {
-                        b.apply_signatures(
-                            &mut rng,
-                            *shielded_sig_commitment.as_ref(),
-                            orchard_saks,
-                        )
-                    })
+                let circuit_version = b.circuit_version();
+                b.create_proof(
+                    &orchard::circuit::ProvingKey::build(circuit_version),
+                    &mut rng,
+                )
+                .and_then(|b| {
+                    b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), orchard_saks)
+                })
             })
             .transpose()
             .map_err(Error::OrchardBuild)?;
@@ -1166,15 +1211,14 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<'_, 
             consensus_branch_id: unauthed_tx.consensus_branch_id,
             lock_time: unauthed_tx.lock_time,
             expiry_height: unauthed_tx.expiry_height,
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             zip233_amount: unauthed_tx.zip233_amount,
             transparent_bundle,
             sprout_bundle: unauthed_tx.sprout_bundle,
             sapling_bundle,
             orchard_bundle,
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood_bundle: None,
             #[cfg(zcash_unstable = "zfuture")]
             tze_bundle,
         };
@@ -1427,10 +1471,7 @@ mod tests {
             },
             target_height: sapling_activation_height,
             expiry_height: sapling_activation_height + DEFAULT_TX_EXPIRY_DELTA,
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             zip233_amount: Zatoshis::ZERO,
             transparent_builder: TransparentBuilder::empty(),
             sapling_builder: None,
@@ -1603,7 +1644,7 @@ mod tests {
 
         // Fail if there is only a burn
         // 0.0005 burned, 0.0001 t-ZEC fee
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
         {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
@@ -1665,7 +1706,7 @@ mod tests {
 
         // Fail if there is insufficient input
         // 0.0003 z-ZEC out, 0.00005 t-ZEC out, 0.0001 burned, 0.00015 t-ZEC fee, 0.00059999 z-ZEC in
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
         {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),
@@ -1758,7 +1799,7 @@ mod tests {
 
         // Succeeds if there is sufficient input
         // 0.0003 z-ZEC out, 0.00005 t-ZEC out, 0.0001 burned, 0.00015 t-ZEC fee, 0.0006 z-ZEC in
-        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
         {
             let build_config = BuildConfig::Standard {
                 sapling_anchor: Some(witness1.root().into()),

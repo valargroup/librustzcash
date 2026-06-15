@@ -3,9 +3,9 @@ use proptest::prelude::*;
 #[cfg(test)]
 use {
     crate::transaction::{
-        Authorization, Transaction, TransactionData, TxDigests, TxIn, sighash::SignableInput,
-        sighash_v4::v4_signature_hash, sighash_v5::v5_signature_hash, testing::arb_tx, transparent,
-        txid::TxIdDigester,
+        Authorization, Transaction, TransactionData, TxDigests, TxIn, TxVersion,
+        sighash::SignableInput, sighash_v4::v4_signature_hash, sighash_v5::v5_signature_hash,
+        testing::arb_tx, transparent, txid::TxIdDigester,
     },
     ::transparent::{
         address::Script, sighash::SighashType, sighash::TransparentAuthorizingContext,
@@ -17,11 +17,17 @@ use {
     zcash_script::script,
 };
 
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+use crate::transaction::sighash_v6::v6_signature_hash;
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+use blake2b_simd::Params;
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+use zcash_protocol::value::ZatBalance;
+
 #[cfg(all(test, zcash_unstable = "zfuture"))]
 use super::components::tze;
-
-#[cfg(all(test, zcash_unstable = "nu7", feature = "zip-233"))]
-use super::sighash_v6::v6_signature_hash;
 
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod data;
@@ -38,6 +44,383 @@ fn tx_read_write() {
     let mut encoded = Vec::with_capacity(data.len());
     tx.write(&mut encoded).unwrap();
     assert_eq!(&data[..], &encoded[..]);
+}
+
+#[test]
+fn suggested_version_for_v5_branches_is_not_v6() {
+    assert_eq!(
+        TxVersion::suggested_for_branch(BranchId::Nu5),
+        TxVersion::V5
+    );
+    assert_eq!(
+        TxVersion::suggested_for_branch(BranchId::Nu6),
+        TxVersion::V5
+    );
+    assert_eq!(
+        TxVersion::suggested_for_branch(BranchId::Nu6_1),
+        TxVersion::V5
+    );
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v5_auth_commitment_in_nu6_3_does_not_include_ironwood_digest() {
+    fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
+        Params::new().hash_length(32).personal(personal).hash(&[])
+    }
+
+    let mut personal = [0; 16];
+    personal[..12].copy_from_slice(b"ZTxAuthHash_");
+    personal[12..].copy_from_slice(&u32::from(BranchId::Nu6_3).to_le_bytes());
+
+    let mut expected = Params::new().hash_length(32).personal(&personal).to_state();
+    expected.update(empty_hash(b"ZTxAuthTransHash").as_bytes());
+    expected.update(empty_hash(b"ZTxAuthSapliHash").as_bytes());
+    expected.update(empty_hash(b"ZTxAuthOrchaHash").as_bytes());
+
+    let tx = TransactionData::from_parts(
+        TxVersion::V5,
+        BranchId::Nu6_3,
+        0,
+        0u32.into(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap();
+
+    assert_eq!(tx.auth_commitment(), expected.finalize());
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v6_empty_orchard_txid_uses_standard_orchard_personalization() {
+    fn empty_hash(personal: &[u8; 16]) -> Blake2bHash {
+        Params::new().hash_length(32).personal(personal).hash(&[])
+    }
+
+    let tx_data =
+        TransactionData::from_parts_v6(BranchId::Nu6_3, 0, 0u32.into(), None, None, None, None);
+    let txid_parts = tx_data.digest(TxIdDigester);
+    let tx = tx_data.freeze().unwrap();
+
+    assert!(txid_parts.orchard_digest.is_none());
+    assert!(txid_parts.ironwood_digest.is_none());
+
+    let mut personal = [0; 16];
+    personal[..12].copy_from_slice(b"ZcashTxHash_");
+    personal[12..].copy_from_slice(&u32::from(BranchId::Nu6_3).to_le_bytes());
+
+    let mut expected = Params::new().hash_length(32).personal(&personal).to_state();
+    expected.update(txid_parts.header_digest.as_bytes());
+    expected.update(empty_hash(b"ZTxIdTranspaHash").as_bytes());
+    expected.update(empty_hash(b"ZTxIdSaplingHash").as_bytes());
+    expected.update(empty_hash(b"ZTxIdOrchardHash").as_bytes());
+    expected.update(empty_hash(b"ZTxIdIronwd_Hash").as_bytes());
+
+    let expected = expected.finalize();
+    assert_eq!(&tx.txid().as_ref()[..], expected.as_bytes());
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v6_branch_reconstruction_preserves_ironwood_bundle() {
+    use proptest::{strategy::ValueTree, test_runner::TestRunner};
+
+    let mut runner = TestRunner::default();
+    let ironwood_bundle = crate::transaction::components::orchard::testing::arb_bundle(1)
+        .new_tree(&mut runner)
+        .unwrap()
+        .current();
+    let tx = TransactionData::from_parts_v6(
+        BranchId::Nu6_3,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(ironwood_bundle),
+    )
+    .freeze()
+    .unwrap();
+
+    let original_txid = tx.txid();
+    let mut tx_bytes = vec![];
+    tx.write(&mut tx_bytes).unwrap();
+
+    let tx_data = Transaction::read(&tx_bytes[..], BranchId::Sprout)
+        .unwrap()
+        .into_data();
+
+    let legacy_rebuilt = TransactionData::from_parts(
+        tx_data.version(),
+        tx_data.consensus_branch_id(),
+        tx_data.lock_time(),
+        tx_data.expiry_height(),
+        tx_data.transparent_bundle().cloned(),
+        tx_data.sprout_bundle().cloned(),
+        tx_data.sapling_bundle().cloned(),
+        tx_data.orchard_bundle().cloned(),
+    )
+    .freeze()
+    .unwrap();
+    assert!(legacy_rebuilt.ironwood_bundle().is_none());
+    assert_ne!(legacy_rebuilt.txid(), original_txid);
+
+    let rebuilt = TransactionData::from_parts_v6(
+        tx_data.consensus_branch_id(),
+        tx_data.lock_time(),
+        tx_data.expiry_height(),
+        tx_data.transparent_bundle().cloned(),
+        tx_data.sapling_bundle().cloned(),
+        tx_data.orchard_bundle().cloned(),
+        tx_data.ironwood_bundle().cloned(),
+    )
+    .freeze()
+    .unwrap();
+
+    assert!(rebuilt.ironwood_bundle().is_some());
+    assert_eq!(rebuilt.txid(), original_txid);
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn test_anchor(byte: u8) -> orchard::Anchor {
+    let mut bytes = [0u8; 32];
+    bytes[0] = byte;
+    orchard::Anchor::from_bytes(bytes).unwrap()
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn test_orchard_bundle(
+    runner: &mut proptest::test_runner::TestRunner,
+) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
+    use proptest::strategy::ValueTree;
+
+    crate::transaction::components::orchard::testing::arb_bundle(1)
+        .new_tree(runner)
+        .unwrap()
+        .current()
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn bundle_with_anchor(
+    bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+    anchor: orchard::Anchor,
+) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
+    orchard::Bundle::try_from_parts(
+        bundle.actions().clone(),
+        *bundle.flags(),
+        *bundle.value_balance(),
+        anchor,
+        bundle.authorization().clone(),
+        orchard::bundle::ProofSizeEnforcement::Strict,
+    )
+    .unwrap()
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn tx_bytes(tx: &Transaction) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    tx.write(&mut encoded).unwrap();
+    encoded
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v5_tx_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> Transaction {
+    TransactionData::<crate::transaction::Authorized>::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(orchard_bundle),
+    )
+    .freeze()
+    .unwrap()
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v5_tx_data_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> TransactionData<TestUnauthorized> {
+    TransactionData::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(orchard_bundle),
+    )
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v6_tx_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> Transaction {
+    TransactionData::<crate::transaction::Authorized>::from_parts_v6(
+        BranchId::Nu6_3,
+        0,
+        1u32.into(),
+        None,
+        None,
+        Some(orchard_bundle),
+        None,
+    )
+    .freeze()
+    .unwrap()
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v6_tx_data_with_orchard_bundle(
+    orchard_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> TransactionData<TestUnauthorized> {
+    TransactionData::from_parts_v6(
+        BranchId::Nu6_3,
+        0,
+        1u32.into(),
+        None,
+        None,
+        Some(orchard_bundle),
+        None,
+    )
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v6_tx_with_ironwood_bundle(
+    ironwood_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> Transaction {
+    TransactionData::<crate::transaction::Authorized>::from_parts_v6(
+        BranchId::Nu6_3,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(ironwood_bundle),
+    )
+    .freeze()
+    .unwrap()
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v6_tx_data_with_ironwood_bundle(
+    ironwood_bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
+) -> TransactionData<TestUnauthorized> {
+    TransactionData::from_parts_v6(
+        BranchId::Nu6_3,
+        0,
+        1u32.into(),
+        None,
+        None,
+        None,
+        Some(ironwood_bundle),
+    )
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v5_shielded_sighash(tx_data: &TransactionData<TestUnauthorized>) -> Blake2bHash {
+    let txid_parts = tx_data.digest(TxIdDigester);
+    v5_signature_hash(tx_data, &SignableInput::Shielded, &txid_parts)
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+fn v6_shielded_sighash(tx_data: &TransactionData<TestUnauthorized>) -> Blake2bHash {
+    let txid_parts = tx_data.digest(TxIdDigester);
+    v6_signature_hash(tx_data, &SignableInput::Shielded, &txid_parts)
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v6_orchard_anchor_changes_auth_commitment_not_txid_or_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let bundle = test_orchard_bundle(&mut runner);
+
+    let bundle_a = bundle_with_anchor(&bundle, test_anchor(1));
+    let bundle_b = bundle_with_anchor(&bundle, test_anchor(2));
+    let tx_data_a = v6_tx_data_with_orchard_bundle(bundle_a.clone());
+    let tx_data_b = v6_tx_data_with_orchard_bundle(bundle_b.clone());
+    let tx_a = v6_tx_with_orchard_bundle(bundle_a);
+    let tx_b = v6_tx_with_orchard_bundle(bundle_b);
+
+    assert_ne!(tx_bytes(&tx_a), tx_bytes(&tx_b));
+    assert_eq!(tx_a.txid(), tx_b.txid());
+    assert_eq!(
+        v6_shielded_sighash(&tx_data_a),
+        v6_shielded_sighash(&tx_data_b)
+    );
+    assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v6_ironwood_anchor_changes_auth_commitment_not_txid_or_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let bundle = test_orchard_bundle(&mut runner);
+
+    let bundle_a = bundle_with_anchor(&bundle, test_anchor(1));
+    let bundle_b = bundle_with_anchor(&bundle, test_anchor(2));
+    let tx_data_a = v6_tx_data_with_ironwood_bundle(bundle_a.clone());
+    let tx_data_b = v6_tx_data_with_ironwood_bundle(bundle_b.clone());
+    let tx_a = v6_tx_with_ironwood_bundle(bundle_a);
+    let tx_b = v6_tx_with_ironwood_bundle(bundle_b);
+
+    assert_ne!(tx_bytes(&tx_a), tx_bytes(&tx_b));
+    assert_eq!(tx_a.txid(), tx_b.txid());
+    assert_eq!(
+        v6_shielded_sighash(&tx_data_a),
+        v6_shielded_sighash(&tx_data_b)
+    );
+    assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v5_orchard_anchor_still_changes_txid_and_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let bundle = test_orchard_bundle(&mut runner);
+
+    let bundle_a = bundle_with_anchor(&bundle, test_anchor(1));
+    let bundle_b = bundle_with_anchor(&bundle, test_anchor(2));
+    let tx_data_a = v5_tx_data_with_orchard_bundle(bundle_a.clone());
+    let tx_data_b = v5_tx_data_with_orchard_bundle(bundle_b.clone());
+    let tx_a = v5_tx_with_orchard_bundle(bundle_a);
+    let tx_b = v5_tx_with_orchard_bundle(bundle_b);
+
+    assert_ne!(tx_a.txid(), tx_b.txid());
+    assert_ne!(
+        v5_shielded_sighash(&tx_data_a),
+        v5_shielded_sighash(&tx_data_b)
+    );
+    assert_eq!(tx_a.auth_commitment(), tx_b.auth_commitment());
+}
+
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
+#[test]
+fn v6_orchard_non_anchor_bundle_data_still_changes_txid_and_sighash() {
+    let mut runner = proptest::test_runner::TestRunner::default();
+    let anchor = test_anchor(1);
+
+    let bundle_a = bundle_with_anchor(&test_orchard_bundle(&mut runner), anchor);
+    let bundle_b = bundle_with_anchor(&test_orchard_bundle(&mut runner), anchor);
+    let tx_data_a = v6_tx_data_with_orchard_bundle(bundle_a.clone());
+    let tx_data_b = v6_tx_data_with_orchard_bundle(bundle_b.clone());
+    let tx_a = v6_tx_with_orchard_bundle(bundle_a);
+    let tx_b = v6_tx_with_orchard_bundle(bundle_b);
+
+    assert_ne!(tx_a.txid(), tx_b.txid());
+    assert_ne!(
+        v6_shielded_sighash(&tx_data_a),
+        v6_shielded_sighash(&tx_data_b)
+    );
+    assert_ne!(tx_a.auth_commitment(), tx_b.auth_commitment());
 }
 
 #[cfg(test)]
@@ -59,7 +442,12 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
         tx.orchard_bundle.as_ref().map(|v| *v.value_balance()),
         txo.orchard_bundle.as_ref().map(|v| *v.value_balance())
     );
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(all(test, zcash_unstable = "nu6.3"))]
+    prop_assert_eq!(
+        tx.ironwood_bundle.as_ref().map(|v| *v.value_balance()),
+        txo.ironwood_bundle.as_ref().map(|v| *v.value_balance())
+    );
+    #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
     if tx.version.has_zip233() {
         prop_assert_eq!(tx.zip233_amount, txo.zip233_amount);
     }
@@ -122,11 +510,11 @@ proptest! {
     }
 }
 
-#[cfg(zcash_unstable = "nu7")]
+#[cfg(all(test, zcash_unstable = "nu6.3"))]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]
-    fn tx_serialization_roundtrip_nu7(tx in arb_tx(BranchId::Nu7)) {
+    fn tx_serialization_roundtrip_nu6_3(tx in arb_tx(BranchId::Nu6_3)) {
         check_roundtrip(tx)?;
     }
 }
@@ -284,7 +672,7 @@ fn zip_0244() {
             txdata.consensus_branch_id(),
             txdata.lock_time(),
             txdata.expiry_height(),
-            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             txdata.zip233_amount,
             test_bundle,
             txdata.sprout_bundle().cloned(),
@@ -389,80 +777,6 @@ fn zip_0244() {
 
         assert_eq!(
             v5_signature_hash(&txdata, &SignableInput::Shielded, &txid_parts).as_ref(),
-            tv.sighash_shielded
-        );
-    }
-}
-
-#[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-#[test]
-fn zip_0233() {
-    fn to_test_txdata(
-        tv: &self::data::zip_0233::TestVector,
-    ) -> (TransactionData<TestUnauthorized>, TxDigests<Blake2bHash>) {
-        let tx = Transaction::read(&tv.tx[..], BranchId::Nu7).unwrap();
-
-        assert_eq!(tx.txid.as_ref(), &tv.txid);
-        assert_eq!(tx.auth_commitment().as_ref(), &tv.auth_digest);
-
-        let txdata = tx.deref();
-
-        let input_amounts = tv
-            .amounts
-            .iter()
-            .map(|amount| Zatoshis::from_nonnegative_i64(*amount).unwrap())
-            .collect();
-        let input_scriptpubkeys = tv
-            .script_pubkeys
-            .iter()
-            .map(|s| Script(script::Code(s.to_vec())))
-            .collect();
-
-        let test_bundle = txdata
-            .transparent_bundle
-            .as_ref()
-            .map(|b| transparent::Bundle {
-                // we have to do this map/clone to make the types line up, since the
-                // Authorization::ScriptSig type is bound to transparent::Authorized, and we need
-                // it to be bound to TestTransparentAuth.
-                vin: b
-                    .vin
-                    .iter()
-                    .map(|vin| {
-                        TxIn::from_parts(
-                            vin.prevout().clone(),
-                            vin.script_sig().clone(),
-                            vin.sequence(),
-                        )
-                    })
-                    .collect(),
-                vout: b.vout.clone(),
-                authorization: TestTransparentAuth {
-                    input_amounts,
-                    input_scriptpubkeys,
-                },
-            });
-
-        let tdata = TransactionData::from_parts(
-            txdata.version(),
-            txdata.consensus_branch_id(),
-            txdata.lock_time(),
-            txdata.expiry_height(),
-            txdata.zip233_amount,
-            test_bundle,
-            txdata.sprout_bundle().cloned(),
-            txdata.sapling_bundle().cloned(),
-            txdata.orchard_bundle().cloned(),
-        );
-
-        (tdata, txdata.digest(TxIdDigester))
-    }
-
-    for tv in self::data::zip_0233::TEST_VECTORS {
-        let (txdata, txid_parts) = to_test_txdata(tv);
-
-        assert_eq!(
-            v6_signature_hash(&txdata, &SignableInput::Shielded, &txid_parts).as_ref(),
             tv.sighash_shielded
         );
     }
