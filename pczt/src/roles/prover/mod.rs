@@ -41,6 +41,15 @@ impl Prover {
         !self.pczt.orchard().actions().is_empty() && self.pczt.orchard().zkproof.is_none()
     }
 
+    /// Returns `true` if this PCZT is version 6 on NU6.3 and contains Ironwood Actions
+    /// but no Ironwood proof.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn requires_ironwood_proof(&self) -> bool {
+        crate::common::ensure_v6_consensus_branch(&self.pczt.global).is_ok()
+            && !self.pczt.ironwood().actions().is_empty()
+            && self.pczt.ironwood().zkproof.is_none()
+    }
+
     /// Finishes the Prover role, returning the updated PCZT.
     pub fn finish(self) -> Pczt {
         self.pczt

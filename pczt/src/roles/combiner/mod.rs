@@ -45,6 +45,11 @@ fn merge(lhs: Pczt, rhs: Pczt) -> Result<Pczt, Error> {
         .orchard
         .merge(rhs.orchard, &lhs.global, &rhs.global)
         .ok_or(Error::DataMismatch)?;
+    #[cfg(zcash_unstable = "nu6.3")]
+    let ironwood = lhs
+        .ironwood
+        .merge(rhs.ironwood, &lhs.global, &rhs.global)
+        .ok_or(Error::DataMismatch)?;
 
     // Now that the per-protocol bundles are merged, merge the globals.
     let global = lhs.global.merge(rhs.global).ok_or(Error::DataMismatch)?;
@@ -54,6 +59,8 @@ fn merge(lhs: Pczt, rhs: Pczt) -> Result<Pczt, Error> {
         transparent,
         sapling,
         orchard,
+        #[cfg(zcash_unstable = "nu6.3")]
+        ironwood,
     })
 }
 

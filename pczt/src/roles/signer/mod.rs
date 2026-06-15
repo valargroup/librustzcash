@@ -38,6 +38,8 @@ pub struct Signer {
     transparent: transparent::pczt::Bundle,
     sapling: sapling::pczt::Bundle,
     orchard: orchard::pczt::Bundle,
+    #[cfg(zcash_unstable = "nu6.3")]
+    ironwood: orchard::pczt::Bundle,
     /// Cached across multiple signatures.
     tx_data: TransactionData<EffectsOnly>,
     txid_parts: TxDigests<Blake2bHash>,
@@ -53,6 +55,8 @@ impl Signer {
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood,
             tx_data,
         } = pczt.extract_tx_data(
             |t| {
@@ -61,6 +65,8 @@ impl Signer {
             },
             |s| s.extract_effects().map_err(ExtractError::SaplingExtract),
             |o| o.extract_effects().map_err(ExtractError::OrchardExtract),
+            #[cfg(zcash_unstable = "nu6.3")]
+            |i| i.extract_effects().map_err(ExtractError::IronwoodExtract),
         )?;
         let txid_parts = tx_data.digest(TxIdDigester);
         let shielded_sighash = sighash(&tx_data, &SignableInput::Shielded, &txid_parts);
@@ -70,6 +76,8 @@ impl Signer {
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood,
             tx_data,
             txid_parts,
             shielded_sighash,
@@ -330,13 +338,94 @@ impl Signer {
         Ok(())
     }
 
+    /// Signs the Ironwood spend at the given index with the given spend authorizing key.
+    ///
+    /// Requires the spend's `fvk` field to be set (because the API does not take an FVK).
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT before calling this method.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn sign_ironwood(
+        &mut self,
+        index: usize,
+        ask: &orchard::keys::SpendAuthorizingKey,
+    ) -> Result<(), Error> {
+        self.generate_or_apply_ironwood_signature(index, |spend, shielded_sighash| {
+            spend.sign(shielded_sighash, ask, OsRng)
+        })
+    }
+
+    /// Applies the given signature to the Ironwood spend.
+    ///
+    /// It is the caller's responsibility to perform any semantic validity checks on the
+    /// PCZT before calling this method.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn apply_ironwood_signature(
+        &mut self,
+        index: usize,
+        signature: redpallas::Signature<redpallas::SpendAuth>,
+    ) -> Result<(), Error> {
+        self.generate_or_apply_ironwood_signature(index, |action, shielded_sighash| {
+            action.apply_signature(shielded_sighash, signature)
+        })
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn generate_or_apply_ironwood_signature<F>(&mut self, index: usize, f: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut orchard::pczt::Action, [u8; 32]) -> Result<(), orchard::pczt::SignerError>,
+    {
+        let action = self
+            .ironwood
+            .actions_mut()
+            .get_mut(index)
+            .ok_or(Error::InvalidIndex)?;
+
+        // Check consistency of the input being signed if we have its note components.
+        match action.spend().verify_nullifier(None) {
+            Err(
+                orchard::pczt::VerifyError::MissingRecipient
+                | orchard::pczt::VerifyError::MissingValue
+                | orchard::pczt::VerifyError::MissingRho
+                | orchard::pczt::VerifyError::MissingRandomSeed,
+            ) => Ok(()),
+            r => r,
+        }
+        .map_err(Error::IronwoodVerify)?;
+
+        // Generate or apply the signature.
+        f(action, self.shielded_sighash).map_err(Error::IronwoodSign)?;
+
+        // Update transaction modifiability: all transaction effects have been committed
+        // to by the signature.
+        self.global.tx_modifiable &= !(FLAG_TRANSPARENT_INPUTS_MODIFIABLE
+            | FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE
+            | FLAG_SHIELDED_MODIFIABLE);
+
+        Ok(())
+    }
+
     /// Finishes the Signer role, returning the updated PCZT.
     pub fn finish(self) -> Pczt {
+        let orchard_bundle_format = crate::orchard_bundle_format(&self.global);
+
+        #[cfg(zcash_unstable = "nu6.3")]
+        let ironwood = if self.tx_data.version().has_ironwood() {
+            crate::orchard::Bundle::serialize_from(
+                self.ironwood,
+                orchard::bundle::BundleFormat::Nu6_3,
+            )
+        } else {
+            crate::empty_ironwood_bundle()
+        };
+
         Pczt {
             global: self.global,
             transparent: crate::transparent::Bundle::serialize_from(self.transparent),
             sapling: crate::sapling::Bundle::serialize_from(self.sapling),
-            orchard: crate::orchard::Bundle::serialize_from(self.orchard),
+            orchard: crate::orchard::Bundle::serialize_from(self.orchard, orchard_bundle_format),
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood,
         }
     }
 }
@@ -345,6 +434,10 @@ impl Signer {
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
+    #[cfg(zcash_unstable = "nu6.3")]
+    IronwoodSign(orchard::pczt::SignerError),
+    #[cfg(zcash_unstable = "nu6.3")]
+    IronwoodVerify(orchard::pczt::VerifyError),
     InvalidIndex,
     OrchardSign(orchard::pczt::SignerError),
     OrchardVerify(orchard::pczt::VerifyError),

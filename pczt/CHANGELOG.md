@@ -8,6 +8,45 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [Unreleased]
+
+### Added
+- Ironwood PCZT support under the NU6.3 unstable cfg, including parsing,
+  creation from builder parts, I/O finalization, proving, signing, extraction,
+  combining, redaction, verification, and updater hooks.
+- `pczt::Pczt::serialize_legacy_v1`, for serializing version 5 PCZTs in the
+  original v1 encoding when handing them to older signers.
+- `pczt::roles::updater::OrchardSpendWitness` and updater methods for setting
+  Orchard and Ironwood spend witnesses, and for setting v6 Orchard and
+  Ironwood anchors before proof creation.
+- `pczt::orchard::NotePlaintextVersion`, representing Orchard-style note
+  plaintext versions in serialized PCZT data.
+- `pczt::orchard::NotePlaintextVersionError` and
+  `pczt::orchard::BundleParseError`, used when an Orchard-shaped PCZT bundle
+  uses a note plaintext version that is invalid for its pool.
+- `pczt::orchard::Spend::note_version` and
+  `pczt::orchard::Output::note_version` getters. These fields are used to
+  reconstruct Orchard note commitments with the intended note plaintext
+  version.
+
+### Changed
+- Bumped the PCZT encoding version to 2 for serialized Orchard-style note
+  plaintext version fields.
+- Version 5 Orchard PCZTs now parse and serialize Orchard bundle flags using
+  the pre NU6.3 bundle format. Version 6 Orchard and Ironwood PCZTs continue
+  to use the NU6.3 bundle format.
+- Orchard-shaped PCZT bundles are now validated against pool-specific note
+  plaintext versions: Orchard actions require V2 and Ironwood actions require
+  V3.
+- Serialized v1 Orchard PCZT encodings continue to parse by defaulting missing
+  note plaintext versions to V2.
+
+### Fixed
+- PCZT parsing now rejects trailing bytes after v1 and v2 payloads.
+- Creator output from transaction builder parts now uses the same empty
+  Ironwood bundle fallback as legacy PCZT parsing, and rejects any supplied
+  Ironwood bundle state for transaction versions that do not support Ironwood.
+
 ## [0.7.0] - 2026-06-02
 
 ### Changed

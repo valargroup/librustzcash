@@ -11,6 +11,8 @@ impl super::Verifier {
             transparent,
             sapling,
             orchard,
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood,
         } = self.pczt;
 
         let bundle = transparent
@@ -25,6 +27,8 @@ impl super::Verifier {
                 transparent: crate::transparent::Bundle::serialize_from(bundle),
                 sapling,
                 orchard,
+                #[cfg(zcash_unstable = "nu6.3")]
+                ironwood,
             },
         })
     }
