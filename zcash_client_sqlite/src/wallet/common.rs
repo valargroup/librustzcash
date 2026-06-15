@@ -165,7 +165,11 @@ pub(crate) fn get_nullifiers<N, F: Fn(&[u8]) -> Result<N, SqliteClientError>>(
     let mut stmt_fetch_nullifiers = match query {
         NullifierQuery::Unspent => conn.prepare(&format!(
             // See the method documentation for why this does not use `spent_notes_clause`.
-            // Scan nullifiers should only exclude notes whose spend has been confirmed mined.
+            // Scan nullifiers drive wallet relevance while compact blocks are being scanned.
+            // A wallet can learn `mined_height` for a spend before it has scanned the compact
+            // block that contains it, so we keep that nullifier available until the spending
+            // transaction has been associated with a scanned block. This lets the scan detect the
+            // spend and run any targeted internal-IVK recovery needed to finish storing change.
             "SELECT a.uuid, rn.nf
                  FROM {table_prefix}_received_notes rn
                  JOIN accounts a ON a.id = rn.account_id
@@ -176,7 +180,7 @@ pub(crate) fn get_nullifiers<N, F: Fn(&[u8]) -> Result<N, SqliteClientError>>(
                    SELECT rns.{table_prefix}_received_note_id
                    FROM {table_prefix}_received_note_spends rns
                    JOIN transactions stx ON stx.id_tx = rns.transaction_id
-                   WHERE stx.mined_height IS NOT NULL  -- the spending tx is mined
+                   WHERE stx.block IS NOT NULL  -- the spending tx's block has been scanned
                  )"
         )),
         NullifierQuery::All => conn.prepare(&format!(

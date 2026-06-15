@@ -5943,6 +5943,75 @@ pub fn scan_cached_blocks_recovers_internal_change_for_unmined_non_expiring_spen
     );
 }
 
+pub fn scan_cached_blocks_recovers_internal_change_after_mined_status_update<
+    T: ShieldedPoolTester,
+    Dsf,
+>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: std::fmt::Debug,
+{
+    let mut st = TestDsl::with_sapling_birthday_account(ds_factory, cache).build::<T>();
+
+    let account = st.test_account().cloned().unwrap();
+
+    let value = Zatoshis::const_from_u64(100_000);
+    let (funding_height, _, _) = st.add_a_single_note_checking_balance(value);
+
+    let not_our_key = T::sk_to_fvk(&T::sk(&[0xf5; 32]));
+    let to = T::fvk_default_address(&not_our_key);
+    let send_value = Zatoshis::const_from_u64(20_000);
+    let req = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        send_value,
+    )])
+    .unwrap();
+
+    let input_selector = GreedyInputSelector::new();
+    let change_strategy =
+        single_output_change_strategy(StandardFeeRule::Zip317, None, T::SHIELDED_PROTOCOL);
+
+    let txid = st
+        .spend(
+            &input_selector,
+            &change_strategy,
+            account.usk(),
+            req,
+            OvkPolicy::Sender,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap()[0];
+
+    let spent_height = funding_height + 1;
+
+    // Status enhancement can learn that a transaction was mined before compact scanning reaches
+    // the containing block. The scan still needs the spent note's nullifier so it can recognize
+    // the transaction as wallet-relevant and repair the internally addressed change output.
+    st.wallet_mut()
+        .set_transaction_status(txid, data_api::TransactionStatus::Mined(spent_height))
+        .unwrap();
+
+    let (generated_spent_height, _) = st.generate_next_block_including(txid);
+    assert_eq!(generated_spent_height, spent_height);
+
+    let summary = st.scan_cached_blocks(spent_height, 1);
+
+    assert_eq!(summary.scanned_range().start, spent_height);
+    assert_eq!(summary.scanned_range().end, spent_height + 1);
+    assert_eq!(T::received_note_count(&summary), 1);
+
+    let tx_summary = st.get_tx_from_history(txid).unwrap().unwrap();
+    assert_eq!(tx_summary.spent_note_count(), 1);
+    assert!(tx_summary.has_change());
+
+    assert_eq!(
+        st.get_total_balance(account.id()),
+        (value - (send_value + MINIMUM_FEE).unwrap()).unwrap()
+    );
+}
+
 pub fn scan_cached_blocks_detects_spends_out_of_order<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
