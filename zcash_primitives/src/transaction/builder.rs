@@ -498,8 +498,23 @@ impl<P, U> Builder<'_, P, U> {
     /// added after this call.
     pub fn propose_version<FE>(&mut self, version: TxVersion) -> Result<(), Error<FE>> {
         self.check_version_compatibility(version)?;
+        #[cfg(zcash_unstable = "nu6.3")]
+        self.configure_orchard_builder_for_version(version);
         self.tx_version = version;
         Ok(())
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn configure_orchard_builder_for_version(&mut self, version: TxVersion) {
+        let protocol = if matches!(version, TxVersion::V6) {
+            orchard::BundleProtocol::Orchard
+        } else {
+            orchard::BundleProtocol::LegacyOrchard
+        };
+
+        if let Some(builder) = &mut self.orchard_builder {
+            builder.set_protocol(protocol);
+        }
     }
 }
 
@@ -512,7 +527,17 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
     /// The expiry height will be set to the given height plus the default transaction
     /// expiry delta (20 blocks).
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
-        let orchard_builder = if params.is_nu_active(NetworkUpgrade::Nu5, target_height) {
+        let consensus_branch_id = BranchId::for_height(&params, target_height);
+        let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
+        #[cfg(zcash_unstable = "nu6.3")]
+        let orchard_builder_available =
+            !(build_config.is_coinbase() && matches!(consensus_branch_id, BranchId::Nu6_3));
+        #[cfg(not(zcash_unstable = "nu6.3"))]
+        let orchard_builder_available = true;
+
+        let orchard_builder = if orchard_builder_available
+            && params.is_nu_active(NetworkUpgrade::Nu5, target_height)
+        {
             build_config
                 .orchard_builder_config()
                 .map(|(builder_config, anchor)| builder_config.builder(anchor))
@@ -545,11 +570,7 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
             target_height + DEFAULT_TX_EXPIRY_DELTA
         };
 
-        // Determine the default transaction version for the consensus branch
-        let consensus_branch_id = BranchId::for_height(&params, target_height);
-        let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
-
-        Builder {
+        let builder = Builder {
             params,
             tx_version,
             consensus_branch_id,
@@ -566,7 +587,17 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
             #[cfg(not(zcash_unstable = "zfuture"))]
             tze_builder: core::marker::PhantomData,
             _progress_notifier: (),
+        };
+
+        #[cfg(zcash_unstable = "nu6.3")]
+        {
+            let mut builder = builder;
+            builder.configure_orchard_builder_for_version(tx_version);
+            builder
         }
+
+        #[cfg(not(zcash_unstable = "nu6.3"))]
+        builder
     }
 
     /// Sets the notifier channel, where progress of building the transaction is sent.
@@ -1445,6 +1476,92 @@ mod tests {
         zcash_protocol::consensus::BranchId,
         zip32::AccountId,
     };
+
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    #[derive(Clone, Copy)]
+    struct Nu63TestNetwork;
+
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    impl zcash_protocol::consensus::Parameters for Nu63TestNetwork {
+        fn network_type(&self) -> zcash_protocol::consensus::NetworkType {
+            zcash_protocol::consensus::NetworkType::Regtest
+        }
+
+        fn activation_height(
+            &self,
+            nu: zcash_protocol::consensus::NetworkUpgrade,
+        ) -> Option<zcash_protocol::consensus::BlockHeight> {
+            use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade};
+
+            match nu {
+                NetworkUpgrade::Overwinter => Some(BlockHeight::from_u32(1)),
+                NetworkUpgrade::Sapling => Some(BlockHeight::from_u32(2)),
+                NetworkUpgrade::Blossom => Some(BlockHeight::from_u32(3)),
+                NetworkUpgrade::Heartwood => Some(BlockHeight::from_u32(4)),
+                NetworkUpgrade::Canopy => Some(BlockHeight::from_u32(5)),
+                NetworkUpgrade::Nu5 => Some(BlockHeight::from_u32(6)),
+                NetworkUpgrade::Nu6 => Some(BlockHeight::from_u32(7)),
+                NetworkUpgrade::Nu6_1 => Some(BlockHeight::from_u32(8)),
+                NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(9)),
+                NetworkUpgrade::Nu6_3 => Some(BlockHeight::from_u32(10)),
+                #[cfg(zcash_unstable = "zfuture")]
+                NetworkUpgrade::ZFuture => None,
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    fn nu6_3_standard_builder_uses_v6_orchard_protocol() {
+        let builder = Builder::new(
+            Nu63TestNetwork,
+            zcash_protocol::consensus::BlockHeight::from_u32(10),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            },
+        );
+
+        assert_eq!(builder.tx_version, crate::transaction::TxVersion::V6);
+        assert_eq!(
+            builder.orchard_builder.as_ref().map(|b| b.protocol()),
+            Some(orchard::BundleProtocol::Orchard)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    fn nu6_3_standard_builder_preserves_explicit_v5_legacy_orchard_protocol() {
+        let mut builder = Builder::new(
+            Nu63TestNetwork,
+            zcash_protocol::consensus::BlockHeight::from_u32(10),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            },
+        );
+
+        builder
+            .propose_version::<Infallible>(crate::transaction::TxVersion::V5)
+            .unwrap();
+
+        assert_eq!(
+            builder.orchard_builder.as_ref().map(|b| b.protocol()),
+            Some(orchard::BundleProtocol::LegacyOrchard)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    fn nu6_3_coinbase_builder_does_not_expose_orchard() {
+        let builder = Builder::new(
+            Nu63TestNetwork,
+            zcash_protocol::consensus::BlockHeight::from_u32(10),
+            BuildConfig::Coinbase { miner_data: None },
+        );
+
+        assert!(builder.orchard_builder.is_none());
+    }
 
     // This test only works with the transparent_inputs feature because we have to
     // be able to create a tx with a valid balance, without using Sapling inputs.
