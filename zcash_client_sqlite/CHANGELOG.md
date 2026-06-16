@@ -8,6 +8,13 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [0.22.0] - PLANNED
+
+### Fixed
+- Scanning now recovers internal change from wallet-created shielded spends
+  whose stored transaction has no expiry height, and from spends whose mined
+  status is learned before their containing block has been scanned.
+
 ## [0.21.0] - 2026-06-02
 
 ### Changed
