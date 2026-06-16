@@ -71,6 +71,7 @@ mod serialization {
                         }),
                     },
                     rho: None,
+                    orchard_note_version: None,
                 },
                 #[cfg(feature = "orchard")]
                 Note::Orchard(note) => Self {
@@ -82,6 +83,10 @@ mod serialization {
                         payload: note.rseed().as_bytes().to_vec(),
                     }),
                     rho: Some(note.rho().to_bytes().to_vec()),
+                    orchard_note_version: Some(match note.version() {
+                        orchard::note::NoteVersion::V2 => 2,
+                        orchard::note::NoteVersion::V3 => 3,
+                    }),
                 },
             }
         }
@@ -125,15 +130,14 @@ mod serialization {
                         &rho,
                     )
                     .unwrap();
+                    let note_version = match note.orchard_note_version.unwrap_or(2) {
+                        2 => orchard::note::NoteVersion::V2,
+                        3 => orchard::note::NoteVersion::V3,
+                        _ => panic!("invalid Orchard note version"),
+                    };
                     Self::Orchard(
-                        orchard::Note::from_parts(
-                            recipient,
-                            value,
-                            rho,
-                            rseed,
-                            orchard::note::NoteVersion::V2,
-                        )
-                        .unwrap(),
+                        orchard::Note::from_parts(recipient, value, rho, rseed, note_version)
+                            .unwrap(),
                     )
                 }
                 #[cfg(not(feature = "orchard"))]
@@ -165,6 +169,45 @@ mod serialization {
             let recovered: Note = proto_note.into();
 
             assert_eq!(note, recovered);
+        }
+
+        #[cfg(feature = "orchard")]
+        #[test]
+        fn orchard_note_roundtrip_preserves_note_version() {
+            let sk = orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap();
+            let recipient = orchard::keys::FullViewingKey::from(&sk)
+                .address_at(0u32, orchard::keys::Scope::External);
+            let value = orchard::value::NoteValue::from_raw(99);
+            let rho = orchard::note::Rho::from_bytes(&[1; 32]).unwrap();
+            let rseed = (0u8..=255)
+                .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
+                .expect("at least one test rseed is valid");
+            let note = Note::Orchard(
+                orchard::Note::from_parts(
+                    recipient,
+                    value,
+                    rho,
+                    rseed,
+                    orchard::note::NoteVersion::V3,
+                )
+                .unwrap(),
+            );
+
+            let proto_note: proto::Note = note.clone().into();
+            assert_eq!(proto_note.orchard_note_version, Some(3));
+            let recovered: Note = proto_note.clone().into();
+
+            assert_eq!(note, recovered);
+
+            let recovered_legacy: Note = proto::Note {
+                orchard_note_version: None,
+                ..proto_note
+            }
+            .into();
+            match recovered_legacy {
+                Note::Orchard(note) => assert_eq!(note.version(), orchard::note::NoteVersion::V2),
+                Note::Sapling(_) => panic!("expected Orchard note"),
+            }
         }
     }
 }

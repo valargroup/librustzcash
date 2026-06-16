@@ -15,6 +15,8 @@ use zcash_client_backend::data_api::{
 };
 #[cfg(feature = "transparent-inputs")]
 use zcash_client_backend::data_api::{TransparentBalances, TransparentKeyOrigin};
+#[cfg(feature = "orchard")]
+use zcash_client_backend::wallet::Note;
 use zcash_client_backend::{
     data_api::{
         Account as _, AccountBalance, AccountSource, Balance, Progress, Ratio, SeedRelevance,
@@ -24,6 +26,8 @@ use zcash_client_backend::{
     wallet::NoteId,
 };
 use zcash_keys::{address::UnifiedAddress, keys::UnifiedIncomingViewingKey};
+#[cfg(zcash_unstable = "nu6.3")]
+use zcash_primitives::transaction::TxVersion;
 use zcash_primitives::{
     block::BlockHash,
     transaction::{Transaction, TransactionData, TxId},
@@ -221,15 +225,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             if self.note_is_spent(note, target_height)? {
                 continue;
             }
-            // don't count notes in unscanned ranges
-            let unscanned_ranges = self.unscanned_ranges();
-            for (_, _, start_position, end_position_exclusive) in unscanned_ranges {
-                if note.commitment_tree_position >= start_position
-                    && note.commitment_tree_position < end_position_exclusive
-                {
-                    continue; // note is in an unscanned range. Skip it
-                }
-            }
+            let note_in_unscanned_range =
+                self.note_in_unscanned_range(note, birthday_height, chain_tip_height);
             // don't count notes in unmined transactions or that have expired
             if let Ok(Some(note_tx)) = self.get_transaction(note.txid) {
                 if note_tx.expiry_height() < BlockHeight::from(target_height) {
@@ -249,6 +246,15 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             // Given a note update the balance for the account
             // This includes determining if it is change, spendable, etc
             let update_balance_with_note = |b: &mut Balance| -> Result<(), Error> {
+                if note_in_unscanned_range {
+                    if note.is_change {
+                        b.add_pending_change_value(note.note.value())?;
+                    } else {
+                        b.add_pending_spendable_value(note.note.value())?;
+                    }
+                    return Ok(());
+                }
+
                 match (
                     self.note_is_pending(note, target_height, confirmations_policy)?,
                     note.is_change,
@@ -265,7 +271,44 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                     account_balance.with_sapling_balance_mut(update_balance_with_note)?;
                 }
                 PoolType::ORCHARD => {
-                    account_balance.with_orchard_balance_mut(update_balance_with_note)?;
+                    #[cfg(feature = "orchard")]
+                    {
+                        match &note.note {
+                            Note::Orchard(orchard_note)
+                                if orchard_note.version() == orchard::note::NoteVersion::V3 =>
+                            {
+                                #[cfg(zcash_unstable = "nu6.3")]
+                                account_balance
+                                    .with_ironwood_balance_mut(update_balance_with_note)?;
+                                #[cfg(not(zcash_unstable = "nu6.3"))]
+                                account_balance.with_ironwood_balance_mut(
+                                    |b: &mut Balance| -> Result<(), Error> {
+                                        if self.note_is_pending(
+                                            note,
+                                            target_height,
+                                            confirmations_policy,
+                                        )? && note.is_change
+                                        {
+                                            b.add_pending_change_value(note.note.value())?;
+                                        } else {
+                                            b.add_pending_spendable_value(note.note.value())?;
+                                        }
+
+                                        Ok(())
+                                    },
+                                )?;
+                            }
+                            Note::Orchard(_) => {
+                                account_balance
+                                    .with_orchard_balance_mut(update_balance_with_note)?;
+                            }
+                            _ => unimplemented!("Unknown pool type"),
+                        }
+                    }
+                    #[cfg(not(feature = "orchard"))]
+                    {
+                        unimplemented!("Unknown pool type")
+                    }
                 }
                 _ => unimplemented!("Unknown pool type"),
             }
@@ -298,6 +341,14 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             .map(|s| s.root_addr().index())
             .unwrap_or(0);
 
+        #[cfg(feature = "orchard")]
+        let next_ironwood_subtree_index = self
+            .ironwood_tree
+            .store()
+            .last_shard()?
+            .map(|s| s.root_addr().index())
+            .unwrap_or(0);
+
         // Treat Sapling and Orchard outputs as having the same cost to scan.
         let sapling_scan_progress =
             self.sapling_scan_progress(&birthday_height, &fully_scanned_height, &chain_tip_height)?;
@@ -306,17 +357,31 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             self.orchard_scan_progress(&birthday_height, &fully_scanned_height, &chain_tip_height)?;
         #[cfg(not(feature = "orchard"))]
         let orchard_scan_progress: Option<Ratio<u64>> = None;
+        #[cfg(feature = "orchard")]
+        let ironwood_scan_progress = self.ironwood_scan_progress(
+            &birthday_height,
+            &fully_scanned_height,
+            &chain_tip_height,
+        )?;
+        #[cfg(not(feature = "orchard"))]
+        let ironwood_scan_progress: Option<Ratio<u64>> = None;
 
-        let scan_progress = sapling_scan_progress
-            .zip(orchard_scan_progress)
-            .map(|(s, o)| {
-                Ratio::new(
-                    s.numerator() + o.numerator(),
-                    s.denominator() + o.denominator(),
-                )
-            })
-            .or(sapling_scan_progress)
-            .or(orchard_scan_progress);
+        fn combine_progress(a: Option<Ratio<u64>>, b: Option<Ratio<u64>>) -> Option<Ratio<u64>> {
+            a.zip(b)
+                .map(|(a, b)| {
+                    Ratio::new(
+                        a.numerator() + b.numerator(),
+                        a.denominator() + b.denominator(),
+                    )
+                })
+                .or(a)
+                .or(b)
+        }
+
+        let scan_progress = combine_progress(
+            combine_progress(sapling_scan_progress, orchard_scan_progress),
+            ironwood_scan_progress,
+        );
 
         // TODO: This won't work
         let scan_progress = Progress::new(scan_progress.unwrap(), Some(Ratio::new(0, 0)));
@@ -329,6 +394,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
             next_sapling_subtree_index,
             #[cfg(feature = "orchard")]
             next_orchard_subtree_index,
+            #[cfg(feature = "orchard")]
+            next_ironwood_subtree_index,
         );
         Ok(Some(summary))
     }
@@ -362,6 +429,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 sapling_commitment_tree_size,
                 #[cfg(feature = "orchard")]
                 orchard_commitment_tree_size,
+                #[cfg(feature = "orchard")]
+                ironwood_commitment_tree_size,
                 ..
             } = block;
             // TODO: Deal with legacy sapling trees
@@ -371,6 +440,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 *sapling_commitment_tree_size,
                 #[cfg(feature = "orchard")]
                 *orchard_commitment_tree_size,
+                #[cfg(feature = "orchard")]
+                *ironwood_commitment_tree_size,
             )
         }))
     }
@@ -451,20 +522,8 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
         min_confirmations: NonZeroU32,
     ) -> Result<Option<(TargetHeight, BlockHeight)>, Self::Error> {
         if let Some(chain_tip_height) = self.chain_height()? {
-            let sapling_anchor_height =
-                self.get_sapling_max_checkpointed_height(chain_tip_height, min_confirmations)?;
-
-            #[cfg(feature = "orchard")]
-            let orchard_anchor_height =
-                self.get_orchard_max_checkpointed_height(chain_tip_height, min_confirmations)?;
-            #[cfg(not(feature = "orchard"))]
-            let orchard_anchor_height: Option<BlockHeight> = None;
-
-            let anchor_height = sapling_anchor_height
-                .zip(orchard_anchor_height)
-                .map(|(s, o)| std::cmp::min(s, o))
-                .or(sapling_anchor_height)
-                .or(orchard_anchor_height);
+            let anchor_height =
+                self.get_max_shared_checkpointed_height(chain_tip_height, min_confirmations)?;
 
             Ok(anchor_height.map(|h| (TargetHeight::from(chain_tip_height + 1), h)))
         } else {
@@ -543,22 +602,50 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
 
                 let expiry_height = tx_data.expiry_height();
                 if expiry_height > BlockHeight::from(0) {
-                    Ok(TransactionData::from_parts(
+                    let consensus_branch_id = BranchId::for_height(&self.params, expiry_height);
+                    #[cfg(zcash_unstable = "nu6.3")]
+                    let tx = if tx_data.version() == TxVersion::V6 {
+                        TransactionData::from_parts_v6(
+                            consensus_branch_id,
+                            tx_data.lock_time(),
+                            expiry_height,
+                            tx_data.transparent_bundle().cloned(),
+                            tx_data.sapling_bundle().cloned(),
+                            tx_data.orchard_bundle().cloned(),
+                            tx_data.ironwood_bundle().cloned(),
+                        )
+                        .freeze()
+                    } else {
+                        TransactionData::from_parts(
+                            tx_data.version(),
+                            consensus_branch_id,
+                            tx_data.lock_time(),
+                            expiry_height,
+                            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
+                            tx_data.zip233_amount(),
+                            tx_data.transparent_bundle().cloned(),
+                            tx_data.sprout_bundle().cloned(),
+                            tx_data.sapling_bundle().cloned(),
+                            tx_data.orchard_bundle().cloned(),
+                        )
+                        .freeze()
+                    };
+                    #[cfg(not(zcash_unstable = "nu6.3"))]
+                    let tx = TransactionData::from_parts(
                         tx_data.version(),
-                        BranchId::for_height(&self.params, expiry_height),
+                        consensus_branch_id,
                         tx_data.lock_time(),
                         expiry_height,
-                        #[cfg(all(
-                            any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                            feature = "zip-233"
-                        ))]
+                        #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
                         tx_data.zip233_amount(),
                         tx_data.transparent_bundle().cloned(),
                         tx_data.sprout_bundle().cloned(),
                         tx_data.sapling_bundle().cloned(),
                         tx_data.orchard_bundle().cloned(),
                     )
-                        .freeze()?)
+                    .freeze();
+
+                    Ok(tx?)
                 } else {
                     Err(Self::Error::CorruptedData(
                         "Consensus branch ID not known, cannot parse this transaction until it is mined"

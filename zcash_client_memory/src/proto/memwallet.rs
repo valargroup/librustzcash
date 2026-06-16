@@ -138,6 +138,8 @@ pub struct Note {
     pub rho: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, optional, tag = "5")]
     pub rseed: ::core::option::Option<RSeed>,
+    #[prost(uint32, optional, tag = "6")]
+    pub orchard_note_version: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RSeed {
@@ -433,6 +435,12 @@ pub struct MemoryWallet {
     /// the block heights corresponding to the last note commitment for each shard in the orchard tree
     #[prost(message, repeated, tag = "14")]
     pub orchard_tree_shard_end_heights: ::prost::alloc::vec::Vec<TreeEndHeightsRecord>,
+    /// Ironwood shielded pool shard tree
+    #[prost(message, optional, tag = "19")]
+    pub ironwood_tree: ::core::option::Option<ShardTree>,
+    /// the block heights corresponding to the last note commitment for each shard in the ironwood tree
+    #[prost(message, repeated, tag = "20")]
+    pub ironwood_tree_shard_end_heights: ::prost::alloc::vec::Vec<TreeEndHeightsRecord>,
     /// UTXOs known to this wallet
     #[prost(message, repeated, tag = "15")]
     pub transparent_received_outputs: ::prost::alloc::vec::Vec<
@@ -548,6 +556,8 @@ pub struct ChainState {
     pub final_sapling_tree: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "4")]
     pub final_orchard_tree: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub final_ironwood_tree: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WalletBlock {
@@ -578,6 +588,12 @@ pub struct WalletBlock {
     /// the number of Orchard actions in this block
     #[prost(uint32, optional, tag = "9")]
     pub orchard_action_count: ::core::option::Option<u32>,
+    /// the size of the Ironwood note commitment tree as of the end of this block
+    #[prost(uint32, optional, tag = "10")]
+    pub ironwood_commitment_tree_size: ::core::option::Option<u32>,
+    /// the number of Ironwood actions in this block
+    #[prost(uint32, optional, tag = "11")]
+    pub ironwood_action_count: ::core::option::Option<u32>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TransactionEntry {

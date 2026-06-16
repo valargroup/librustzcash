@@ -453,6 +453,8 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
         Some(0),
         #[cfg(feature = "orchard")]
         Some(0),
+        #[cfg(feature = "orchard")]
+        Some(0),
     );
 
     // Phase 1: decrypt the block's shielded outputs.
@@ -3689,6 +3691,8 @@ pub fn birthday_in_anchor_shard<T: ShieldedPoolTester>(
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -4607,6 +4611,8 @@ pub fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester, Dsf>(
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -4751,6 +4757,8 @@ pub fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester, Dsf>(
         shard2_sapling_frontier,
         #[cfg(feature = "orchard")]
         shard2_orchard_frontier,
+        #[cfg(feature = "orchard")]
+        Frontier::empty(),
     );
 
     // Verify the scan queue extends beyond the target.
@@ -5190,6 +5198,8 @@ where
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -5452,6 +5462,8 @@ where
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -6144,9 +6156,59 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     Dsf: DataStoreFactory,
     <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
 {
+    pczt_single_step_with_network::<P0, P1, _>(
+        ds_factory,
+        cache,
+        TestBuilder::DEFAULT_NETWORK,
+        false,
+    );
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard", zcash_unstable = "nu6.3"))]
+pub fn pczt_single_step_orchard_to_ironwood<Dsf>(ds_factory: Dsf, cache: impl TestCache)
+where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use super::orchard::OrchardPoolTester;
     use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
 
+    let zip212_enforcement_height = std::cmp::max(
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Nu5)
+            .unwrap(),
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Canopy)
+            .unwrap()
+            + ZIP212_GRACE_PERIOD,
+    );
+    let network = LocalNetwork {
+        nu6_3: Some(zip212_enforcement_height + 1),
+        ..TestBuilder::DEFAULT_NETWORK
+    };
+
+    pczt_single_step_with_network::<OrchardPoolTester, OrchardPoolTester, _>(
+        ds_factory, cache, network, true,
+    );
+}
+
+#[cfg(feature = "pczt")]
+fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+    network: LocalNetwork,
+    expect_ironwood_bundle: bool,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
+
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let _ = expect_ironwood_bundle;
+
     let mut st = TestBuilder::new()
+        .with_network(network)
         .with_data_store_factory(ds_factory)
         .with_block_cache(cache)
         .with_initial_chain_state(|_, network| {
@@ -6160,6 +6222,8 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
                 chain_state: ChainState::new(
                     birthday_height - 1,
                     BlockHash([5; 32]),
+                    Frontier::empty(),
+                    #[cfg(feature = "orchard")]
                     Frontier::empty(),
                     #[cfg(feature = "orchard")]
                     Frontier::empty(),
@@ -6232,12 +6296,29 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
 
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
-    let orchard_pk = ::orchard::circuit::ProvingKey::build(
-        ::orchard::BundleProtocol::LegacyOrchard.circuit_version(),
-    );
-    let pczt_proven = Prover::new(pczt_updated)
+    #[cfg(zcash_unstable = "nu6.3")]
+    let orchard_circuit_version =
+        if *pczt_updated.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION {
+            ::orchard::circuit::OrchardCircuitVersion::Ironwood
+        } else {
+            ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2
+        };
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let orchard_circuit_version = ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2;
+    let orchard_pk = ::orchard::circuit::ProvingKey::build(orchard_circuit_version);
+    #[cfg(zcash_unstable = "nu6.3")]
+    let ironwood_pk =
+        ::orchard::circuit::ProvingKey::build(::orchard::circuit::OrchardCircuitVersion::Ironwood);
+    let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)
-        .unwrap()
+        .unwrap();
+    #[cfg(zcash_unstable = "nu6.3")]
+    let pczt_prover = if pczt_prover.requires_ironwood_proof() {
+        pczt_prover.create_ironwood_proof(&ironwood_pk).unwrap()
+    } else {
+        pczt_prover
+    };
+    let pczt_proven = pczt_prover
         .create_sapling_proofs(&sapling_prover, &sapling_prover)
         .unwrap()
         .finish();
@@ -6251,6 +6332,24 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let extract_and_store_result = st.extract_and_store_transaction_from_pczt(pczt_authorized);
     assert_matches!(&extract_and_store_result, Ok(_));
     let txid = extract_and_store_result.unwrap();
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    {
+        let tx = st
+            .wallet()
+            .get_transaction(txid)
+            .unwrap()
+            .expect("extracted PCZT transaction was stored");
+
+        if expect_ironwood_bundle {
+            assert!(tx.ironwood_bundle().is_some());
+        }
+    }
+
+    let sent_outputs = st.wallet().get_sent_outputs(&txid).unwrap();
+    assert!(sent_outputs.iter().any(|output| {
+        output.value() == transfer_amount && output.external_recipient() == Some(&p1_to)
+    }));
 
     let (h, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(h, 1);
@@ -7018,9 +7117,9 @@ pub fn propose_shielding_coinbase_with_zero_limit_insufficient_funds<T: Shielded
 
 /// Regression test for the propose-fee/build-fee mismatch fixed in #2376.
 ///
-/// Both `sapling::builder::BundleType::DEFAULT` and
-/// `orchard::builder::BundleType::DEFAULT` pad up to a minimum of 2
-/// outputs/actions (`MIN_SHIELDED_OUTPUTS` / `MIN_ACTIONS`). Before the fix,
+/// Both `sapling::builder::BundleType::DEFAULT` and the Orchard protocol action
+/// count helpers pad up to a minimum of 2 outputs/actions
+/// (`MIN_SHIELDED_OUTPUTS` / `MIN_ACTIONS`). Before the fix,
 /// `propose_shielding_coinbase` hardcoded `(1, 0)` / `(0, 1)` when asking the
 /// fee rule what fee to charge, so the proposal underestimated the fee by
 /// exactly one ZIP-317 marginal unit (5000 zat). The proposal succeeded, but

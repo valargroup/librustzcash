@@ -274,6 +274,8 @@ fn queue_unmined_tx_retrieval<AccountId>(
     let detectable_via_scanning = d_tx.tx().sapling_bundle().is_some();
     #[cfg(feature = "orchard")]
     let detectable_via_scanning = detectable_via_scanning | d_tx.tx().orchard_bundle().is_some();
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let detectable_via_scanning = detectable_via_scanning | d_tx.tx().ironwood_bundle().is_some();
 
     if d_tx.mined_height().is_none() && !detectable_via_scanning {
         queue_tx_retrieval(conn, std::iter::once(d_tx.tx().txid()), None)?
@@ -389,10 +391,7 @@ mod tests {
             BranchId::Nu5,
             0,
             12345678.into(),
-            #[cfg(all(
-                any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                feature = "zip-233"
-            ))]
+            #[cfg(all(zcash_unstable = "zfuture", feature = "zip-233"))]
             Zatoshis::ZERO,
             Some(transparent::bundle::Bundle {
                 vin: vec![TxIn::from_parts(OutPoint::fake(), Script::default(), 0)],

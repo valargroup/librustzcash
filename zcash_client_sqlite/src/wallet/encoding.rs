@@ -31,22 +31,27 @@ use zcash_keys::keys::zcashd;
 /// The sentinel value representing an unset `zcashd_legacy_address_index` column.
 pub(crate) const LEGACY_ADDRESS_INDEX_NULL: i64 = -1;
 
+pub(crate) const TRANSPARENT_POOL_CODE: i64 = 0;
+pub(crate) const SAPLING_POOL_CODE: i64 = 2;
+pub(crate) const ORCHARD_POOL_CODE: i64 = 3;
+pub(crate) const IRONWOOD_POOL_CODE: i64 = 4;
+
 pub(crate) fn pool_code(pool_type: PoolType) -> i64 {
     // These constants are *incidentally* shared with the typecodes
     // for unified addresses, but this is exclusively an internal
     // implementation detail.
     match pool_type {
-        PoolType::Transparent => 0i64,
-        PoolType::Shielded(ShieldedProtocol::Sapling) => 2i64,
-        PoolType::Shielded(ShieldedProtocol::Orchard) => 3i64,
+        PoolType::Transparent => TRANSPARENT_POOL_CODE,
+        PoolType::Shielded(ShieldedProtocol::Sapling) => SAPLING_POOL_CODE,
+        PoolType::Shielded(ShieldedProtocol::Orchard) => ORCHARD_POOL_CODE,
     }
 }
 
 pub(crate) fn parse_pool_code(code: i64) -> Result<PoolType, SqliteClientError> {
     match code {
-        0i64 => Ok(PoolType::Transparent),
-        2i64 => Ok(PoolType::SAPLING),
-        3i64 => Ok(PoolType::ORCHARD),
+        TRANSPARENT_POOL_CODE => Ok(PoolType::Transparent),
+        SAPLING_POOL_CODE => Ok(PoolType::SAPLING),
+        ORCHARD_POOL_CODE | IRONWOOD_POOL_CODE => Ok(PoolType::ORCHARD),
         _ => Err(SqliteClientError::CorruptedData(format!(
             "Invalid pool code: {code}"
         ))),

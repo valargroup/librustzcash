@@ -3,7 +3,7 @@ use std::{collections::HashSet, rc::Rc};
 use incrementalmerkletree::Position;
 use orchard::{
     keys::Diversifier,
-    note::{Note, Nullifier, RandomSeed, Rho},
+    note::{Note, NoteVersion, Nullifier, RandomSeed, Rho},
 };
 use rusqlite::{Connection, Row, named_params, types::Value};
 
@@ -28,6 +28,23 @@ use crate::{AccountRef, AccountUuid, AddressRef, ReceivedNoteId, TxRef, error::S
 use super::{
     KeyScope, common::UnspentNoteMeta, get_account, get_account_ref, memo_repr, upsert_address,
 };
+
+fn encode_note_version(version: NoteVersion) -> i64 {
+    match version {
+        NoteVersion::V2 => 2,
+        NoteVersion::V3 => 3,
+    }
+}
+
+fn decode_note_version(version: i64) -> Result<NoteVersion, SqliteClientError> {
+    match version {
+        2 => Ok(NoteVersion::V2),
+        3 => Ok(NoteVersion::V3),
+        _ => Err(SqliteClientError::CorruptedData(format!(
+            "Invalid Orchard note version {version}."
+        ))),
+    }
+}
 
 pub(crate) fn to_received_note<P: consensus::Parameters>(
     params: &P,
@@ -64,6 +81,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
             SqliteClientError::CorruptedData("Invalid Orchard random seed.".to_string())
         })
     }?;
+    let note_version = decode_note_version(row.get("note_version")?)?;
 
     let note_commitment_tree_position = Position::from(
         u64::try_from(row.get::<_, i64>("commitment_tree_position")?).map_err(|_| {
@@ -110,7 +128,7 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
                 orchard::value::NoteValue::from_raw(note_value),
                 rho,
                 rseed,
-                orchard::note::NoteVersion::V2,
+                note_version,
             ))
             .ok_or_else(|| SqliteClientError::CorruptedData("Invalid Orchard note.".to_string()))?;
 
@@ -203,7 +221,8 @@ pub(crate) fn get_unspent_orchard_notes_at_historical_height<P: consensus::Param
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT
              rn.id AS id, t.txid, rn.action_index,
-             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.commitment_tree_position,
+             rn.diversifier, rn.value, rn.rho, rn.rseed, rn.note_version,
+             rn.commitment_tree_position,
              accounts.ufvk AS ufvk, rn.recipient_key_scope,
              t.mined_height,
              NULL AS max_shielding_input_height
@@ -290,6 +309,24 @@ pub(crate) fn select_unspent_note_meta(
     )
 }
 
+#[cfg(zcash_unstable = "nu6.3")]
+pub(crate) fn select_unspent_ironwood_note_meta(
+    conn: &Connection,
+    wallet_birthday: BlockHeight,
+    anchor_height: BlockHeight,
+) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
+    super::common::select_unspent_note_meta_for_tree(
+        conn,
+        ShieldedProtocol::Orchard,
+        crate::ORCHARD_TABLES_PREFIX,
+        crate::IRONWOOD_TABLES_PREFIX,
+        "action_index",
+        "AND rn.note_version = 3",
+        wallet_birthday,
+        anchor_height,
+    )
+}
+
 /// Records the specified shielded output as having been received.
 ///
 /// This implementation relies on the facts that:
@@ -313,23 +350,24 @@ pub(crate) fn put_received_note<
     let mut stmt_upsert_received_note = conn.prepare_cached(
         "INSERT INTO orchard_received_notes (
             transaction_id, action_index, account_id, address_id,
-            diversifier, value, rho, rseed, memo, nf,
+            diversifier, value, rho, rseed, note_version, memo, nf,
             is_change, commitment_tree_position,
             recipient_key_scope
         )
         VALUES (
             :transaction_id, :action_index, :account_id, :address_id,
-            :diversifier, :value, :rho, :rseed, :memo, :nf,
+            :diversifier, :value, :rho, :rseed, :note_version, :memo, :nf,
             :is_change, :commitment_tree_position,
             :recipient_key_scope
         )
-        ON CONFLICT (transaction_id, action_index) DO UPDATE
+        ON CONFLICT (transaction_id, action_index, note_version) DO UPDATE
         SET account_id = :account_id,
             address_id = :address_id,
             diversifier = :diversifier,
             value = :value,
             rho = :rho,
             rseed = :rseed,
+            note_version = :note_version,
             nf = IFNULL(:nf, nf),
             memo = IFNULL(:memo, memo),
             is_change = MAX(:is_change, is_change),
@@ -351,6 +389,7 @@ pub(crate) fn put_received_note<
         ":value": output.note().value().inner(),
         ":rho": output.note().rho().to_bytes(),
         ":rseed": &rseed.as_bytes(),
+        ":note_version": encode_note_version(output.note().version()),
         ":nf": output.nullifier().map(|nf| nf.to_bytes()),
         ":memo": memo_repr(output.memo()),
         ":is_change": output.is_change(),

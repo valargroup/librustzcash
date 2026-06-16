@@ -29,6 +29,26 @@ use {
 
 use crate::{AccountId, MemoryWalletDb, error::Error, to_spendable_notes};
 
+fn note_matches_spendable_protocol(
+    note: &zcash_client_backend::wallet::Note,
+    protocol: ShieldedProtocol,
+) -> bool {
+    if note.protocol() != protocol {
+        return false;
+    }
+
+    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
+    if protocol == Orchard {
+        return matches!(
+            note,
+            zcash_client_backend::wallet::Note::Orchard(note)
+                if note.version() == orchard::note::NoteVersion::V2
+        );
+    }
+
+    true
+}
+
 impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
     type Error = crate::error::Error;
     type AccountId = AccountId;
@@ -50,7 +70,9 @@ impl<P: consensus::Parameters> InputSource for MemoryWalletDb<P> {
         Self::Error,
     > {
         let note = self.received_notes.iter().find(|rn| {
-            &rn.txid == txid && rn.note.protocol() == protocol && rn.output_index == index
+            &rn.txid == txid
+                && note_matches_spendable_protocol(&rn.note, protocol)
+                && rn.output_index == index
         });
 
         Ok(if let Some(note) = note {
@@ -266,17 +288,26 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 return Ok(Vec::new());
             }
         };
+        let Some(anchor_height) = self.get_max_shared_checkpointed_height(
+            target_height.saturating_sub(1),
+            confirmations_policy.trusted(),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+
         // First grab all eligible (unspent, spendable, fully scanned) notes into a vec.
         let mut eligible_notes = self
             .received_notes
             .iter()
             .filter(|note| note.account_id == account)
-            .filter(|note| note.note.protocol() == *pool)
+            .filter(|note| note_matches_spendable_protocol(&note.note, *pool))
             .filter(|note| {
                 self.note_is_spendable(
                     note,
                     birthday_height,
                     target_height,
+                    anchor_height,
                     confirmations_policy,
                     exclude,
                 )
@@ -373,16 +404,25 @@ impl<P: consensus::Parameters> MemoryWalletDb<P> {
                 return Ok(None);
             }
         };
+        let Some(anchor_height) = self.get_max_shared_checkpointed_height(
+            target_height.saturating_sub(1),
+            confirmations_policy.trusted(),
+        )?
+        else {
+            return Ok(Some(PoolMeta::new(0, Zatoshis::ZERO)));
+        };
+
         let (count, total) = self
             .received_notes
             .iter()
             .filter(|note| note.account_id == account)
-            .filter(|note| note.note.protocol() == protocol)
+            .filter(|note| note_matches_spendable_protocol(&note.note, protocol))
             .filter(|note| {
                 self.note_is_spendable(
                     note,
                     birthday_height,
                     target_height,
+                    anchor_height,
                     confirmations_policy,
                     exclude,
                 )

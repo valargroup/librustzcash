@@ -60,6 +60,11 @@ impl NoteId {
 
     /// Returns the index of this note within its transaction's corresponding list of
     /// shielded outputs.
+    ///
+    /// Ironwood uses Orchard note plaintexts and is currently represented by
+    /// [`ShieldedProtocol::Orchard`] at this API boundary. To keep note IDs unique for
+    /// transactions that contain both Orchard and Ironwood bundles, Ironwood V3 notes use a
+    /// combined Orchard-shaped action index: `orchard_action_count + ironwood_action_index`.
     pub fn output_index(&self) -> u16 {
         self.output_index
     }

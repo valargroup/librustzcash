@@ -8,6 +8,9 @@ use crate::proto::memwallet as proto;
 use crate::read_optional;
 use crate::wallet_commitment_trees::serialization::{tree_from_protobuf, tree_to_protobuf};
 
+const MEMORY_WALLET_PROTO_V1: u32 = 1;
+const MEMORY_WALLET_PROTO_V2: u32 = 2;
+
 impl<P: Parameters> MemoryWalletDb<P> {
     /// Encode a memory wallet db as a protobuf byte buffer
     /// Always uses the latest version of the wire protocol
@@ -30,18 +33,47 @@ impl<P: Parameters> MemoryWalletDb<P> {
         max_checkpoints: usize,
     ) -> Result<Self> {
         match proto_wallet.version {
-            1 => Self::new_from_proto_v1(proto_wallet, params, max_checkpoints),
-            _ => Err(Error::UnsupportedProtoVersion(1, proto_wallet.version)),
+            MEMORY_WALLET_PROTO_V1 => {
+                Self::new_from_proto_v1(proto_wallet, params, max_checkpoints)
+            }
+            MEMORY_WALLET_PROTO_V2 => {
+                Self::new_from_proto_v2(proto_wallet, params, max_checkpoints)
+            }
+            _ => Err(Error::UnsupportedProtoVersion(
+                MEMORY_WALLET_PROTO_V2,
+                proto_wallet.version,
+            )),
         }
     }
 
     fn new_from_proto_v1(
+        mut proto_wallet: proto::MemoryWallet,
+        params: P,
+        max_checkpoints: usize,
+    ) -> Result<Self> {
+        if proto_wallet.version != MEMORY_WALLET_PROTO_V1 {
+            return Err(Error::UnsupportedProtoVersion(
+                MEMORY_WALLET_PROTO_V1,
+                proto_wallet.version,
+            ));
+        }
+
+        sanitize_proto_wallet_v1(&mut proto_wallet);
+        proto_wallet.version = MEMORY_WALLET_PROTO_V2;
+
+        Self::new_from_proto_v2(proto_wallet, params, max_checkpoints)
+    }
+
+    fn new_from_proto_v2(
         proto_wallet: proto::MemoryWallet,
         params: P,
         max_checkpoints: usize,
     ) -> Result<Self> {
-        if proto_wallet.version != 1 {
-            return Err(Error::UnsupportedProtoVersion(1, proto_wallet.version));
+        if proto_wallet.version != MEMORY_WALLET_PROTO_V2 {
+            return Err(Error::UnsupportedProtoVersion(
+                MEMORY_WALLET_PROTO_V2,
+                proto_wallet.version,
+            ));
         }
 
         let mut wallet = MemoryWalletDb::new(params, max_checkpoints);
@@ -190,6 +222,27 @@ impl<P: Parameters> MemoryWalletDb<P> {
                 .collect::<Result<_>>()?;
         };
 
+        #[cfg(feature = "orchard")]
+        if let Some(ironwood_tree) = proto_wallet.ironwood_tree {
+            wallet.ironwood_tree = tree_from_protobuf(ironwood_tree, 100, 16.into())?;
+        }
+
+        #[cfg(feature = "orchard")]
+        {
+            wallet.ironwood_tree_shard_end_heights = proto_wallet
+                .ironwood_tree_shard_end_heights
+                .into_iter()
+                .map(|proto_end_height| {
+                    let address = Address::from_parts(
+                        Level::from(u8::try_from(proto_end_height.level)?),
+                        proto_end_height.index,
+                    );
+                    let height = proto_end_height.block_height.into();
+                    Ok((address, height))
+                })
+                .collect::<Result<_>>()?;
+        };
+
         wallet.transparent_received_outputs = TransparentReceivedOutputs(
             proto_wallet
                 .transparent_received_outputs
@@ -238,6 +291,50 @@ impl<P: Parameters> MemoryWalletDb<P> {
     }
 }
 
+fn sanitize_proto_wallet_v1(proto_wallet: &mut proto::MemoryWallet) {
+    for received_note in &mut proto_wallet.received_note_table {
+        if let Some(note) = received_note.note.as_mut() {
+            sanitize_note_v1(note);
+        }
+    }
+
+    for sent_note_record in &mut proto_wallet.sent_notes {
+        if let Some(sent_note) = sent_note_record.sent_note.as_mut() {
+            if let Some(recipient) = sent_note.to.as_mut() {
+                if let Some(note) = recipient.note.as_mut() {
+                    sanitize_note_v1(note);
+                }
+            }
+        }
+    }
+
+    for account in proto_wallet
+        .accounts
+        .iter_mut()
+        .flat_map(|accounts| accounts.accounts.iter_mut())
+    {
+        if let Some(chain_state) = account
+            .birthday
+            .as_mut()
+            .and_then(|birthday| birthday.prior_chain_state.as_mut())
+        {
+            chain_state.final_ironwood_tree.clear();
+        }
+    }
+
+    for block in &mut proto_wallet.blocks {
+        block.ironwood_commitment_tree_size = None;
+        block.ironwood_action_count = None;
+    }
+
+    proto_wallet.ironwood_tree = None;
+    proto_wallet.ironwood_tree_shard_end_heights.clear();
+}
+
+fn sanitize_note_v1(note: &mut proto::Note) {
+    note.orchard_note_version = None;
+}
+
 impl From<&TxId> for proto::TxId {
     fn from(txid: &TxId) -> Self {
         proto::TxId {
@@ -265,7 +362,7 @@ impl TryFrom<proto::TxId> for TxId {
 impl<P: Parameters> From<&MemoryWalletDb<P>> for proto::MemoryWallet {
     fn from(wallet: &MemoryWalletDb<P>) -> Self {
         Self {
-            version: 1,
+            version: MEMORY_WALLET_PROTO_V2,
             accounts: Some(proto::Accounts {
                 accounts: wallet
                     .accounts
@@ -384,6 +481,25 @@ impl<P: Parameters> From<&MemoryWalletDb<P>> for proto::MemoryWallet {
             #[cfg(not(feature = "orchard"))]
             orchard_tree_shard_end_heights: Vec::new(),
 
+            #[cfg(feature = "orchard")]
+            ironwood_tree: tree_to_protobuf(&wallet.ironwood_tree).unwrap(),
+            #[cfg(not(feature = "orchard"))]
+            ironwood_tree: None,
+
+            #[cfg(feature = "orchard")]
+            ironwood_tree_shard_end_heights: wallet
+                .ironwood_tree_shard_end_heights
+                .clone()
+                .into_iter()
+                .map(|(address, height)| proto::TreeEndHeightsRecord {
+                    level: address.level().into(),
+                    index: address.index(),
+                    block_height: height.into(),
+                })
+                .collect(),
+            #[cfg(not(feature = "orchard"))]
+            ironwood_tree_shard_end_heights: Vec::new(),
+
             transparent_received_outputs: wallet
                 .transparent_received_outputs
                 .0
@@ -428,6 +544,216 @@ impl<P: Parameters> From<&MemoryWalletDb<P>> for proto::MemoryWallet {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::proto::memwallet as proto;
+    use zcash_protocol::{TxId, consensus::Network, memo::Memo};
+    #[cfg(feature = "orchard")]
+    use {zcash_client_backend::wallet::Note, zcash_protocol::consensus::BlockHeight};
+
+    fn empty_proto_wallet(version: u32) -> proto::MemoryWallet {
+        let wallet = MemoryWalletDb::new(Network::TestNetwork, 100);
+        proto::MemoryWallet {
+            version,
+            ..proto::MemoryWallet::from(&wallet)
+        }
+    }
+
+    fn empty_memo() -> Vec<u8> {
+        Memo::Empty.encode().as_array().to_vec()
+    }
+
+    fn proto_txid(byte: u8) -> proto::TxId {
+        TxId::from_bytes([byte; 32]).into()
+    }
+
+    #[cfg(feature = "orchard")]
+    fn orchard_v3_proto_note() -> proto::Note {
+        let sk = orchard::keys::SpendingKey::from_bytes([7; 32]).unwrap();
+        let recipient = orchard::keys::FullViewingKey::from(&sk)
+            .address_at(0u32, orchard::keys::Scope::External);
+        let value = orchard::value::NoteValue::from_raw(99);
+        let rho = orchard::note::Rho::from_bytes(&[1; 32]).unwrap();
+        let rseed = (0u8..=255)
+            .find_map(|b| orchard::note::RandomSeed::from_bytes([b; 32], &rho).into_option())
+            .expect("at least one test rseed is valid");
+
+        Note::Orchard(
+            orchard::Note::from_parts(recipient, value, rho, rseed, orchard::note::NoteVersion::V3)
+                .unwrap(),
+        )
+        .into()
+    }
+
+    #[cfg(feature = "orchard")]
+    fn add_internal_orchard_sent_note(proto_wallet: &mut proto::MemoryWallet) {
+        proto_wallet.sent_notes.push(proto::SentNoteRecord {
+            sent_note_id: Some(proto::NoteId {
+                tx_id: Some(proto_txid(3)),
+                pool: proto::PoolType::ShieldedOrchard as i32,
+                output_index: 0,
+            }),
+            sent_note: Some(proto::SentNote {
+                from_account_id: 0,
+                to: Some(proto::Recipient {
+                    recipient_type: proto::RecipientType::InternalAccount as i32,
+                    address: None,
+                    pool_type: None,
+                    account_id: Some(0),
+                    outpoint: None,
+                    note: Some(orchard_v3_proto_note()),
+                }),
+                value: 99,
+                memo: empty_memo(),
+            }),
+        });
+    }
+
+    #[test]
+    fn memory_wallet_encodes_latest_version() {
+        let wallet = MemoryWalletDb::new(Network::TestNetwork, 100);
+        let proto_wallet = proto::MemoryWallet::from(&wallet);
+
+        assert_eq!(proto_wallet.version, MEMORY_WALLET_PROTO_V2);
+    }
+
+    #[test]
+    fn memory_wallet_rejects_future_version() {
+        let err = MemoryWalletDb::new_from_proto(
+            empty_proto_wallet(MEMORY_WALLET_PROTO_V2 + 1),
+            Network::TestNetwork,
+            100,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::UnsupportedProtoVersion(MEMORY_WALLET_PROTO_V2, 3)
+        ));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn v1_decodes_with_empty_ironwood_state() {
+        let mut proto_wallet = empty_proto_wallet(MEMORY_WALLET_PROTO_V1);
+        proto_wallet.ironwood_tree = Some(proto::ShardTree {
+            cap: vec![0xff],
+            shards: vec![],
+            checkpoints: vec![],
+        });
+        proto_wallet
+            .ironwood_tree_shard_end_heights
+            .push(proto::TreeEndHeightsRecord {
+                level: 16,
+                index: 0,
+                block_height: 10,
+            });
+        proto_wallet.blocks.push(proto::WalletBlock {
+            height: 10,
+            hash: vec![0; 32],
+            block_time: 0,
+            transactions: vec![],
+            memos: vec![],
+            sapling_commitment_tree_size: None,
+            sapling_output_count: None,
+            orchard_commitment_tree_size: None,
+            orchard_action_count: None,
+            ironwood_commitment_tree_size: Some(5),
+            ironwood_action_count: Some(6),
+        });
+
+        let wallet =
+            MemoryWalletDb::new_from_proto(proto_wallet, Network::TestNetwork, 100).unwrap();
+
+        assert!(wallet.ironwood_tree_shard_end_heights.is_empty());
+        let block = wallet.blocks.get(&BlockHeight::from_u32(10)).unwrap();
+        assert_eq!(block.ironwood_commitment_tree_size, None);
+        assert_eq!(block.ironwood_action_count, None);
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn v2_decodes_ironwood_state() {
+        let mut proto_wallet = empty_proto_wallet(MEMORY_WALLET_PROTO_V2);
+        proto_wallet
+            .ironwood_tree_shard_end_heights
+            .push(proto::TreeEndHeightsRecord {
+                level: 16,
+                index: 0,
+                block_height: 10,
+            });
+        proto_wallet.blocks.push(proto::WalletBlock {
+            height: 10,
+            hash: vec![0; 32],
+            block_time: 0,
+            transactions: vec![],
+            memos: vec![],
+            sapling_commitment_tree_size: None,
+            sapling_output_count: None,
+            orchard_commitment_tree_size: None,
+            orchard_action_count: None,
+            ironwood_commitment_tree_size: Some(5),
+            ironwood_action_count: Some(6),
+        });
+
+        let wallet =
+            MemoryWalletDb::new_from_proto(proto_wallet, Network::TestNetwork, 100).unwrap();
+
+        assert_eq!(wallet.ironwood_tree_shard_end_heights.len(), 1);
+        let block = wallet.blocks.get(&BlockHeight::from_u32(10)).unwrap();
+        assert_eq!(block.ironwood_commitment_tree_size, Some(5));
+        assert_eq!(block.ironwood_action_count, Some(6));
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn v1_decodes_orchard_notes_as_legacy_v2() {
+        let mut proto_wallet = empty_proto_wallet(MEMORY_WALLET_PROTO_V1);
+        add_internal_orchard_sent_note(&mut proto_wallet);
+
+        let wallet =
+            MemoryWalletDb::new_from_proto(proto_wallet, Network::TestNetwork, 100).unwrap();
+        let sent_note = wallet.sent_notes.0.values().next().unwrap();
+
+        match &sent_note.to {
+            zcash_client_backend::wallet::Recipient::InternalAccount { note, .. } => {
+                match &**note {
+                    Note::Orchard(note) => {
+                        assert_eq!(note.version(), orchard::note::NoteVersion::V2)
+                    }
+                    Note::Sapling(_) => panic!("expected Orchard note"),
+                }
+            }
+            _ => panic!("expected internal account recipient"),
+        }
+    }
+
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn v2_decodes_orchard_notes_as_current_version() {
+        let mut proto_wallet = empty_proto_wallet(MEMORY_WALLET_PROTO_V2);
+        add_internal_orchard_sent_note(&mut proto_wallet);
+
+        let wallet =
+            MemoryWalletDb::new_from_proto(proto_wallet, Network::TestNetwork, 100).unwrap();
+        let sent_note = wallet.sent_notes.0.values().next().unwrap();
+
+        match &sent_note.to {
+            zcash_client_backend::wallet::Recipient::InternalAccount { note, .. } => {
+                match &**note {
+                    Note::Orchard(note) => {
+                        assert_eq!(note.version(), orchard::note::NoteVersion::V3)
+                    }
+                    Note::Sapling(_) => panic!("expected Orchard note"),
+                }
+            }
+            _ => panic!("expected internal account recipient"),
         }
     }
 }

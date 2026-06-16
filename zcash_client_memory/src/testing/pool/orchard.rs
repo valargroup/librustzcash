@@ -1,7 +1,168 @@
 use crate::testing;
 
+use orchard::note::NoteVersion;
 use zcash_client_backend::data_api::testing::orchard::OrchardPoolTester;
 use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
+#[cfg(zcash_unstable = "nu6.3")]
+use zcash_client_backend::data_api::{
+    ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT, TargetValue, scanning::ScanPriority,
+    wallet::TargetHeight,
+};
+use zcash_client_backend::{
+    data_api::{
+        Account as _,
+        testing::{AddressType, TestBuilder, pool::ShieldedPoolTester},
+        wallet::ConfirmationsPolicy,
+    },
+    wallet::Note,
+};
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::value::Zatoshis;
+
+#[cfg(zcash_unstable = "nu6.3")]
+use incrementalmerkletree::Address;
+
+use crate::testing::{MemBlockCache, TestMemDbFactory};
+
+#[test]
+fn wallet_summary_counts_v3_notes_as_ironwood() {
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(TestMemDbFactory::new())
+        .with_block_cache(MemBlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = OrchardPoolTester::test_account_fvk(&st);
+    let value = Zatoshis::const_from_u64(50000);
+    let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks(height, 1);
+
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account.id()).unwrap();
+    assert_eq!(balance.orchard_balance().total(), value);
+    assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+    assert_eq!(balance.spendable_value(), value);
+
+    let received_note = st
+        .wallet_mut()
+        .received_notes
+        .0
+        .iter_mut()
+        .find(|note| matches!(note.note, Note::Orchard(_)))
+        .unwrap();
+    if let Note::Orchard(note) = received_note.note {
+        received_note.note = Note::Orchard(
+            orchard::Note::from_parts(
+                note.recipient(),
+                note.value(),
+                note.rho(),
+                *note.rseed(),
+                NoteVersion::V3,
+            )
+            .into_option()
+            .unwrap(),
+        );
+    }
+
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account.id()).unwrap();
+    assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
+    assert_eq!(balance.ironwood_balance().total(), value);
+    if cfg!(zcash_unstable = "nu6.3") {
+        assert_eq!(balance.spendable_value(), value);
+    } else {
+        assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
+    }
+}
+
+#[test]
+#[cfg(zcash_unstable = "nu6.3")]
+fn v3_ironwood_notes_in_ironwood_unscanned_ranges_are_not_spendable() {
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(TestMemDbFactory::new())
+        .with_block_cache(MemBlockCache::new())
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let account = st.test_account().cloned().unwrap();
+    let dfvk = OrchardPoolTester::test_account_fvk(&st);
+    let value = Zatoshis::const_from_u64(50000);
+    let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+    st.scan_cached_blocks(height, 1);
+
+    let note_position = {
+        let received_note = st
+            .wallet_mut()
+            .received_notes
+            .0
+            .iter_mut()
+            .find(|note| matches!(note.note, Note::Orchard(_)))
+            .unwrap();
+        if let Note::Orchard(note) = received_note.note {
+            received_note.note = Note::Orchard(
+                orchard::Note::from_parts(
+                    note.recipient(),
+                    note.value(),
+                    note.rho(),
+                    *note.rseed(),
+                    NoteVersion::V3,
+                )
+                .into_option()
+                .unwrap(),
+            );
+        }
+        received_note.commitment_tree_position.unwrap()
+    };
+
+    let scan_start = height;
+    let scan_end = height + 1;
+    let wallet = st.wallet_mut();
+    wallet
+        .scan_queue
+        .0
+        .push((scan_start, scan_end, ScanPriority::Historic));
+
+    let sapling_shard_index =
+        Address::above_position(SAPLING_SHARD_HEIGHT.into(), note_position).index() + 1;
+    wallet.sapling_tree_shard_end_heights.insert(
+        Address::from_parts(SAPLING_SHARD_HEIGHT.into(), sapling_shard_index),
+        scan_start.saturating_sub(1),
+    );
+    wallet.sapling_tree_shard_end_heights.insert(
+        Address::from_parts(SAPLING_SHARD_HEIGHT.into(), sapling_shard_index + 1),
+        scan_end,
+    );
+
+    let ironwood_shard_index =
+        Address::above_position(ORCHARD_SHARD_HEIGHT.into(), note_position).index();
+    wallet.ironwood_tree_shard_end_heights.insert(
+        Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), ironwood_shard_index),
+        scan_start.saturating_sub(1),
+    );
+    wallet.ironwood_tree_shard_end_heights.insert(
+        Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), ironwood_shard_index + 1),
+        scan_end,
+    );
+
+    let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+    let balance = summary.account_balances().get(&account.id()).unwrap();
+    assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
+    assert_eq!(balance.ironwood_balance().total(), value);
+    assert_eq!(balance.ironwood_balance().spendable_value(), Zatoshis::ZERO);
+    assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
+
+    let spendable = OrchardPoolTester::select_spendable_notes(
+        &st,
+        account.id(),
+        TargetValue::AtLeast(value),
+        TargetHeight::from(height + 1),
+        ConfirmationsPolicy::MIN,
+        &[],
+    )
+    .unwrap();
+    assert!(spendable.is_empty());
+}
 
 #[test]
 fn send_single_step_proposed_transfer() {

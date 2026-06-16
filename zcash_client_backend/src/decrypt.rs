@@ -194,7 +194,7 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
     #[cfg(feature = "orchard")]
     let orchard_bundle = tx.orchard_bundle();
     #[cfg(feature = "orchard")]
-    let orchard_outputs = orchard_bundle
+    let orchard_outputs: Vec<_> = orchard_bundle
         .iter()
         .flat_map(|bundle| {
             ufvks
@@ -245,6 +245,63 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
                 })
         })
         .collect();
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let orchard_outputs = {
+        let mut orchard_outputs = orchard_outputs;
+        // Ironwood is represented as Orchard-shaped V3 outputs at this API boundary. Offset
+        // Ironwood action indices by the Orchard action count so mixed-bundle transactions have
+        // unique Orchard output identifiers.
+        let orchard_action_count = orchard_bundle.map_or(0, |bundle| bundle.actions().len());
+        orchard_outputs.extend(tx.ironwood_bundle().iter().flat_map(|bundle| {
+            ufvks
+                .iter()
+                .flat_map(|(account, ufvk)| ufvk.orchard().into_iter().map(|fvk| (*account, fvk)))
+                .flat_map(|(account, fvk)| {
+                    let ivk_external = orchard::keys::PreparedIncomingViewingKey::new(
+                        &fvk.to_ivk(Scope::External),
+                    );
+                    let ivk_internal = orchard::keys::PreparedIncomingViewingKey::new(
+                        &fvk.to_ivk(Scope::Internal),
+                    );
+                    let ovk = fvk.to_ovk(Scope::External);
+
+                    bundle
+                        .actions()
+                        .iter()
+                        .enumerate()
+                        .flat_map(move |(index, action)| {
+                            let domain = OrchardDomain::for_action(action);
+                            try_note_decryption(&domain, &ivk_external, action)
+                                .map(|ret| (ret, TransferType::Incoming))
+                                .or_else(|| {
+                                    try_note_decryption(&domain, &ivk_internal, action)
+                                        .map(|ret| (ret, TransferType::AccountInternal))
+                                })
+                                .or_else(|| {
+                                    try_output_recovery_with_ovk(
+                                        &domain,
+                                        &ovk,
+                                        action,
+                                        action.cv_net(),
+                                        &action.encrypted_note().out_ciphertext,
+                                    )
+                                    .map(|ret| (ret, TransferType::Outgoing))
+                                })
+                                .into_iter()
+                                .map(move |((note, _, memo), transfer_type)| {
+                                    DecryptedOutput::new(
+                                        orchard_action_count + index,
+                                        note,
+                                        account,
+                                        MemoBytes::from_bytes(&memo).expect("correct length"),
+                                        transfer_type,
+                                    )
+                                })
+                        })
+                })
+        }));
+        orchard_outputs
+    };
 
     DecryptedTransaction::new(
         mined_height,

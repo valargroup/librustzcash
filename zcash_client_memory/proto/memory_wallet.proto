@@ -42,6 +42,11 @@ message MemoryWallet {
   // the block heights corresponding to the last note commitment for each shard in the orchard tree
   repeated TreeEndHeightsRecord orchard_tree_shard_end_heights = 14;
 
+  // Ironwood shielded pool shard tree
+  ShardTree ironwood_tree = 19;
+  // the block heights corresponding to the last note commitment for each shard in the ironwood tree
+  repeated TreeEndHeightsRecord ironwood_tree_shard_end_heights = 20;
+
   // UTXOs known to this wallet
   repeated TransparentReceivedOutputRecord transparent_received_outputs = 15;
   // UTXOs spent by this wallet
@@ -119,6 +124,7 @@ message ChainState {
   bytes block_hash = 2;
   bytes final_sapling_tree = 3;
   bytes final_orchard_tree = 4;
+  bytes final_ironwood_tree = 5;
 }
 
 message WalletBlock {
@@ -131,6 +137,8 @@ message WalletBlock {
   optional uint32 sapling_output_count = 7; // the number of Sapling outputs in this block
   optional uint32 orchard_commitment_tree_size = 8; // the size of the Orchard note commitment tree as of the end of this block
   optional uint32 orchard_action_count = 9; // the number of Orchard actions in this block
+  optional uint32 ironwood_commitment_tree_size = 10; // the size of the Ironwood note commitment tree as of the end of this block
+  optional uint32 ironwood_action_count = 11; // the number of Ironwood actions in this block
 }
 
 message TransactionEntry {

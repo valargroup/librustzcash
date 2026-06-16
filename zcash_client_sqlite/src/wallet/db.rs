@@ -264,7 +264,9 @@ CREATE TABLE blocks (
     sapling_commitment_tree_size INTEGER,
     orchard_commitment_tree_size INTEGER,
     sapling_output_count INTEGER,
-    orchard_action_count INTEGER)";
+    orchard_action_count INTEGER,
+    ironwood_commitment_tree_size INTEGER,
+    ironwood_action_count INTEGER)";
 
 /// Stores the wallet's transactions.
 ///
@@ -444,6 +446,7 @@ CREATE INDEX idx_sapling_received_note_spends_transaction_id ON sapling_received
 /// - `address_id`: a foreign key to the address that this note was sent to; null in the
 ///   case that the note was sent to an internally-scoped address (we never store addresses
 ///   containing internal Orchard receivers in the `addresses` table).
+/// - `note_version`: the Orchard note plaintext version used to derive the note commitment
 pub(super) const TABLE_ORCHARD_RECEIVED_NOTES: &str = r#"
 CREATE TABLE "orchard_received_notes" (
     id INTEGER PRIMARY KEY,
@@ -464,7 +467,8 @@ CREATE TABLE "orchard_received_notes" (
     address_id INTEGER
         REFERENCES addresses(id) ON DELETE CASCADE,
     witness_stabilized INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (transaction_id, action_index)
+    note_version INTEGER NOT NULL DEFAULT 2,
+    UNIQUE (transaction_id, action_index, note_version)
 )"#;
 pub(super) const INDEX_ORCHARD_RECEIVED_NOTES_ACCOUNT: &str = r#"
 CREATE INDEX idx_orchard_received_notes_account ON orchard_received_notes (
@@ -831,6 +835,60 @@ CREATE TABLE orchard_tree_checkpoint_marks_removed (
     CONSTRAINT spend_position_unique UNIQUE (checkpoint_id, mark_removed_position)
 )";
 
+/// Stores the shards of a [`ShardTree`] for the Ironwood commitment tree.
+///
+/// This is identical to [`TABLE_SAPLING_TREE_SHARDS`]; see its documentation for details.
+///
+/// [`ShardTree`]: shardtree::ShardTree
+pub(super) const TABLE_IRONWOOD_TREE_SHARDS: &str = "
+CREATE TABLE ironwood_tree_shards (
+    shard_index INTEGER PRIMARY KEY,
+    subtree_end_height INTEGER,
+    root_hash BLOB,
+    shard_data BLOB,
+    contains_marked INTEGER,
+    CONSTRAINT root_unique UNIQUE (root_hash)
+)";
+
+/// Stores the "cap" of the Ironwood [`ShardTree`].
+///
+/// This is identical to [`TABLE_SAPLING_TREE_CAP`]; see its documentation for details.
+///
+/// [`ShardTree`]: shardtree::ShardTree
+pub(super) const TABLE_IRONWOOD_TREE_CAP: &str = "
+CREATE TABLE ironwood_tree_cap (
+    -- cap_id exists only to be able to take advantage of `ON CONFLICT`
+    -- upsert functionality; the table will only ever contain one row
+    cap_id INTEGER PRIMARY KEY,
+    cap_data BLOB NOT NULL
+)";
+
+/// Stores the checkpointed positions in the Ironwood [`ShardTree`].
+///
+/// This is identical to [`TABLE_SAPLING_TREE_CHECKPOINTS`]; see its documentation for
+/// details.
+///
+/// [`ShardTree`]: shardtree::ShardTree
+pub(super) const TABLE_IRONWOOD_TREE_CHECKPOINTS: &str = "
+CREATE TABLE ironwood_tree_checkpoints (
+    checkpoint_id INTEGER PRIMARY KEY,
+    position INTEGER
+)";
+
+/// Stores metadata about the positions of Ironwood notes that have been spent but for
+/// which witness information has not yet been removed from the note commitment tree.
+///
+/// This is identical to [`TABLE_SAPLING_TREE_CHECKPOINT_MARKS_REMOVED`]; see its
+/// documentation for details.
+pub(super) const TABLE_IRONWOOD_TREE_CHECKPOINT_MARKS_REMOVED: &str = "
+CREATE TABLE ironwood_tree_checkpoint_marks_removed (
+    checkpoint_id INTEGER NOT NULL,
+    mark_removed_position INTEGER NOT NULL,
+    FOREIGN KEY (checkpoint_id) REFERENCES ironwood_tree_checkpoints(checkpoint_id)
+    ON DELETE CASCADE,
+    CONSTRAINT spend_position_unique UNIQUE (checkpoint_id, mark_removed_position)
+)";
+
 //
 // Scanning
 //
@@ -935,7 +993,10 @@ UNION
     SELECT
         orchard_received_notes.id AS id_within_pool_table,
         orchard_received_notes.transaction_id,
-        3 AS pool,
+        CASE
+            WHEN orchard_received_notes.note_version = 3 THEN 4
+            ELSE 3
+        END AS pool,
         orchard_received_notes.action_index AS output_index,
         account_id,
         orchard_received_notes.value,
@@ -946,7 +1007,12 @@ UNION
     FROM orchard_received_notes
     LEFT JOIN sent_notes
     ON (sent_notes.transaction_id, sent_notes.output_pool, sent_notes.output_index) =
-       (orchard_received_notes.transaction_id, 3, orchard_received_notes.action_index)
+       (orchard_received_notes.transaction_id,
+        CASE
+            WHEN orchard_received_notes.note_version = 3 THEN 4
+            ELSE 3
+        END,
+        orchard_received_notes.action_index)
 UNION
     SELECT
         u.id AS id_within_pool_table,
@@ -975,7 +1041,10 @@ FROM sapling_received_note_spends s
 JOIN sapling_received_notes rn ON rn.id = s.sapling_received_note_id
 UNION
 SELECT
-    3 AS pool,
+    CASE
+        WHEN rn.note_version = 3 THEN 4
+        ELSE 3
+    END AS pool,
     s.orchard_received_note_id AS received_output_id,
     s.transaction_id,
     rn.account_id
@@ -1131,9 +1200,11 @@ GROUP BY notes.account_id, notes.transaction_id";
 ///   - 0: Transparent
 ///   - 2: Sapling
 ///   - 3: Orchard
+///   - 4: Ironwood
 /// - `output_index`: The index of the output within the transaction bundle associated with
 ///   the `output_pool` value; that is, within `vout` for transparent, the vector of
-///   Sapling `OutputDescription` values, or the vector of Orchard actions.
+///   Sapling `OutputDescription` values, the vector of Orchard actions, or the vector of
+///   Orchard-shaped actions including Ironwood V3 actions.
 /// - `tx_mined_height`: An optional value identifying the block height at which the transaction that
 ///   produced this output was mined, or NULL if the transaction is unmined.
 /// - `tx_trust_status`: A flag indicating whether the transaction that produced this output
@@ -1383,6 +1454,90 @@ SELECT
     contains_marked,
     MAX(priority) AS max_priority
 FROM v_orchard_shard_scan_ranges
+GROUP BY
+    shard_index,
+    start_position,
+    end_position_exclusive,
+    subtree_start_height,
+    subtree_end_height,
+    contains_marked";
+
+/// Combines the Ironwood tree shards and scan ranges.
+///
+/// Note that in regtest mode when NU6.3 has no activation height, the
+/// `subtree_start_height` column defaults to `NULL` for the first shard. However, in this
+/// scenario there should never be any Ironwood shards, so the view should be empty and
+/// this state should be unobservable.
+pub(super) fn view_ironwood_shard_scan_ranges<P: Parameters>(params: &P) -> String {
+    #[cfg(zcash_unstable = "nu6.3")]
+    let nu6_3_activation = params
+        .activation_height(NetworkUpgrade::Nu6_3)
+        .map(|h| u32::from(h).to_string());
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let _ = params;
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let nu6_3_activation: Option<String> = None;
+
+    format!(
+        "CREATE VIEW v_ironwood_shard_scan_ranges AS
+        SELECT
+            shard.shard_index,
+            shard.shard_index << 16 AS start_position,
+            (shard.shard_index + 1) << 16 AS end_position_exclusive,
+            IFNULL(prev_shard.subtree_end_height, {}) AS subtree_start_height,
+            shard.subtree_end_height,
+            shard.contains_marked,
+            scan_queue.block_range_start,
+            scan_queue.block_range_end,
+            scan_queue.priority
+        FROM ironwood_tree_shards shard
+        LEFT OUTER JOIN ironwood_tree_shards prev_shard
+            ON shard.shard_index = prev_shard.shard_index + 1
+        INNER JOIN scan_queue ON (
+            subtree_start_height < scan_queue.block_range_end AND
+            (
+                scan_queue.block_range_start <= shard.subtree_end_height OR
+                shard.subtree_end_height IS NULL
+            )
+        )",
+        // NU6.3 might not be active in regtest mode.
+        nu6_3_activation.as_deref().unwrap_or("NULL"),
+    )
+}
+
+pub(super) fn view_ironwood_shard_unscanned_ranges() -> String {
+    format!(
+        "CREATE VIEW v_ironwood_shard_unscanned_ranges AS
+        WITH wallet_birthday AS (SELECT MIN(birthday_height) AS height FROM accounts)
+        SELECT
+            shard_index,
+            start_position,
+            end_position_exclusive,
+            subtree_start_height,
+            subtree_end_height,
+            contains_marked,
+            block_range_start,
+            block_range_end,
+            priority
+        FROM v_ironwood_shard_scan_ranges
+        INNER JOIN wallet_birthday
+        WHERE priority > {}
+        AND block_range_end > wallet_birthday.height",
+        priority_code(&ScanPriority::Scanned),
+    )
+}
+
+pub(super) const VIEW_IRONWOOD_SHARDS_SCAN_STATE: &str = "
+CREATE VIEW v_ironwood_shards_scan_state AS
+SELECT
+    shard_index,
+    start_position,
+    end_position_exclusive,
+    subtree_start_height,
+    subtree_end_height,
+    contains_marked,
+    MAX(priority) AS max_priority
+FROM v_ironwood_shard_scan_ranges
 GROUP BY
     shard_index,
     start_position,

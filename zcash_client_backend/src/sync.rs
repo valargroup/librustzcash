@@ -285,6 +285,31 @@ where
             .map_err(Error::WalletTrees)?;
     }
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    {
+        let mut request = service::GetSubtreeRootsArg::default();
+        request.set_shielded_protocol(service::ShieldedProtocol::Ironwood);
+
+        let ironwood_roots: Vec<CommitmentTreeRoot<MerkleHashOrchard>> = client
+            .get_subtree_roots(request)
+            .await?
+            .into_inner()
+            .and_then(|root| async move {
+                let root_hash = MerkleHashOrchard::read(&root.root_hash[..])?;
+                Ok(CommitmentTreeRoot::from_parts(
+                    BlockHeight::from_u32(root.completing_block_height as u32),
+                    root_hash,
+                ))
+            })
+            .try_collect()
+            .await?;
+
+        info!("Ironwood tree has {} subtrees", ironwood_roots.len());
+        db_data
+            .put_ironwood_subtree_roots(0, &ironwood_roots)
+            .map_err(Error::WalletTrees)?;
+    }
+
     Ok(())
 }
 

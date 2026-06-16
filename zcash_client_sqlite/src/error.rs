@@ -120,19 +120,21 @@ pub enum SqliteClientError {
     /// commitment trees.
     CommitmentTree(ShardTreeError<commitment_tree::Error>),
 
-    /// The caller-supplied frontier passed to
-    /// [`WalletDb::generate_orchard_witnesses_at_historical_height`] is
+    /// The caller-supplied frontier passed to one of the historical
+    /// Orchard-compatible witness generation helpers is
     /// inconsistent with the shard data reconstructed from the wallet at the
     /// requested height.
     ///
     /// [`WalletDb::generate_orchard_witnesses_at_historical_height`]:
     /// crate::WalletDb::generate_orchard_witnesses_at_historical_height
+    /// [`WalletDb::generate_ironwood_witnesses_at_historical_height`]:
+    /// crate::WalletDb::generate_ironwood_witnesses_at_historical_height
     #[cfg(feature = "orchard")]
     HistoricalFrontierInvalid(InsertionError),
 
     /// A witness could not be generated for the specified position at the
     /// specified historical height in a call to
-    /// [`WalletDb::generate_orchard_witnesses_at_historical_height`].
+    /// one of the historical Orchard-compatible witness generation helpers.
     ///
     /// The wallet most likely has not synced through `height`, the checkpoint
     /// at `height` has been pruned, or `position` does not belong to the
@@ -140,6 +142,8 @@ pub enum SqliteClientError {
     ///
     /// [`WalletDb::generate_orchard_witnesses_at_historical_height`]:
     /// crate::WalletDb::generate_orchard_witnesses_at_historical_height
+    /// [`WalletDb::generate_ironwood_witnesses_at_historical_height`]:
+    /// crate::WalletDb::generate_ironwood_witnesses_at_historical_height
     #[cfg(feature = "orchard")]
     HistoricalWitnessUnavailable {
         /// The note commitment tree position for which a witness was
@@ -310,7 +314,7 @@ impl fmt::Display for SqliteClientError {
             #[cfg(feature = "orchard")]
             SqliteClientError::HistoricalFrontierInvalid(err) => write!(
                 f,
-                "The frontier supplied to generate_orchard_witnesses_at_historical_height is inconsistent with the wallet's shard data: {err}"
+                "The historical frontier supplied for witness generation is inconsistent with the wallet's shard data: {err}"
             ),
             #[cfg(feature = "orchard")]
             SqliteClientError::HistoricalWitnessUnavailable { position, height } => write!(

@@ -12,6 +12,11 @@ workspace.
 
 ### Added
 - `zcash_client_backend::data_api::error::RewindError`
+- `zcash_client_backend::data_api::AccountBalance::ironwood_balance`, for
+  exposing Ironwood wallet funds separately from Orchard.
+- Ironwood scanning and tree APIs: `BlockMetadata::ironwood_tree_size`,
+  `NoteCommitmentTree::Ironwood`, `ScannedBlock::ironwood`, and Ironwood
+  tree methods on `WalletCommitmentTrees`.
 - `zcash_client_backend::wallet::WalletTransparentOutput`:
   - `recipient_account`
   - `recipient_key_scope`
@@ -78,6 +83,9 @@ workspace.
 - `zcash_client_backend::data_api::wallet::input_selection::ShieldingSelector`
   now requires implementors to provide `propose_shielding_coinbase` in
   addition to `propose_shielding`.
+- `zcash_client_backend::scanning::ScanError` variants for invalid encodings
+  and tree-size failures now report a `NoteCommitmentTree`, so Ironwood scan
+  failures are labeled separately from Orchard failures.
 - `zcash_client_backend::wallet::WalletTx::new` now takes a `transparent_outputs`
   argument.
 
