@@ -190,7 +190,8 @@ fn nu6_3_pczt_parts_with_orchard_style_outputs(ironwood: bool) -> PcztParts<Nu6_
             )
             .unwrap();
         builder
-            .add_ironwood_output::<zip317::FeeRule>(
+            .add_ironwood_change_output::<zip317::FeeRule>(
+                orchard_fvk.clone(),
                 Some(internal_ovk),
                 internal_recipient,
                 Zatoshis::const_from_u64(885_000),
@@ -199,7 +200,8 @@ fn nu6_3_pczt_parts_with_orchard_style_outputs(ironwood: bool) -> PcztParts<Nu6_
             .unwrap();
     } else {
         builder
-            .add_orchard_output::<zip317::FeeRule>(
+            .add_orchard_change_output::<zip317::FeeRule>(
+                orchard_fvk.clone(),
                 Some(orchard_ovk),
                 recipient,
                 Zatoshis::const_from_u64(100_000),
@@ -207,7 +209,8 @@ fn nu6_3_pczt_parts_with_orchard_style_outputs(ironwood: bool) -> PcztParts<Nu6_
             )
             .unwrap();
         builder
-            .add_orchard_output::<zip317::FeeRule>(
+            .add_orchard_change_output::<zip317::FeeRule>(
+                orchard_fvk.clone(),
                 Some(internal_ovk),
                 internal_recipient,
                 Zatoshis::const_from_u64(885_000),
