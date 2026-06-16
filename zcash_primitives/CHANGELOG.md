@@ -23,28 +23,12 @@ workspace.
   - `TxDigests::ironwood_digest`, for carrying the Ironwood bundle digest.
   - `TransactionDigest::{IronwoodDigest, digest_ironwood}`, for digest
     implementations that commit to Ironwood bundles.
-- `zcash_primitives::transaction::builder`:
-  - `BuildConfig::Standard::ironwood_anchor`, enabling callers to provide the
-    anchor for the separate Ironwood note commitment tree.
-  - `Builder::add_ironwood_spend` and `Builder::add_ironwood_output`, which
-    build Ironwood actions using the Ironwood note plaintext format.
-  - `Builder::add_orchard_change_output` and
-    `Builder::add_ironwood_change_output`, which add wallet-controlled retained
-    value outputs for Orchard and Ironwood bundles.
-  - `Builder::with_expiry_height`, enabling callers to override the default
-    transaction expiry height when constructing transactions or PCZTs.
-  - `Error::CoinbaseExpiryHeightMismatch`, returned when a coinbase builder's
-    expiry height does not match its target block height.
-  - `BuildResult::ironwood_meta`, which exposes the randomized action
-    positions for Ironwood bundles.
-  - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
-    Ironwood PCZT bundle data and randomized action positions.
 
 ### Changed
 - `zcash_primitives::transaction::builder`:
+  - NU6.3 standard builders use the NU6.3 Orchard bundle protocol when
+    constructing V6 transactions.
   - NU6.3 coinbase builders no longer expose Orchard outputs.
-  - `Builder::add_orchard_spend` and `Builder::add_ironwood_spend` now
-    explicitly enforce their note-version requirements.
 - `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest
   implementations can distinguish Orchard commitments by transaction format.
 
