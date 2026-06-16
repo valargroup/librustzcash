@@ -29,6 +29,8 @@ use zcash_keys::{
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
 };
 use zcash_note_encryption::Domain;
+#[cfg(feature = "unstable")]
+use zcash_primitives::transaction::TxVersion;
 use zcash_primitives::{
     block::BlockHash,
     transaction::{Transaction, TxId, components::sapling::zip212_enforcement, fees::FeeRule},
@@ -1091,6 +1093,43 @@ where
             memo,
             mode,
             confirmations_policy,
+            #[cfg(feature = "unstable")]
+            None,
+        )
+    }
+
+    /// Invokes [`propose_send_max_transfer`] with an explicit transaction version.
+    #[cfg(feature = "unstable")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_send_max_transfer_with_tx_version<FeeRuleT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        fee_rule: &FeeRuleT,
+        to: ZcashAddress,
+        memo: Option<MemoBytes>,
+        mode: MaxSpendMode,
+        confirmations_policy: ConfirmationsPolicy,
+        proposed_version: TxVersion,
+    ) -> Result<
+        Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
+        super::wallet::ProposeSendMaxErrT<DbT, Infallible, FeeRuleT>,
+    >
+    where
+        FeeRuleT: FeeRule + Clone,
+    {
+        let network = self.network().clone();
+        propose_send_max_transfer::<_, _, _, Infallible>(
+            self.wallet_mut(),
+            &network,
+            spend_from_account,
+            &[ShieldedProtocol::Sapling, ShieldedProtocol::Orchard],
+            fee_rule,
+            to,
+            memo,
+            mode,
+            confirmations_policy,
+            Some(proposed_version),
         )
     }
 
@@ -1130,6 +1169,53 @@ where
             fallback_change_pool,
             #[cfg(feature = "unstable")]
             None,
+        );
+
+        if let Ok(proposal) = &result {
+            check_proposal_serialization_roundtrip(self.wallet(), proposal);
+        }
+
+        result
+    }
+
+    /// Invokes [`propose_standard_transfer_to_address`] with an explicitly requested
+    /// transaction version.
+    #[cfg(feature = "unstable")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_standard_transfer_with_tx_version<CommitmentTreeErrT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        fee_rule: StandardFeeRule,
+        confirmations_policy: ConfirmationsPolicy,
+        to: &Address,
+        amount: Zatoshis,
+        memo: Option<MemoBytes>,
+        change_memo: Option<MemoBytes>,
+        fallback_change_pool: ShieldedProtocol,
+        proposed_version: TxVersion,
+    ) -> Result<
+        Proposal<StandardFeeRule, <DbT as InputSource>::NoteRef>,
+        super::wallet::ProposeTransferErrT<
+            DbT,
+            CommitmentTreeErrT,
+            GreedyInputSelector<DbT>,
+            SingleOutputChangeStrategy<DbT>,
+        >,
+    > {
+        let network = self.network().clone();
+        let result = propose_standard_transfer_to_address::<_, _, CommitmentTreeErrT>(
+            self.wallet_mut(),
+            &network,
+            fee_rule,
+            spend_from_account,
+            confirmations_policy,
+            to,
+            amount,
+            memo,
+            change_memo,
+            fallback_change_pool,
+            Some(proposed_version),
         );
 
         if let Ok(proposal) = &result {
@@ -1273,6 +1359,39 @@ where
             spend_from_account,
             ovk_policy,
             proposal,
+        )
+    }
+
+    /// Invokes [`create_pczt_from_proposal_with_tx_version`] with the given arguments.
+    ///
+    /// [`create_pczt_from_proposal_with_tx_version`]: super::wallet::create_pczt_from_proposal_with_tx_version
+    #[cfg(all(feature = "pczt", feature = "unstable"))]
+    #[allow(clippy::type_complexity)]
+    pub fn create_pczt_from_proposal_with_tx_version<InputsErrT, FeeRuleT, ChangeErrT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        ovk_policy: OvkPolicy,
+        proposal: &Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
+        proposed_version: TxVersion,
+    ) -> Result<
+        pczt::Pczt,
+        super::wallet::CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, DbT::NoteRef>,
+    >
+    where
+        <DbT as WalletRead>::AccountId: serde::Serialize,
+        FeeRuleT: FeeRule,
+    {
+        use super::wallet::create_pczt_from_proposal_with_tx_version;
+
+        let network = self.network().clone();
+
+        create_pczt_from_proposal_with_tx_version(
+            self.wallet_mut(),
+            &network,
+            spend_from_account,
+            ovk_policy,
+            proposal,
+            proposed_version,
         )
     }
 

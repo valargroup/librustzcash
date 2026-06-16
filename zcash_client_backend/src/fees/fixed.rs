@@ -30,6 +30,8 @@ pub struct SingleOutputChangeStrategy<I> {
     change_memo: Option<MemoBytes>,
     fallback_change_pool: ShieldedProtocol,
     dust_output_policy: DustOutputPolicy,
+    #[cfg(zcash_unstable = "nu6.3")]
+    force_legacy_orchard_change: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -50,8 +52,21 @@ impl<I> SingleOutputChangeStrategy<I> {
             change_memo,
             fallback_change_pool,
             dust_output_policy,
+            #[cfg(zcash_unstable = "nu6.3")]
+            force_legacy_orchard_change: false,
             meta_source: PhantomData,
         }
+    }
+
+    /// Requests legacy Orchard change instead of Ironwood change after NU6.3.
+    ///
+    /// This is intended for callers that explicitly build a transaction version
+    /// 5 PCZT for compatibility with signers that cannot parse v6 or Ironwood
+    /// bundle data.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn with_legacy_orchard_change(mut self) -> Self {
+        self.force_legacy_orchard_change = true;
+        self
     }
 }
 
@@ -96,6 +111,8 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
             self.fallback_change_pool,
             Zatoshis::ZERO,
             0,
+            #[cfg(zcash_unstable = "nu6.3")]
+            self.force_legacy_orchard_change,
         );
 
         single_pool_output_balance(

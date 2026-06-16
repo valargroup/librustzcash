@@ -586,6 +586,8 @@ pub(crate) mod tests {
     use zcash_primitives::transaction::fees::transparent;
     use zcash_protocol::value::Zatoshis;
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    use super::orchard;
     use super::sapling;
 
     #[derive(Debug)]
@@ -614,6 +616,28 @@ pub(crate) mod tests {
         }
         fn value(&self) -> Zatoshis {
             self.value
+        }
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    pub(crate) struct TestOrchardInput {
+        pub note_id: u32,
+        pub value: Zatoshis,
+        pub is_ironwood: bool,
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    impl orchard::InputView<u32> for TestOrchardInput {
+        fn note_id(&self) -> &u32 {
+            &self.note_id
+        }
+
+        fn value(&self) -> Zatoshis {
+            self.value
+        }
+
+        fn is_ironwood(&self) -> bool {
+            self.is_ironwood
         }
     }
 }

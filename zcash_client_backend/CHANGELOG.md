@@ -17,6 +17,11 @@ workspace.
 - Ironwood scanning and tree APIs: `BlockMetadata::ironwood_tree_size`,
   `NoteCommitmentTree::Ironwood`, `ScannedBlock::ironwood`, and Ironwood
   tree methods on `WalletCommitmentTrees`.
+- The NU6.3-gated Orchard to Ironwood migration API:
+  `data_api::wallet::create_orchard_to_ironwood_transaction` and
+  `data_api::wallet::MigrationTransaction`.
+- `data_api::wallet::create_pczt_from_proposal_with_tx_version`, for creating
+  a PCZT with an explicitly requested transaction version.
 - `zcash_client_backend::wallet::WalletTransparentOutput`:
   - `recipient_account`
   - `recipient_key_scope`
@@ -50,6 +55,11 @@ workspace.
     Tokio-based batch decryption engine for full blocks and transactions.
 
 ### Changed
+- `zcash_client_backend::data_api::wallet::propose_send_max_transfer` now
+  accepts an explicit transaction version under the `unstable` feature, so
+  callers can request legacy version 5 Orchard send-max proposals after NU6.3.
+  Its `ProposeSendMaxErrT` selection-error parameter is now
+  `GreedyInputSelectorError` instead of `BalanceError`.
 - `zcash_client_backend::data_api`:
   - Changes to the `InputSource` trait:
     - The result types of `InputSource::get_unspent_transparent_output` and
@@ -83,11 +93,18 @@ workspace.
 - `zcash_client_backend::data_api::wallet::input_selection::ShieldingSelector`
   now requires implementors to provide `propose_shielding_coinbase` in
   addition to `propose_shielding`.
+- `zcash_client_backend::wallet::WalletTx::new` now takes a `transparent_outputs`
+  argument.
 - `zcash_client_backend::scanning::ScanError` variants for invalid encodings
   and tree-size failures now report a `NoteCommitmentTree`, so Ironwood scan
   failures are labeled separately from Orchard failures.
-- `zcash_client_backend::wallet::WalletTx::new` now takes a `transparent_outputs`
-  argument.
+- `data_api::wallet::propose_standard_transfer_to_address` and
+  `create_pczt_from_proposal_with_tx_version` keep Orchard change in legacy
+  Orchard form when transaction version 5 is explicitly requested after NU6.3.
+
+### Fixed
+- `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
+  Ironwood sent output metadata added by `create_pczt_from_proposal`.
 
 ### Removed
 - `zcash_client_backend::data_api::WalletUtxo` (use `WalletTransparentOutput`

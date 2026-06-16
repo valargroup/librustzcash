@@ -519,11 +519,727 @@ pub(crate) fn mark_orchard_note_spent(
 #[cfg(test)]
 pub(crate) mod tests {
 
-    use zcash_client_backend::data_api::testing::{
-        orchard::OrchardPoolTester, sapling::SaplingPoolTester,
-    };
+    #[cfg(zcash_unstable = "nu6.3")]
+    use std::convert::Infallible;
 
-    use crate::testing::{self};
+    #[cfg(zcash_unstable = "nu6.3")]
+    use assert_matches::assert_matches;
+    use orchard::note::NoteVersion;
+    use zcash_client_backend::data_api::{
+        Account as _, TargetValue,
+        testing::{
+            AddressType, TestBuilder, orchard::OrchardPoolTester, pool::ShieldedPoolTester,
+            sapling::SaplingPoolTester,
+        },
+        wallet::{ConfirmationsPolicy, TargetHeight},
+    };
+    #[cfg(zcash_unstable = "nu6.3")]
+    use zcash_client_backend::data_api::{MaxSpendMode, WalletTest};
+    #[cfg(zcash_unstable = "nu6.3")]
+    use zcash_client_backend::{
+        data_api::{
+            WalletRead,
+            wallet::{
+                SpendingKeys, create_orchard_to_ironwood_transaction,
+                input_selection::GreedyInputSelector,
+            },
+        },
+        fees::{DustOutputPolicy, StandardFeeRule, standard},
+        wallet::OvkPolicy,
+    };
+    use zcash_primitives::block::BlockHash;
+    #[cfg(all(zcash_unstable = "nu6.3", feature = "unstable"))]
+    use zcash_primitives::transaction::TxVersion;
+    use zcash_protocol::value::Zatoshis;
+    #[cfg(zcash_unstable = "nu6.3")]
+    use zcash_protocol::{ShieldedProtocol, consensus::BlockHeight};
+    #[cfg(zcash_unstable = "nu6.3")]
+    use zip321::{Payment, TransactionRequest};
+
+    use super::{decode_note_version, encode_note_version};
+    use crate::testing::{self, BlockCache, db::TestDbFactory};
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn network_with_nu6_3() -> zcash_protocol::local_consensus::LocalNetwork {
+        zcash_protocol::local_consensus::LocalNetwork {
+            nu6_3: Some(BlockHeight::from_u32(100_000)),
+            ..TestBuilder::DEFAULT_NETWORK
+        }
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn mirror_orchard_tree_state_to_ironwood(conn: &rusqlite::Connection) {
+        conn.execute_batch(
+            "UPDATE blocks
+             SET ironwood_commitment_tree_size = orchard_commitment_tree_size,
+                 ironwood_action_count = orchard_action_count;
+
+             DELETE FROM ironwood_tree_checkpoint_marks_removed;
+             DELETE FROM ironwood_tree_checkpoints;
+             DELETE FROM ironwood_tree_cap;
+             DELETE FROM ironwood_tree_shards;
+
+             INSERT INTO ironwood_tree_shards SELECT * FROM orchard_tree_shards;
+             INSERT INTO ironwood_tree_cap SELECT * FROM orchard_tree_cap;
+             INSERT INTO ironwood_tree_checkpoints SELECT * FROM orchard_tree_checkpoints;
+             INSERT INTO ironwood_tree_checkpoint_marks_removed
+             SELECT * FROM orchard_tree_checkpoint_marks_removed;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn orchard_note_version_storage_codes_roundtrip() {
+        assert_eq!(encode_note_version(NoteVersion::V2), 2);
+        assert_eq!(encode_note_version(NoteVersion::V3), 3);
+        assert_eq!(decode_note_version(2).unwrap(), NoteVersion::V2);
+        assert_eq!(decode_note_version(3).unwrap(), NoteVersion::V3);
+        assert!(decode_note_version(4).is_err());
+    }
+
+    #[test]
+    fn persisted_orchard_note_version_controls_reconstruction() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let target_height = TargetHeight::from(height + 1);
+        let notes =
+            OrchardPoolTester::select_unspent_notes(&st, account.id(), target_height, &[]).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note().version(), NoteVersion::V2);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+
+        let notes =
+            OrchardPoolTester::select_unspent_notes(&st, account.id(), target_height, &[]).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note().version(), NoteVersion::V3);
+        assert_eq!(notes[0].note_value().unwrap(), value);
+    }
+
+    #[test]
+    fn spendable_selection_includes_v3_notes() {
+        let builder = TestBuilder::new();
+        #[cfg(zcash_unstable = "nu6.3")]
+        let builder = builder.with_network(network_with_nu6_3());
+        let mut st = builder
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let target_height = TargetHeight::from(height + 1);
+        let spendable = OrchardPoolTester::select_spendable_notes(
+            &st,
+            account.id(),
+            TargetValue::AtLeast(value),
+            target_height,
+            ConfirmationsPolicy::MIN,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(spendable.len(), 1);
+        assert_eq!(spendable[0].note().version(), NoteVersion::V2);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+        #[cfg(zcash_unstable = "nu6.3")]
+        mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
+
+        let spendable = OrchardPoolTester::select_spendable_notes(
+            &st,
+            account.id(),
+            TargetValue::AtLeast(value),
+            target_height,
+            ConfirmationsPolicy::MIN,
+            &[],
+        )
+        .unwrap();
+        if cfg!(zcash_unstable = "nu6.3") {
+            assert_eq!(spendable.len(), 1);
+            assert_eq!(spendable[0].note().version(), NoteVersion::V3);
+        } else {
+            assert!(spendable.is_empty());
+        }
+
+        let unspent =
+            OrchardPoolTester::select_unspent_notes(&st, account.id(), target_height, &[]).unwrap();
+        assert_eq!(unspent.len(), 1);
+        assert_eq!(unspent[0].note().version(), NoteVersion::V3);
+    }
+
+    #[test]
+    fn wallet_summary_counts_v3_notes_as_ironwood() {
+        let builder = TestBuilder::new();
+        #[cfg(zcash_unstable = "nu6.3")]
+        let builder = builder.with_network(network_with_nu6_3());
+        let mut st = builder
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+        let balance = summary.account_balances().get(&account.id()).unwrap();
+        assert_eq!(balance.orchard_balance().total(), value);
+        assert_eq!(balance.ironwood_balance().total(), Zatoshis::ZERO);
+        assert_eq!(balance.spendable_value(), value);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+        #[cfg(zcash_unstable = "nu6.3")]
+        mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
+
+        let summary = st.get_wallet_summary(ConfirmationsPolicy::MIN).unwrap();
+        let balance = summary.account_balances().get(&account.id()).unwrap();
+        assert_eq!(balance.orchard_balance().total(), Zatoshis::ZERO);
+        assert_eq!(balance.ironwood_balance().total(), value);
+        if cfg!(zcash_unstable = "nu6.3") {
+            assert_eq!(balance.ironwood_balance().spendable_value(), value);
+            assert_eq!(balance.spendable_value(), value);
+        } else {
+            assert_eq!(balance.ironwood_balance().spendable_value(), Zatoshis::ZERO);
+            assert_eq!(
+                balance.ironwood_balance().value_pending_spendability(),
+                value
+            );
+            assert_eq!(balance.spendable_value(), Zatoshis::ZERO);
+        }
+    }
+
+    #[test]
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn check_witnesses_repairs_v3_notes_against_ironwood_tree() {
+        let mut st = TestBuilder::new()
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        st.wallet()
+            .conn()
+            .execute_batch(
+                "UPDATE orchard_received_notes SET note_version = 3;
+                 UPDATE blocks
+                 SET ironwood_commitment_tree_size = orchard_commitment_tree_size,
+                     ironwood_action_count = orchard_action_count;
+                 DELETE FROM ironwood_tree_shards;",
+            )
+            .unwrap();
+
+        let ranges = st.wallet_mut().db_mut().check_witnesses().unwrap();
+        assert_eq!(ranges, vec![height..(height + 1)]);
+    }
+
+    #[test]
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn create_proposed_transfer_spends_v3_notes_as_ironwood() {
+        let network = network_with_nu6_3();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let prover = zcash_proofs::prover::LocalTxProver::bundled();
+        let network = *st.network();
+        let migration = create_orchard_to_ironwood_transaction(
+            st.wallet_mut(),
+            &network,
+            &prover,
+            &prover,
+            &SpendingKeys::from_unified_spending_key(account.usk().clone()),
+            OvkPolicy::Sender,
+            Zatoshis::const_from_u64(30000),
+            None,
+            &StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+        let (migration_height, _) = st.generate_next_block_including(migration.txid());
+        st.scan_cached_blocks(migration_height, 1);
+
+        let target_height = TargetHeight::from(migration_height + 1);
+        let spendable = OrchardPoolTester::select_spendable_notes(
+            &st,
+            account.id(),
+            TargetValue::AtLeast(Zatoshis::const_from_u64(50000)),
+            target_height,
+            ConfirmationsPolicy::MIN,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(spendable.len(), 1);
+        assert_eq!(spendable[0].note().version(), NoteVersion::V3);
+
+        let to = OrchardPoolTester::fvk_default_address(&dfvk);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10000),
+        )])
+        .unwrap();
+
+        let input_selector = GreedyInputSelector::new();
+        let change_strategy = standard::SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let step = proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(10000)
+        );
+        assert_eq!(step.balance().proposed_change().len(), 1);
+        assert_eq!(
+            step.balance().proposed_change()[0].value(),
+            Zatoshis::const_from_u64(60000)
+        );
+
+        let create_proposed_result = st
+            .create_proposed_transactions::<Infallible, _, Infallible, _>(
+                account.usk(),
+                OvkPolicy::Sender,
+                &proposal,
+            );
+        assert_matches!(&create_proposed_result, Ok(txids) if txids.len() == 1);
+        let sent_txid = create_proposed_result.unwrap()[0];
+
+        let tx = st
+            .wallet()
+            .get_transaction(sent_txid)
+            .unwrap()
+            .expect("Created transaction was stored.");
+        assert!(
+            tx.orchard_bundle().is_none(),
+            "post-NU6.3 sends from Ironwood must not create Orchard actions"
+        );
+        assert_eq!(tx.ironwood_bundle().unwrap().actions().len(), 2);
+
+        let sent_note_ids = st
+            .wallet()
+            .get_sent_note_ids(&sent_txid, ShieldedProtocol::Orchard)
+            .unwrap();
+        assert_eq!(sent_note_ids.len(), 2);
+
+        let (sent_height, _) = st.generate_next_block_including(sent_txid);
+        st.scan_cached_blocks(sent_height, 1);
+
+        let received_rows = st.wallet().conn().query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN rn.note_version = 3 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN sn.id IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN sn.output_pool = 4 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN vto.output_pool = 4 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(rn.value), 0)
+             FROM orchard_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             LEFT JOIN sent_notes sn
+               ON (sn.transaction_id, sn.output_pool, sn.output_index) =
+                  (rn.transaction_id, 4, rn.action_index)
+             JOIN v_tx_outputs vto
+               ON (vto.transaction_id, vto.output_pool, vto.output_index) =
+                  (rn.transaction_id, 4, rn.action_index)
+             WHERE t.txid = :txid",
+            rusqlite::named_params! { ":txid": sent_txid.as_ref() },
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        );
+        assert_eq!(received_rows.unwrap(), (2, 2, 2, 2, 2, 70000));
+
+        let send_max_proposal = st
+            .propose_send_max_transfer(
+                account.id(),
+                &StandardFeeRule::Zip317,
+                to.to_zcash_address(st.network()),
+                None,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let step = send_max_proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(10000)
+        );
+        assert!(step.balance().proposed_change().is_empty());
+        assert_eq!(
+            step.transaction_request().payments()[&0].amount(),
+            Some(Zatoshis::const_from_u64(60000))
+        );
+        let send_max_result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &send_max_proposal,
+        );
+        assert_matches!(&send_max_result, Ok(txids) if txids.len() == 1);
+
+        let send_max_tx = st
+            .wallet()
+            .get_transaction(send_max_result.unwrap()[0])
+            .unwrap()
+            .expect("Created send-max transaction was stored.");
+        assert!(
+            send_max_tx.orchard_bundle().is_none(),
+            "post-NU6.3 send-max from Ironwood must not create Orchard actions"
+        );
+        assert!(send_max_tx.ironwood_bundle().is_some());
+    }
+
+    #[test]
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn send_max_from_orchard_note_after_nu6_3_outputs_ironwood() {
+        let network = network_with_nu6_3();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let to = OrchardPoolTester::fvk_default_address(&dfvk);
+        let proposal = st
+            .propose_send_max_transfer(
+                account.id(),
+                &StandardFeeRule::Zip317,
+                to.to_zcash_address(st.network()),
+                None,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let step = proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(20000)
+        );
+        assert!(step.balance().proposed_change().is_empty());
+        assert_eq!(
+            step.transaction_request().payments()[&0].amount(),
+            Some(Zatoshis::const_from_u64(80000))
+        );
+        let create_result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+        assert_matches!(&create_result, Ok(txids) if txids.len() == 1);
+
+        let sent_txid = create_result.unwrap()[0];
+        let tx = st
+            .wallet()
+            .get_transaction(sent_txid)
+            .unwrap()
+            .expect("Created send-max transaction was stored.");
+        assert!(
+            tx.orchard_bundle().is_some(),
+            "the source Orchard note is spent from the Orchard bundle"
+        );
+        assert!(
+            tx.ironwood_bundle().is_some(),
+            "post-NU6.3 send-max to an Orchard receiver must create Ironwood output actions"
+        );
+        let orchard_action_count = tx.orchard_bundle().unwrap().actions().len();
+        let ironwood_action_count = tx.ironwood_bundle().unwrap().actions().len();
+
+        let sent_note_ids = st
+            .wallet()
+            .get_sent_note_ids(&sent_txid, ShieldedProtocol::Orchard)
+            .unwrap();
+        assert_eq!(sent_note_ids.len(), 1);
+
+        let (sent_height, _) = st.generate_next_block_including(sent_txid);
+        st.scan_cached_blocks(sent_height, 1);
+
+        let received_rows = st.wallet().conn().query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN rn.note_version = 3 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN sn.id IS NOT NULL THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN sn.output_pool = 4 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN vto.output_pool = 4 THEN 1 ELSE 0 END), 0),
+                    COALESCE(MIN(rn.action_index), -1),
+                    COALESCE(SUM(rn.value), 0)
+             FROM orchard_received_notes rn
+             JOIN transactions t ON t.id_tx = rn.transaction_id
+             LEFT JOIN sent_notes sn
+               ON (sn.transaction_id, sn.output_pool, sn.output_index) =
+                  (rn.transaction_id, 4, rn.action_index)
+             JOIN v_tx_outputs vto
+               ON (vto.transaction_id, vto.output_pool, vto.output_index) =
+                  (rn.transaction_id, 4, rn.action_index)
+             WHERE t.txid = :txid",
+            rusqlite::named_params! { ":txid": sent_txid.as_ref() },
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        );
+        let (
+            received_count,
+            v3_count,
+            sent_count,
+            sent_ironwood_count,
+            view_ironwood_count,
+            min_action_index,
+            value_sum,
+        ) = received_rows.unwrap();
+        assert_eq!(
+            (
+                received_count,
+                v3_count,
+                sent_count,
+                sent_ironwood_count,
+                view_ironwood_count,
+                value_sum
+            ),
+            (1, 1, 1, 1, 1, 80000)
+        );
+        let min_action_index = usize::try_from(min_action_index).unwrap();
+        assert!(min_action_index >= orchard_action_count);
+        assert!(min_action_index < orchard_action_count + ironwood_action_count);
+    }
+
+    #[test]
+    #[cfg(all(zcash_unstable = "nu6.3", feature = "unstable", feature = "pczt-tests"))]
+    fn send_max_from_orchard_note_after_nu6_3_can_create_legacy_v5_pczt() {
+        let network = network_with_nu6_3();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let to = OrchardPoolTester::fvk_default_address(&dfvk);
+        let proposal = st
+            .propose_send_max_transfer_with_tx_version(
+                account.id(),
+                &StandardFeeRule::Zip317,
+                to.to_zcash_address(st.network()),
+                None,
+                MaxSpendMode::MaxSpendable,
+                ConfirmationsPolicy::MIN,
+                TxVersion::V5,
+            )
+            .unwrap();
+        let step = proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(10000)
+        );
+        assert!(step.balance().proposed_change().is_empty());
+        assert_eq!(
+            step.transaction_request().payments()[&0].amount(),
+            Some(Zatoshis::const_from_u64(90000))
+        );
+
+        let pczt = st
+            .create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
+                account.id(),
+                OvkPolicy::Sender,
+                &proposal,
+                TxVersion::V5,
+            )
+            .unwrap();
+
+        assert_eq!(
+            *pczt.global().tx_version(),
+            zcash_protocol::constants::V5_TX_VERSION
+        );
+        assert!(!pczt.orchard().actions().is_empty());
+        assert!(pczt.ironwood().actions().is_empty());
+        pczt.serialize_legacy_v1().unwrap();
+    }
+
+    #[test]
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn fixed_send_from_orchard_note_after_nu6_3_outputs_ironwood() {
+        let network = network_with_nu6_3();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        let to = OrchardPoolTester::fvk_default_address(&dfvk);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10000),
+        )])
+        .unwrap();
+        let input_selector = GreedyInputSelector::new();
+        let change_strategy = standard::SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let step = proposal.steps().first();
+        assert_eq!(
+            step.balance().fee_required(),
+            Zatoshis::const_from_u64(20000)
+        );
+        assert_eq!(step.balance().proposed_change().len(), 1);
+        assert_eq!(
+            step.balance().proposed_change()[0].value(),
+            Zatoshis::const_from_u64(70000)
+        );
+
+        let create_result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
+            account.usk(),
+            OvkPolicy::Sender,
+            &proposal,
+        );
+        assert_matches!(&create_result, Ok(txids) if txids.len() == 1);
+
+        let tx = st
+            .wallet()
+            .get_transaction(create_result.unwrap()[0])
+            .unwrap()
+            .expect("Created fixed-send transaction was stored.");
+        assert!(
+            tx.orchard_bundle().is_some(),
+            "the source Orchard note is spent from the Orchard bundle"
+        );
+        assert_eq!(tx.ironwood_bundle().unwrap().actions().len(), 2);
+    }
+
+    #[test]
+    #[cfg(all(zcash_unstable = "nu6.3", feature = "unstable"))]
+    fn fixed_legacy_v5_send_rejects_v3_ironwood_note() {
+        let network = network_with_nu6_3();
+        let mut st = TestBuilder::new()
+            .with_network(network)
+            .with_data_store_factory(TestDbFactory::default())
+            .with_block_cache(BlockCache::new())
+            .with_account_from_sapling_activation(BlockHash([0; 32]))
+            .build();
+
+        let account = st.test_account().cloned().unwrap();
+        let dfvk = OrchardPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(100000);
+        let (height, _, _) = st.generate_next_block(&dfvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(height, 1);
+
+        st.wallet()
+            .conn()
+            .execute("UPDATE orchard_received_notes SET note_version = 3", [])
+            .unwrap();
+        mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
+
+        let recipient = OrchardPoolTester::fvk_default_address(&dfvk);
+        let proposal = st.propose_standard_transfer_with_tx_version::<Infallible>(
+            account.id(),
+            StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+            &recipient,
+            Zatoshis::const_from_u64(10000),
+            None,
+            None,
+            ShieldedProtocol::Orchard,
+            TxVersion::V5,
+        );
+
+        assert_matches!(
+            proposal,
+            Err(zcash_client_backend::data_api::error::Error::NoteSelection(
+                zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion
+            ))
+        );
+    }
 
     #[test]
     fn send_single_step_proposed_transfer() {
@@ -721,6 +1437,24 @@ pub(crate) mod tests {
     #[test]
     fn pczt_single_step_orchard_to_sapling() {
         testing::pool::pczt_single_step::<OrchardPoolTester, SaplingPoolTester>()
+    }
+
+    #[cfg(all(feature = "pczt-tests", zcash_unstable = "nu6.3"))]
+    #[test]
+    fn pczt_single_step_orchard_to_ironwood() {
+        testing::pool::pczt_single_step_orchard_to_ironwood()
+    }
+
+    #[cfg(all(feature = "pczt-tests", feature = "unstable", zcash_unstable = "nu6.3"))]
+    #[test]
+    fn pczt_legacy_v5_orchard_partial_unshield_after_nu6_3() {
+        testing::pool::pczt_legacy_v5_orchard_partial_unshield_after_nu6_3()
+    }
+
+    #[cfg(all(feature = "pczt-tests", feature = "unstable", zcash_unstable = "nu6.3"))]
+    #[test]
+    fn pczt_legacy_v5_orchard_full_unshield_after_nu6_3() {
+        testing::pool::pczt_legacy_v5_orchard_full_unshield_after_nu6_3()
     }
 
     #[cfg(feature = "transparent-inputs")]

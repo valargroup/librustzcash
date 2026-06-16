@@ -46,10 +46,14 @@ use shardtree::error::{QueryError, ShardTreeError};
 use super::InputSource;
 #[cfg(feature = "transparent-inputs")]
 use super::TransparentOutputFilter;
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+use crate::data_api::TargetValue;
 use crate::{
     data_api::{
         Account, MaxSpendMode, SentTransaction, SentTransactionOutput, WalletCommitmentTrees,
-        WalletRead, WalletWrite, error::Error, wallet::input_selection::propose_send_max,
+        WalletRead, WalletWrite,
+        error::Error,
+        wallet::input_selection::{GreedyInputSelectorError, propose_send_max},
     },
     decrypt_transaction,
     fees::{
@@ -125,6 +129,107 @@ use input_selection::{GreedyInputSelector, InputSelector, InputSelectorError};
 const PROPRIETARY_PROPOSAL_INFO: &str = "zcash_client_backend:proposal_info";
 #[cfg(feature = "pczt")]
 const PROPRIETARY_OUTPUT_INFO: &str = "zcash_client_backend:output_info";
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_note_from_pczt_parts(
+    recipient: orchard::Address,
+    value: orchard::value::NoteValue,
+    rho: orchard::note::Rho,
+    rseed: orchard::note::RandomSeed,
+    note_version: orchard::note::NoteVersion,
+) -> Option<orchard::Note> {
+    orchard::Note::from_parts(recipient, value, rho, rseed, note_version).into()
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+struct OrchardPcztOutputInfo<AccountId> {
+    pczt_recipient: PcztRecipient<AccountId>,
+    external_address: Option<ZcashAddress>,
+    note: orchard::Note,
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_zip32_derivation_for_account(
+    derivation: &crate::data_api::Zip32Derivation,
+    coin_type: u32,
+) -> orchard::pczt::Zip32Derivation {
+    orchard::pczt::Zip32Derivation::parse(
+        derivation.seed_fingerprint().to_bytes(),
+        vec![
+            zip32::ChildIndex::hardened(32).index(),
+            zip32::ChildIndex::hardened(coin_type).index(),
+            zip32::ChildIndex::hardened(u32::from(derivation.account_index())).index(),
+        ],
+    )
+    .expect("valid")
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_output_info_from_pczt_action<AccountId>(
+    act: &pczt::orchard::Action,
+) -> Result<Option<OrchardPcztOutputInfo<AccountId>>, PcztError>
+where
+    AccountId: serde::de::DeserializeOwned,
+{
+    let note = || {
+        let recipient = act
+            .output()
+            .recipient()
+            .as_ref()
+            .and_then(|b| ::orchard::Address::from_raw_address_bytes(b).into_option())?;
+        let value = act
+            .output()
+            .value()
+            .map(orchard::value::NoteValue::from_raw)?;
+        let rho = orchard::note::Rho::from_bytes(act.spend().nullifier()).into_option()?;
+        let rseed =
+            act.output().rseed().as_ref().and_then(|rseed| {
+                orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()
+            })?;
+
+        orchard_note_from_pczt_parts(
+            recipient,
+            value,
+            rho,
+            rseed,
+            (*act.output().note_version()).into(),
+        )
+    };
+
+    let external_address = act
+        .output()
+        .user_address()
+        .as_deref()
+        .map(ZcashAddress::try_from_encoded)
+        .transpose()
+        .map_err(|e| PcztError::Invalid(format!("Invalid user_address: {e}")))?;
+
+    let pczt_recipient = act
+        .output()
+        .proprietary()
+        .get(PROPRIETARY_OUTPUT_INFO)
+        .map(|v| postcard::from_bytes::<PcztRecipient<AccountId>>(v))
+        .transpose()
+        .map_err(|e: postcard::Error| {
+            PcztError::Invalid(format!(
+                "Postcard decoding of proprietary output info failed: {e}"
+            ))
+        })?
+        .map(|pczt_recipient| (pczt_recipient, external_address));
+
+    // If the pczt recipient is not present, this is a dummy note; if the note is not
+    // present, then the PCZT has been pruned to make this output unrecoverable and so we
+    // also ignore it.
+    Ok(pczt_recipient
+        .zip(note())
+        .map(
+            |((pczt_recipient, external_address), note)| OrchardPcztOutputInfo {
+                pczt_recipient,
+                external_address,
+                note,
+            },
+        ))
+}
 
 #[cfg(feature = "pczt")]
 fn serialize_target_height<S>(
@@ -245,7 +350,7 @@ pub type ProposeTransferErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT> = Error<
 pub type ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT> = Error<
     <DbT as WalletRead>::Error,
     CommitmentTreeErrT,
-    BalanceError,
+    GreedyInputSelectorError,
     <FeeRuleT as FeeRule>::Error,
     <FeeRuleT as FeeRule>::Error,
     <DbT as InputSource>::NoteRef,
@@ -271,6 +376,17 @@ pub type CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N> = Error<
     <FeeRuleT as FeeRule>::Error,
     ChangeErrT,
     N,
+>;
+
+/// Errors that may be generated in creating an Orchard to Ironwood migration transaction.
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+pub type MigrateToIronwoodErrT<DbT, FeeRuleT> = Error<
+    <DbT as WalletRead>::Error,
+    <DbT as WalletCommitmentTrees>::Error,
+    std::convert::Infallible,
+    <FeeRuleT as FeeRule>::Error,
+    std::convert::Infallible,
+    <DbT as InputSource>::NoteRef,
 >;
 
 /// Errors that may be generated in the execution of proposals that may send shielded inputs.
@@ -746,6 +862,12 @@ where
         fallback_change_pool,
         DustOutputPolicy::default(),
     );
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
+    let change_strategy = if matches!(proposed_version, Some(TxVersion::V5)) {
+        change_strategy.with_legacy_orchard_change()
+    } else {
+        change_strategy
+    };
 
     propose_transfer(
         wallet_db,
@@ -763,6 +885,10 @@ where
 /// Select transaction inputs, compute fees, and construct a proposal for a transaction or series
 /// of transactions that would spend all available funds from the given `spend_pool`s that can then
 /// be authorized and made ready for submission to the network with [`create_proposed_transactions`].
+///
+/// Under the `unstable` feature, `proposed_version` can be used to request a
+/// particular transaction version. A legacy version 5 request after NU6.3 keeps
+/// Orchard outputs in the legacy Orchard bundle and rejects Ironwood notes.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
@@ -775,6 +901,7 @@ pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
     memo: Option<MemoBytes>,
     mode: MaxSpendMode,
     confirmations_policy: ConfirmationsPolicy,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
     ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT>,
@@ -806,6 +933,8 @@ where
         confirmations_policy,
         recipient,
         memo,
+        #[cfg(feature = "unstable")]
+        proposed_version,
     )?;
 
     Ok(proposal)
@@ -988,6 +1117,297 @@ impl SpendingKeys {
     }
 }
 
+/// The result of creating an Orchard to Ironwood migration transaction.
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+pub struct MigrationTransaction {
+    txid: TxId,
+    fee_amount: Zatoshis,
+    migrated_amount: Zatoshis,
+}
+
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+impl MigrationTransaction {
+    /// Returns the ID of the created transaction.
+    pub fn txid(&self) -> TxId {
+        self.txid
+    }
+
+    /// Returns the fee paid by the created transaction.
+    pub fn fee_amount(&self) -> Zatoshis {
+        self.fee_amount
+    }
+
+    /// Returns the amount moved to Ironwood by the created transaction.
+    pub fn migrated_amount(&self) -> Zatoshis {
+        self.migrated_amount
+    }
+}
+
+/// Construct, prove, sign, and persist one Orchard-funded Ironwood migration transaction.
+///
+/// This is intentionally narrower than [`create_proposed_transactions`]. It spends only Orchard
+/// notes from the provided account and creates one Ironwood output to that account's internal
+/// Orchard receiver. The `amount` argument is a minimum migration amount; the transaction migrates
+/// the full selected Orchard value minus fees so that no Orchard change output is created.
+///
+/// The Ironwood output is inserted as a wallet-internal received note using
+/// the wallet's existing Orchard note storage. It is distinguished from
+/// Orchard notes by its `V3` note version.
+///
+/// # Errors
+///
+/// Returns an error if the wallet cannot identify the spending account, if the account
+/// does not have Orchard key material, if the wallet needs additional scan data to
+/// construct an anchor, if note selection cannot provide the requested minimum amount,
+/// if fee calculation or balance arithmetic fails, if the transaction builder, prover,
+/// or signer fails, or if the wallet data source fails while reading or persisting the
+/// migration transaction.
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+pub fn create_orchard_to_ironwood_transaction<DbT, ParamsT, FeeRuleT>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    spend_prover: &impl SpendProver,
+    output_prover: &impl OutputProver,
+    spending_keys: &SpendingKeys,
+    ovk_policy: OvkPolicy,
+    amount: Zatoshis,
+    memo: Option<MemoBytes>,
+    fee_rule: &FeeRuleT,
+    confirmations_policy: ConfirmationsPolicy,
+) -> Result<MigrationTransaction, MigrateToIronwoodErrT<DbT, FeeRuleT>>
+where
+    DbT: WalletWrite
+        + WalletCommitmentTrees
+        + InputSource<AccountId = <DbT as WalletRead>::AccountId, Error = <DbT as WalletRead>::Error>,
+    DbT::NoteRef: Copy + Eq + Ord,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+{
+    let ufvk = spending_keys.usk.to_unified_full_viewing_key();
+    let account_id = wallet_db
+        .get_account_for_ufvk(&ufvk)
+        .map_err(Error::DataSource)?
+        .ok_or(Error::KeyNotRecognized)?
+        .id();
+    let orchard_fvk = ufvk
+        .orchard()
+        .cloned()
+        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+    let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
+    let internal_ovk = match ovk_policy {
+        OvkPolicy::Sender => None,
+        OvkPolicy::Custom { internal_ovk, .. } => internal_ovk,
+        OvkPolicy::Discard => None,
+    };
+    let memo = memo.unwrap_or_else(MemoBytes::empty);
+
+    let (target_height, anchor_height) = wallet_db
+        .get_target_and_anchor_heights(confirmations_policy.trusted())
+        .map_err(Error::DataSource)?
+        .ok_or(Error::ScanRequired)?;
+
+    let mut fee_estimate = Zatoshis::ZERO;
+    let mut last_available = Zatoshis::ZERO;
+    let mut last_required: Option<Zatoshis>;
+    let mut excluded_ironwood_notes = Vec::new();
+
+    loop {
+        let required_estimate = (amount + fee_estimate).ok_or(BalanceError::Overflow)?;
+        last_required = Some(required_estimate);
+        let (orchard_notes, selected_value) = loop {
+            let selected_notes = wallet_db
+                .select_spendable_notes(
+                    account_id,
+                    TargetValue::AtLeast(required_estimate),
+                    &[ShieldedProtocol::Orchard],
+                    target_height,
+                    confirmations_policy,
+                    &excluded_ironwood_notes,
+                )
+                .map_err(Error::DataSource)?;
+
+            let mut orchard_notes = Vec::new();
+            let mut selected_value = Zatoshis::ZERO;
+            let excluded_count = excluded_ironwood_notes.len();
+
+            for selected in selected_notes.take_orchard() {
+                if selected.note().version() == orchard::note::NoteVersion::V3 {
+                    excluded_ironwood_notes.push(*selected.internal_note_id());
+                } else {
+                    selected_value =
+                        (selected_value + selected.note_value()?).ok_or(BalanceError::Overflow)?;
+                    orchard_notes.push(selected);
+                }
+            }
+
+            if selected_value >= required_estimate
+                || excluded_ironwood_notes.len() == excluded_count
+            {
+                break (orchard_notes, selected_value);
+            }
+        };
+        let previous_available = last_available;
+        last_available = selected_value;
+
+        if selected_value < required_estimate {
+            break;
+        }
+
+        let (orchard_anchor, orchard_inputs) = wallet_db
+            .with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|orchard_tree| {
+                let anchor = orchard_tree
+                    .root_at_checkpoint_id(&anchor_height)?
+                    .ok_or(ProposalError::AnchorNotFound(anchor_height))?
+                    .into();
+
+                let inputs: Vec<(orchard::Note, orchard::tree::MerklePath)> = orchard_notes
+                    .iter()
+                    .map(|selected| {
+                        orchard_tree
+                            .witness_at_checkpoint_id_caching(
+                                selected.note_commitment_tree_position(),
+                                &anchor_height,
+                            )
+                            .and_then(|witness| {
+                                witness.ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                            })
+                            .map(|merkle_path| (*selected.note(), merkle_path.into()))
+                            .map_err(Error::from)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                Ok((anchor, inputs))
+            })?;
+
+        let make_builder = |ironwood_amount: Zatoshis| {
+            let mut builder = Builder::new(
+                params.clone(),
+                BlockHeight::from(target_height),
+                BuildConfig::Standard {
+                    sapling_anchor: None,
+                    orchard_anchor: Some(orchard_anchor),
+                    ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                },
+            );
+
+            for (note, merkle_path) in orchard_inputs.iter() {
+                builder.add_orchard_spend(orchard_fvk.clone(), *note, merkle_path.clone())?;
+            }
+
+            builder.add_ironwood_change_output(
+                orchard_fvk.clone(),
+                internal_ovk.map(Into::into),
+                recipient,
+                ironwood_amount,
+                memo.clone(),
+            )?;
+
+            Ok::<_, zcash_primitives::transaction::builder::Error<FeeRuleT::Error>>(builder)
+        };
+
+        let builder_with_minimum_amount = make_builder(amount)?;
+        let fee_amount = builder_with_minimum_amount
+            .get_fee(fee_rule)
+            .map_err(|e| Error::Builder(zcash_primitives::transaction::builder::Error::Fee(e)))?;
+        let required = (amount + fee_amount).ok_or(BalanceError::Overflow)?;
+
+        if selected_value < required {
+            fee_estimate = fee_amount;
+            last_required = Some(required);
+            if selected_value <= previous_available {
+                break;
+            }
+            continue;
+        }
+
+        let migrated_amount = (selected_value - fee_amount).ok_or(BalanceError::Underflow)?;
+        let builder = if migrated_amount == amount {
+            builder_with_minimum_amount
+        } else {
+            make_builder(migrated_amount)?
+        };
+
+        let transparent_signing_set = TransparentSigningSet::new();
+        #[cfg(not(feature = "transparent-inputs"))]
+        let _ = &transparent_signing_set;
+        let sapling_extsks = &[
+            spending_keys.usk.sapling().clone(),
+            spending_keys.usk.sapling().derive_internal(),
+        ];
+        let orchard_saks = &[spending_keys.usk.orchard().into()];
+        let build_result = builder.build(
+            &transparent_signing_set,
+            sapling_extsks,
+            orchard_saks,
+            OsRng,
+            spend_prover,
+            output_prover,
+            fee_rule,
+        )?;
+        let txid = build_result.transaction().txid();
+        let raw_ironwood_output_index = build_result
+            .ironwood_meta()
+            .output_action_index(0)
+            .expect("migration transactions create one Ironwood output");
+        let output_index = build_result
+            .transaction()
+            .orchard_bundle()
+            .map_or(raw_ironwood_output_index, |bundle| {
+                bundle.actions().len() + raw_ironwood_output_index
+            });
+        let ironwood_note = build_result
+            .transaction()
+            .ironwood_bundle()
+            .and_then(|bundle| {
+                bundle
+                    .decrypt_output_with_key(
+                        raw_ironwood_output_index,
+                        &orchard_fvk.to_ivk(Scope::Internal),
+                    )
+                    .map(|(note, _, _)| Note::Orchard(note))
+            })
+            .expect("Wallet-internal Ironwood output must decrypt with the wallet's IVK");
+        let outputs = [SentTransactionOutput::from_parts(
+            output_index,
+            Recipient::InternalAccount {
+                receiving_account: account_id,
+                external_address: None,
+                note: Box::new(ironwood_note),
+            },
+            migrated_amount,
+            Some(memo),
+        )];
+        #[cfg(feature = "transparent-inputs")]
+        let utxos_spent = Vec::new();
+        let sent_tx = SentTransaction::new(
+            build_result.transaction(),
+            time::OffsetDateTime::now_utc(),
+            target_height,
+            account_id,
+            &outputs,
+            fee_amount,
+            #[cfg(feature = "transparent-inputs")]
+            &utxos_spent,
+        );
+
+        wallet_db
+            .store_transactions_to_be_sent(std::slice::from_ref(&sent_tx))
+            .map_err(Error::DataSource)?;
+
+        return Ok(MigrationTransaction {
+            txid,
+            fee_amount,
+            migrated_amount,
+        });
+    }
+
+    Err(Error::InsufficientFunds {
+        available: last_available,
+        required: last_required.unwrap_or(amount),
+    })
+}
+
 /// Construct, prove, and sign a transaction or series of transactions using the inputs supplied by
 /// the given proposal, and persist it to the wallet database.
 ///
@@ -999,6 +1419,9 @@ impl SpendingKeys {
 /// step is not supported, because the ultimate positions of those notes in the global note
 /// commitment tree cannot be known until the transaction that produces those notes is mined,
 /// and therefore the required spend proofs for such notes cannot be constructed.
+///
+/// Under the `unstable` feature, `proposed_version` can be used to request a
+/// particular transaction version.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn create_proposed_transactions<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
@@ -1167,6 +1590,8 @@ struct BuildState<'a, P, AccountId> {
     transparent_input_addresses: HashMap<TransparentAddress, TransparentAddressMetadata>,
     #[cfg(feature = "orchard")]
     orchard_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    ironwood_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
     sapling_output_meta: Vec<(BuildRecipient<AccountId>, Zatoshis, Option<MemoBytes>)>,
     transparent_output_meta: Vec<(
         BuildRecipient<AccountId>,
@@ -1208,6 +1633,17 @@ where
 {
     #[cfg(feature = "transparent-inputs")]
     let step_index = prior_step_results.len();
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let legacy_v5_orchard = {
+        #[cfg(feature = "unstable")]
+        {
+            matches!(proposed_version, Some(TxVersion::V5))
+        }
+        #[cfg(not(feature = "unstable"))]
+        {
+            false
+        }
+    };
 
     // We only support spending transparent payments or transparent ephemeral outputs from a
     // prior step (when "transparent-inputs" is enabled).
@@ -1286,7 +1722,12 @@ where
         .involves(PoolType::Shielded(ShieldedProtocol::Orchard))
     {
         proposal_step.shielded_inputs().map_or_else(
-            || Ok((Some(orchard::Anchor::empty_tree()), vec![])),
+            || {
+                Ok((
+                    Some(orchard::Anchor::empty_tree()),
+                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+                ))
+            },
             |inputs| {
                 wallet_db.with_orchard_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|orchard_tree| {
                     let anchor = orchard_tree
@@ -1294,12 +1735,28 @@ where
                         .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
                         .into();
 
-                    let orchard_inputs = inputs
-                        .notes()
-                        .iter()
-                        .filter_map(|selected| match selected.note() {
-                            #[cfg(feature = "orchard")]
-                            Note::Orchard(note) => orchard_tree
+                    let mut orchard_inputs =
+                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+
+                    for orchard_input in inputs.notes().iter().filter_map(|selected| match selected
+                        .note()
+                    {
+                        #[cfg(feature = "orchard")]
+                        #[cfg(not(zcash_unstable = "nu6.3"))]
+                        Note::Orchard(note) => orchard_tree
+                            .witness_at_checkpoint_id_caching(
+                                selected.note_commitment_tree_position(),
+                                &inputs.anchor_height(),
+                            )
+                            .and_then(|witness| {
+                                witness.ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                            })
+                            .map(|merkle_path| Some((note, merkle_path.into())))
+                            .map_err(Error::from)
+                            .transpose(),
+                        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+                        Note::Orchard(note) if note.version() != orchard::note::NoteVersion::V3 => {
+                            orchard_tree
                                 .witness_at_checkpoint_id_caching(
                                     selected.note_commitment_tree_position(),
                                     &inputs.anchor_height(),
@@ -1308,22 +1765,107 @@ where
                                     witness
                                         .ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
                                 })
-                                .map(|merkle_path| Some((note, merkle_path)))
+                                .map(|merkle_path| Some((note, merkle_path.into())))
                                 .map_err(Error::from)
-                                .transpose(),
-                            Note::Sapling(_) => None,
-                        })
-                        .collect::<Result<Vec<_>, Error<_, _, _, _, _, _>>>()?;
+                                .transpose()
+                        }
+                        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+                        Note::Orchard(_) => None,
+                        Note::Sapling(_) => None,
+                    }) {
+                        let (note, merkle_path) = orchard_input?;
+
+                        orchard_inputs.push((note, merkle_path));
+                    }
 
                     Ok((Some(anchor), orchard_inputs))
                 })
             },
         )?
     } else {
-        (None, vec![])
+        (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_anchor = None;
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let (ironwood_anchor, ironwood_inputs) = if legacy_v5_orchard {
+        if let Some(inputs) = proposal_step.shielded_inputs() {
+            if inputs.notes().iter().any(|selected| {
+                matches!(
+                    selected.note(),
+                    Note::Orchard(note) if note.version() == orchard::note::NoteVersion::V3
+                )
+            }) {
+                return Err(Error::ProposalNotSupported);
+            }
+        }
+
+        (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
+    } else if proposal_step.involves(PoolType::Shielded(ShieldedProtocol::Orchard)) {
+        proposal_step.shielded_inputs().map_or_else(
+            || {
+                Ok((
+                    Some(orchard::Anchor::empty_tree()),
+                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+                ))
+            },
+            |inputs| {
+                wallet_db.with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
+                    let anchor = ironwood_tree
+                        .root_at_checkpoint_id(&inputs.anchor_height())?
+                        .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
+                        .into();
+
+                    let mut ironwood_inputs =
+                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+
+                    for ironwood_input in
+                        inputs
+                            .notes()
+                            .iter()
+                            .filter_map(|selected| match selected.note() {
+                                Note::Orchard(note)
+                                    if note.version() == orchard::note::NoteVersion::V3 =>
+                                {
+                                    ironwood_tree
+                                        .witness_at_checkpoint_id_caching(
+                                            selected.note_commitment_tree_position(),
+                                            &inputs.anchor_height(),
+                                        )
+                                        .and_then(|witness| {
+                                            witness.ok_or(ShardTreeError::Query(
+                                                QueryError::CheckpointPruned,
+                                            ))
+                                        })
+                                        .map(|merkle_path| Some((note, merkle_path.into())))
+                                        .map_err(Error::from)
+                                        .transpose()
+                                }
+                                _ => None,
+                            })
+                    {
+                        ironwood_inputs.push(ironwood_input?);
+                    }
+
+                    Ok((Some(anchor), ironwood_inputs))
+                })
+            },
+        )?
+    } else {
+        (
+            None,
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
+    };
+    #[cfg(all(not(feature = "orchard"), zcash_unstable = "nu6.3"))]
+    let ironwood_anchor = None;
 
     // Create the transaction. The type of the proposal ensures that there
     // are no possible transparent inputs, so we ignore those here.
@@ -1334,7 +1876,7 @@ where
             sapling_anchor,
             orchard_anchor,
             #[cfg(zcash_unstable = "nu6.3")]
-            ironwood_anchor: None,
+            ironwood_anchor,
         },
     );
 
@@ -1346,7 +1888,16 @@ where
     #[cfg(all(feature = "transparent-inputs", not(feature = "orchard")))]
     let has_shielded_inputs = !sapling_inputs.is_empty();
     #[cfg(all(feature = "transparent-inputs", feature = "orchard"))]
-    let has_shielded_inputs = !(sapling_inputs.is_empty() && orchard_inputs.is_empty());
+    let has_shielded_inputs = !(sapling_inputs.is_empty() && orchard_inputs.is_empty() && {
+        #[cfg(zcash_unstable = "nu6.3")]
+        {
+            ironwood_inputs.is_empty()
+        }
+        #[cfg(not(zcash_unstable = "nu6.3"))]
+        {
+            true
+        }
+    });
 
     let input_sources = NonEmpty::from_vec({
         let mut sources = vec![];
@@ -1354,7 +1905,16 @@ where
             sources.push(PoolType::SAPLING);
         }
         #[cfg(feature = "orchard")]
-        if !orchard_inputs.is_empty() {
+        if !orchard_inputs.is_empty() || {
+            #[cfg(zcash_unstable = "nu6.3")]
+            {
+                !ironwood_inputs.is_empty()
+            }
+            #[cfg(not(zcash_unstable = "nu6.3"))]
+            {
+                false
+            }
+        } {
             sources.push(PoolType::ORCHARD);
         }
         // We assume here that prior step outputs cannot be shielded, due to checks above (and the
@@ -1389,7 +1949,18 @@ where
                 .cloned()
                 .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
             *orchard_note,
-            merkle_path.into(),
+            merkle_path,
+        )?;
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    for (ironwood_note, merkle_path) in ironwood_inputs.into_iter() {
+        builder.add_ironwood_spend(
+            ufvk.orchard()
+                .cloned()
+                .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?,
+            *ironwood_note,
+            merkle_path,
         )?;
     }
 
@@ -1518,6 +2089,8 @@ where
 
     #[cfg(feature = "orchard")]
     let mut orchard_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let mut ironwood_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
     let mut sapling_output_meta: Vec<(BuildRecipient<_>, Zatoshis, Option<MemoBytes>)> = vec![];
     let mut transparent_output_meta: Vec<(
         BuildRecipient<_>,
@@ -1586,6 +2159,30 @@ where
                 Ok(())
             };
 
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let add_ironwood_output =
+            |builder: &mut Builder<_, _>,
+             ironwood_output_meta: &mut Vec<_>,
+             to: orchard::Address|
+             -> Result<(), CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>> {
+                let memo = payment.memo().map_or_else(MemoBytes::empty, |m| m.clone());
+                builder.add_ironwood_output(
+                    external_ovk.map(|k| k.into()),
+                    to,
+                    payment_amount,
+                    memo.clone(),
+                )?;
+                ironwood_output_meta.push((
+                    BuildRecipient::External {
+                        recipient_address: recipient_address.clone(),
+                        output_pool: PoolType::ORCHARD,
+                    },
+                    payment_amount,
+                    Some(memo),
+                ));
+                Ok(())
+            };
+
         let add_transparent_output =
             |builder: &mut Builder<_, _>,
              transparent_output_meta: &mut Vec<_>,
@@ -1619,6 +2216,17 @@ where
                 #[cfg(feature = "orchard")]
                 PoolType::Shielded(ShieldedProtocol::Orchard) => {
                     let to = *ua.orchard().expect("The mapping between payment pool and receiver is checked in step construction");
+                    #[cfg(zcash_unstable = "nu6.3")]
+                    if params.is_nu_active(
+                        consensus::NetworkUpgrade::Nu6_3,
+                        BlockHeight::from(min_target_height),
+                    ) && !legacy_v5_orchard
+                    {
+                        add_ironwood_output(&mut builder, &mut ironwood_output_meta, to)?;
+                    } else {
+                        add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
+                    }
+                    #[cfg(not(zcash_unstable = "nu6.3"))]
                     add_orchard_output(&mut builder, &mut orchard_output_meta, to)?;
                 }
                 PoolType::Shielded(ShieldedProtocol::Sapling) => {
@@ -1682,22 +2290,70 @@ where
 
                 #[cfg(feature = "orchard")]
                 {
-                    builder.add_orchard_output(
-                        internal_ovk.map(|k| k.into()),
-                        ufvk.orchard()
-                            .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?
-                            .address_at(0u32, orchard::keys::Scope::Internal),
-                        change_value.value(),
-                        memo.clone(),
-                    )?;
-                    orchard_output_meta.push((
-                        BuildRecipient::InternalAccount {
-                            receiving_account: account_id,
-                            external_address: None,
-                        },
-                        change_value.value(),
-                        Some(memo),
-                    ))
+                    let orchard_fvk = ufvk
+                        .orchard()
+                        .cloned()
+                        .ok_or(Error::KeyNotAvailable(PoolType::ORCHARD))?;
+                    let change_address =
+                        orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
+
+                    #[cfg(zcash_unstable = "nu6.3")]
+                    if params.is_nu_active(
+                        consensus::NetworkUpgrade::Nu6_3,
+                        BlockHeight::from(min_target_height),
+                    ) && !legacy_v5_orchard
+                    {
+                        builder.add_ironwood_change_output(
+                            orchard_fvk.clone(),
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        ironwood_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    } else {
+                        builder.add_orchard_change_output(
+                            orchard_fvk.clone(),
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        orchard_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    }
+
+                    #[cfg(not(zcash_unstable = "nu6.3"))]
+                    {
+                        builder.add_orchard_change_output(
+                            orchard_fvk.clone(),
+                            internal_ovk.map(|k| k.into()),
+                            change_address,
+                            change_value.value(),
+                            memo.clone(),
+                        )?;
+                        orchard_output_meta.push((
+                            BuildRecipient::InternalAccount {
+                                receiving_account: account_id,
+                                external_address: None,
+                            },
+                            change_value.value(),
+                            Some(memo),
+                        ))
+                    }
                 }
             }
             PoolType::Transparent => {
@@ -1754,6 +2410,8 @@ where
         transparent_input_addresses,
         #[cfg(feature = "orchard")]
         orchard_output_meta,
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        ironwood_output_meta,
         sapling_output_meta,
         transparent_output_meta,
         #[cfg(feature = "transparent-inputs")]
@@ -1884,6 +2542,43 @@ where
         },
     );
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let ironwood_outputs = {
+        let orchard_action_count = build_result
+            .transaction()
+            .orchard_bundle()
+            .map_or(0, |bundle| bundle.actions().len());
+
+        build_state
+            .ironwood_output_meta
+            .into_iter()
+            .enumerate()
+            .map(|(i, (recipient, value, memo))| {
+                let raw_output_index = build_result
+                    .ironwood_meta()
+                    .output_action_index(i)
+                    .expect("An action should exist in the transaction for each Ironwood output.");
+                let output_index = orchard_action_count + raw_output_index;
+
+                let recipient = recipient.into_recipient_with_note(|| {
+                    build_result
+                        .transaction()
+                        .ironwood_bundle()
+                        .and_then(|bundle| {
+                            bundle
+                                .decrypt_output_with_key(raw_output_index, &orchard_internal_ivk)
+                                .map(|(note, _, _)| Note::Orchard(note))
+                        })
+                        .expect(
+                            "Wallet-internal Ironwood outputs must be decryptable with the wallet's IVK",
+                        )
+                });
+
+                SentTransactionOutput::from_parts(output_index, recipient, value, memo)
+            })
+            .collect::<Vec<_>>()
+    };
+
     let sapling_dfvk = spending_keys
         .usk
         .sapling()
@@ -1953,6 +2648,8 @@ where
     let mut outputs: Vec<SentTransactionOutput<_>> = vec![];
     #[cfg(feature = "orchard")]
     outputs.extend(orchard_outputs);
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    outputs.extend(ironwood_outputs);
     outputs.extend(sapling_outputs);
     outputs.extend(transparent_outputs);
 
@@ -1995,6 +2692,97 @@ where
     FeeRuleT: FeeRule,
     DbT::AccountId: serde::Serialize,
 {
+    create_pczt_from_proposal_internal(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        #[cfg(feature = "unstable")]
+        None,
+    )
+}
+
+/// Constructs a PCZT with an explicitly requested transaction version.
+///
+/// This can be used to create a version 5 PCZT after NU6.3 for compatibility
+/// with signers that cannot parse version 6 or Ironwood bundle data.
+///
+/// The supplied proposal must have been created for the same requested
+/// transaction version. For standard transfers, pass the same `TxVersion` to
+/// [`propose_standard_transfer_to_address`] before calling this function.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(all(feature = "pczt", feature = "unstable"))]
+pub fn create_pczt_from_proposal_with_tx_version<
+    DbT,
+    ParamsT,
+    InputsErrT,
+    FeeRuleT,
+    ChangeErrT,
+    N,
+>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    proposed_version: TxVersion,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
+    create_pczt_from_proposal_internal(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        Some(proposed_version),
+    )
+}
+
+#[cfg(all(feature = "pczt", feature = "unstable"))]
+fn ensure_created_pczt_matches_requested_version(
+    pczt: &pczt::Pczt,
+    requested_version: TxVersion,
+) -> Result<(), PcztError> {
+    let requested_tx_version = requested_version.header() & 0x7fff_ffff;
+    let global = pczt.global();
+
+    if *global.tx_version() != requested_tx_version
+        || *global.version_group_id() != requested_version.version_group_id()
+    {
+        return Err(PcztError::Invalid(format!(
+            "requested transaction version {requested_version:?} produced PCZT version {} with version group ID {}",
+            global.tx_version(),
+            global.version_group_id()
+        )));
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "pczt")]
+fn create_pczt_from_proposal_internal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
     use std::collections::HashSet;
 
     let account = wallet_db
@@ -2003,6 +2791,7 @@ where
         .ok_or(Error::AccountIdNotRecognized)?;
     let ufvk = account.ufvk().ok_or(Error::AccountCannotSpend)?;
     let account_derivation = account.source().key_derivation();
+    let coin_type = params.network_type().coin_type();
 
     // For now we only support turning single-step proposals into PCZTs.
     if proposal.steps().len() > 1 {
@@ -2026,13 +2815,17 @@ where
         #[cfg(feature = "transparent-inputs")]
         unused_transparent_outputs,
         #[cfg(feature = "unstable")]
-        None,
+        proposed_version,
     )?;
 
     // Build the transaction with the specified fee rule
     let build_result = build_state.builder.build_for_pczt(OsRng, fee_rule)?;
 
     let created = Creator::build_from_parts(build_result.pczt_parts).ok_or(PcztError::Build)?;
+    #[cfg(feature = "unstable")]
+    if let Some(proposed_version) = proposed_version {
+        ensure_created_pczt_matches_requested_version(&created, proposed_version)?;
+    }
 
     let io_finalized = IoFinalizer::new(created).finalize_io()?;
 
@@ -2051,12 +2844,41 @@ where
         })
         .collect::<HashMap<_, _>>();
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let ironwood_outputs = build_state
+        .ironwood_output_meta
+        .into_iter()
+        .enumerate()
+        .map(|(i, (recipient, _, _))| {
+            let output_index = build_result
+                .ironwood_meta
+                .output_action_index(i)
+                .expect("An action should exist in the transaction for each Ironwood output.");
+
+            (output_index, PcztRecipient::from_recipient(recipient))
+        })
+        .collect::<HashMap<_, _>>();
+
     #[cfg(feature = "orchard")]
     let orchard_spends = (0..)
         .map(|i| build_result.orchard_meta.spend_action_index(i))
         .take_while(|item| item.is_some())
         .flatten()
         .collect::<HashSet<_>>();
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let ironwood_spends = (0..)
+        .map(|i| build_result.ironwood_meta.spend_action_index(i))
+        .take_while(|item| item.is_some())
+        .flatten()
+        .collect::<HashSet<_>>();
+
+    #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu6.3"))]
+    if matches!(proposed_version, Some(TxVersion::V5))
+        && (!ironwood_spends.is_empty() || !ironwood_outputs.is_empty())
+    {
+        return Err(Error::ProposalNotSupported);
+    }
 
     let sapling_outputs = build_state
         .sapling_output_meta
@@ -2093,21 +2915,7 @@ where
                         if orchard_spends.contains(&index) {
                             // All spent notes are from the same account.
                             action_updater.set_spend_zip32_derivation(
-                                orchard::pczt::Zip32Derivation::parse(
-                                    derivation.seed_fingerprint().to_bytes(),
-                                    vec![
-                                        zip32::ChildIndex::hardened(32).index(),
-                                        zip32::ChildIndex::hardened(
-                                            params.network_type().coin_type(),
-                                        )
-                                        .index(),
-                                        zip32::ChildIndex::hardened(u32::from(
-                                            derivation.account_index(),
-                                        ))
-                                        .index(),
-                                    ],
-                                )
-                                .expect("valid"),
+                                orchard_zip32_derivation_for_account(derivation, coin_type),
                             );
                         }
                     }
@@ -2128,7 +2936,47 @@ where
                 })?;
             }
             Ok(())
+        })?;
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    let pczt = if ironwood_spends.is_empty() && ironwood_outputs.is_empty() {
+        pczt
+    } else {
+        pczt.update_ironwood_with(|mut updater| {
+            for index in 0..updater.bundle().actions().len() {
+                updater.update_action_with(index, |mut action_updater| {
+                    // If the account has a known derivation, add the Ironwood key path to the PCZT.
+                    if let Some(derivation) = account_derivation {
+                        // ironwood_spends will only contain action indices for the real spends, and
+                        // not the dummy inputs
+                        if ironwood_spends.contains(&index) {
+                            // All spent notes are from the same account.
+                            action_updater.set_spend_zip32_derivation(
+                                orchard_zip32_derivation_for_account(derivation, coin_type),
+                            );
+                        }
+                    }
+
+                    if let Some((pczt_recipient, external_address)) = ironwood_outputs.get(&index) {
+                        if let Some(user_address) = external_address {
+                            action_updater.set_output_user_address(user_address.encode());
+                        }
+                        action_updater.set_output_proprietary(
+                            PROPRIETARY_OUTPUT_INFO.into(),
+                            postcard::to_allocvec(pczt_recipient).expect(
+                                "postcard encoding of PCZT recipient metadata should not fail",
+                            ),
+                        );
+                    }
+
+                    Ok(())
+                })?;
+            }
+            Ok(())
         })?
+    };
+
+    let pczt = pczt
         .update_sapling_with(|mut updater| {
             // If the account has a known derivation, add the Sapling key path to the PCZT.
             if let Some(derivation) = account_derivation {
@@ -2284,7 +3132,7 @@ where
 ///   PCZT has a Sapling bundle, this function will return an error.
 /// - `orchard_vk` is optional to allow the caller to control where the Orchard verifying
 ///   key is generated or cached. If `orchard_vk` is `None`, and the PCZT has an Orchard
-///   bundle, an Orchard verifying key will be generated on the fly.
+///   or Ironwood bundle, an Orchard verifying key will be generated on the fly.
 #[cfg(feature = "pczt")]
 pub fn extract_and_store_transaction_from_pczt<DbT, N>(
     wallet_db: &mut DbT,
@@ -2321,57 +3169,15 @@ where
         .orchard()
         .actions()
         .iter()
-        .map(|act| {
-            let note = || {
-                let recipient =
-                    act.output().recipient().as_ref().and_then(|b| {
-                        ::orchard::Address::from_raw_address_bytes(b).into_option()
-                    })?;
-                let value = act
-                    .output()
-                    .value()
-                    .map(orchard::value::NoteValue::from_raw)?;
-                let rho = orchard::note::Rho::from_bytes(act.spend().nullifier()).into_option()?;
-                let rseed = act.output().rseed().as_ref().and_then(|rseed| {
-                    orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()
-                })?;
+        .map(orchard_output_info_from_pczt_action::<DbT::AccountId>)
+        .collect::<Result<Vec<_>, PcztError>>()?;
 
-                orchard::Note::from_parts(
-                    recipient,
-                    value,
-                    rho,
-                    rseed,
-                    orchard::note::NoteVersion::V2,
-                )
-                .into_option()
-            };
-
-            let external_address = act
-                .output()
-                .user_address()
-                .as_deref()
-                .map(ZcashAddress::try_from_encoded)
-                .transpose()
-                .map_err(|e| PcztError::Invalid(format!("Invalid user_address: {e}")))?;
-
-            let pczt_recipient = act
-                .output()
-                .proprietary()
-                .get(PROPRIETARY_OUTPUT_INFO)
-                .map(|v| postcard::from_bytes::<PcztRecipient<DbT::AccountId>>(v))
-                .transpose()
-                .map_err(|e: postcard::Error| {
-                    PcztError::Invalid(format!(
-                        "Postcard decoding of proprietary output info failed: {e}"
-                    ))
-                })?
-                .map(|pczt_recipient| (pczt_recipient, external_address));
-
-            // If the pczt recipient is not present, this is a dummy note; if the note is not
-            // present, then the PCZT has been pruned to make this output unrecoverable and so we
-            // also ignore it.
-            Ok(pczt_recipient.zip(note()))
-        })
+    #[cfg(zcash_unstable = "nu6.3")]
+    let ironwood_output_info = finalized
+        .ironwood()
+        .actions()
+        .iter()
+        .map(orchard_output_info_from_pczt_action::<DbT::AccountId>)
         .collect::<Result<Vec<_>, PcztError>>()?;
 
     let sapling_output_info = finalized
@@ -2468,6 +3274,10 @@ where
     }
     if let Some(orchard_vk) = orchard_vk {
         tx_extractor = tx_extractor.with_orchard(orchard_vk);
+        #[cfg(zcash_unstable = "nu6.3")]
+        {
+            tx_extractor = tx_extractor.with_ironwood(orchard_vk);
+        }
     }
     let transaction = tx_extractor.extract()?;
     let txid = transaction.txid();
@@ -2538,16 +3348,51 @@ where
                 .zip(orchard_output_info)
                 .enumerate()
                 .filter_map(|(output_index, (action, output_info))| {
-                    output_info.map(|((pczt_recipient, external_address), note)| {
+                    output_info.map(|output_info| {
                         let domain = OrchardDomain::for_action(action);
                         to_sent_transaction_output::<_, _, _, DbT, _>(
                             domain,
-                            note,
+                            output_info.note,
                             action,
                             ShieldedProtocol::Orchard,
                             output_index,
-                            pczt_recipient,
-                            external_address,
+                            output_info.pczt_recipient,
+                            output_info.external_address,
+                            |note| note.value().inner(),
+                            |memo| memo,
+                            Note::Orchard,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    let ironwood_outputs = transaction
+        .ironwood_bundle()
+        .map(|bundle| {
+            assert_eq!(bundle.actions().len(), ironwood_output_info.len());
+            let orchard_action_count = transaction
+                .orchard_bundle()
+                .map_or(0, |bundle| bundle.actions().len());
+
+            bundle
+                .actions()
+                .iter()
+                .zip(ironwood_output_info)
+                .enumerate()
+                .filter_map(|(raw_output_index, (action, output_info))| {
+                    output_info.map(|output_info| {
+                        let domain = OrchardDomain::for_action(action);
+                        to_sent_transaction_output::<_, _, _, DbT, _>(
+                            domain,
+                            output_info.note,
+                            action,
+                            ShieldedProtocol::Orchard,
+                            orchard_action_count + raw_output_index,
+                            output_info.pczt_recipient,
+                            output_info.external_address,
                             |note| note.value().inner(),
                             |memo| memo,
                             Note::Orchard,
@@ -2654,6 +3499,8 @@ where
     let mut outputs: Vec<SentTransactionOutput<_>> = vec![];
     #[cfg(feature = "orchard")]
     outputs.extend(orchard_outputs.into_iter().flatten());
+    #[cfg(zcash_unstable = "nu6.3")]
+    outputs.extend(ironwood_outputs.into_iter().flatten());
     outputs.extend(sapling_outputs.into_iter().flatten());
     outputs.extend(transparent_outputs.into_iter().flatten());
 
@@ -2764,4 +3611,67 @@ where
         #[cfg(feature = "unstable")]
         None,
     )
+}
+
+#[cfg(all(test, feature = "pczt", feature = "orchard"))]
+mod tests {
+    use orchard::{
+        keys::{FullViewingKey, Scope, SpendingKey},
+        note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
+        value::NoteValue,
+    };
+
+    use super::orchard_note_from_pczt_parts;
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
+    use zcash_primitives::transaction::TxVersion;
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
+    use zcash_protocol::consensus::BranchId;
+
+    fn test_rseed(rho: &Rho) -> RandomSeed {
+        (0u8..=u8::MAX)
+            .find_map(|b| RandomSeed::from_bytes([b; 32], rho).into())
+            .expect("at least one test rseed is valid")
+    }
+
+    #[test]
+    fn pczt_orchard_note_reconstruction_preserves_note_version() {
+        let sk = SpendingKey::from_bytes([7; 32]).unwrap();
+        let recipient = FullViewingKey::from(&sk).address_at(0u32, Scope::External);
+        let value = NoteValue::from_raw(50_000);
+        let rho = Rho::from_bytes(&[1; 32]).unwrap();
+        let rseed = test_rseed(&rho);
+
+        let note =
+            orchard_note_from_pczt_parts(recipient, value, rho, rseed, NoteVersion::V3).unwrap();
+        let default_note =
+            orchard::Note::from_parts(recipient, value, rho, rseed, NoteVersion::V2).unwrap();
+
+        assert_eq!(note.version(), NoteVersion::V3);
+        assert_eq!(default_note.version(), NoteVersion::V2);
+        assert_ne!(
+            ExtractedNoteCommitment::from(note.commitment()),
+            ExtractedNoteCommitment::from(default_note.commitment())
+        );
+    }
+
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
+    #[test]
+    fn requested_pczt_version_rejects_mismatched_created_pczt() {
+        let pczt = pczt::roles::creator::Creator::new(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            [0; 32],
+            [0; 32],
+        )
+        .with_ironwood_anchor([1; 32])
+        .build();
+
+        match super::ensure_created_pczt_matches_requested_version(&pczt, TxVersion::V5) {
+            Err(crate::data_api::error::PcztError::Invalid(msg)) => {
+                assert!(msg.contains("requested transaction version V5"));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
 }

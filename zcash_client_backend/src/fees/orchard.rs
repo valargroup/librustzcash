@@ -3,31 +3,10 @@
 
 use std::convert::Infallible;
 
-use orchard::{BundleActionCountError, BundleProtocol};
+use orchard::BundleProtocol;
 use zcash_protocol::value::Zatoshis;
 
-pub(crate) fn legacy_bundle_protocol() -> BundleProtocol {
-    // TODO: This is a PR52 compatibility shim. The txid/sighash split pins
-    // qr_orchard's protocol API so it can use format-aware bundle flags, but
-    // the later PCZT and client splits have not yet modeled separate Orchard
-    // and Ironwood bundle semantics. Keep existing callers on legacy Orchard
-    // rules here, then remove this helper when those splits pass the correct
-    // protocol through fee and input selection.
-    BundleProtocol::LegacyOrchard
-}
-
-pub(crate) fn action_count_error(err: BundleActionCountError) -> &'static str {
-    match err {
-        BundleActionCountError::InputCountOverflow => {
-            "Requested spend and output counts overflowed."
-        }
-        BundleActionCountError::SpendsDisabled => "Spends are disabled for this bundle.",
-        BundleActionCountError::OutputsDisabled => "Outputs are disabled for this bundle.",
-        _ => "The requested Orchard action count violates bundle constraints.",
-    }
-}
-
-/// A trait that provides a minimized view of Orchard-style bundle configuration
+/// A trait that provides a minimized view of Orchard bundle configuration
 /// suitable for use in fee and change calculation.
 pub trait BundleView<NoteRef> {
     /// The type of inputs to the bundle.
@@ -35,8 +14,8 @@ pub trait BundleView<NoteRef> {
     /// The type of inputs of the bundle.
     type Out: OutputView;
 
-    /// Returns the protocol rules for the bundle.
-    fn bundle_type(&self) -> BundleProtocol;
+    /// Returns the protocol used to construct the bundle.
+    fn bundle_protocol(&self) -> BundleProtocol;
     /// Returns the inputs to the bundle.
     fn inputs(&self) -> &[Self::In];
     /// Returns the outputs of the bundle.
@@ -49,7 +28,7 @@ impl<'a, NoteRef, In: InputView<NoteRef>, Out: OutputView> BundleView<NoteRef>
     type In = In;
     type Out = Out;
 
-    fn bundle_type(&self) -> BundleProtocol {
+    fn bundle_protocol(&self) -> BundleProtocol {
         self.0
     }
 
@@ -62,15 +41,15 @@ impl<'a, NoteRef, In: InputView<NoteRef>, Out: OutputView> BundleView<NoteRef>
     }
 }
 
-/// A [`BundleView`] for the empty legacy Orchard bundle.
+/// A [`BundleView`] for an empty Orchard bundle.
 pub struct EmptyBundleView;
 
 impl<NoteRef> BundleView<NoteRef> for EmptyBundleView {
     type In = Infallible;
     type Out = Infallible;
 
-    fn bundle_type(&self) -> BundleProtocol {
-        legacy_bundle_protocol()
+    fn bundle_protocol(&self) -> BundleProtocol {
+        BundleProtocol::LegacyOrchard
     }
 
     fn inputs(&self) -> &[Self::In] {
@@ -89,6 +68,11 @@ pub trait InputView<NoteRef> {
     fn note_id(&self) -> &NoteRef;
     /// The value of the input being spent.
     fn value(&self) -> Zatoshis;
+    /// Returns whether this input is an Ironwood note.
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn is_ironwood(&self) -> bool {
+        false
+    }
 }
 
 impl<N> InputView<N> for Infallible {

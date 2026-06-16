@@ -626,6 +626,8 @@ mod tests {
                 BuildConfig::Standard {
                     sapling_anchor: Some(sapling_anchor),
                     orchard_anchor: Some(orchard::Anchor::empty_tree()),
+                    #[cfg(zcash_unstable = "nu6.3")]
+                    ironwood_anchor: None,
                 },
             ),
             extension_id: 0,
