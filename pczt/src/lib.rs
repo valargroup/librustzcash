@@ -1697,10 +1697,15 @@ mod tests {
     #[test]
     fn serialize_v6_with_empty_actions_preserves_ironwood_metadata() {
         let anchor = [1; 32];
-        let pczt =
-            roles::creator::Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-                .with_ironwood_anchor(anchor)
-                .build();
+        let pczt = roles::creator::Creator::new_v6(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            [0; 32],
+            [0; 32],
+            anchor,
+        )
+        .build();
 
         let parsed = Pczt::parse(&pczt.serialize()).unwrap();
 

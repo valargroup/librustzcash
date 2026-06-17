@@ -14,10 +14,7 @@ use crate::{
 
 use zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID};
 #[cfg(zcash_unstable = "nu6.3")]
-use zcash_protocol::{
-    consensus::BranchId,
-    constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID},
-};
+use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
 
 /// Initial flags allowing any modification.
 const INITIAL_TX_MODIFIABLE: u8 = FLAG_TRANSPARENT_INPUTS_MODIFIABLE
@@ -34,14 +31,8 @@ pub struct Creator {
     expiry_height: u32,
     coin_type: u32,
     orchard_flags: u8,
-    #[cfg(feature = "orchard")]
-    orchard_flags_override: Option<orchard::bundle::Flags>,
-    #[cfg(zcash_unstable = "nu6.3")]
-    ironwood_flags: u8,
     sapling_anchor: [u8; 32],
     orchard_anchor: [u8; 32],
-    #[cfg(zcash_unstable = "nu6.3")]
-    ironwood_anchor: [u8; 32],
 }
 
 impl Creator {
@@ -61,14 +52,34 @@ impl Creator {
             expiry_height,
             coin_type,
             orchard_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
-            #[cfg(feature = "orchard")]
-            orchard_flags_override: None,
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood_flags: crate::IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
             sapling_anchor,
             orchard_anchor,
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood_anchor: crate::EMPTY_IRONWOOD_ANCHOR,
+        }
+    }
+
+    /// Creates a base PCZT using the v6 transaction format.
+    ///
+    /// Use this constructor when Ironwood metadata is needed. [`Creator::new`]
+    /// always creates a version 5 PCZT.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn new_v6(
+        consensus_branch_id: u32,
+        expiry_height: u32,
+        coin_type: u32,
+        sapling_anchor: [u8; 32],
+        orchard_anchor: [u8; 32],
+        ironwood_anchor: [u8; 32],
+    ) -> V6Creator {
+        V6Creator {
+            consensus_branch_id,
+            fallback_lock_time: None,
+            expiry_height,
+            coin_type,
+            sapling_anchor,
+            orchard_anchor,
+            orchard_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            ironwood_flags: crate::IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
+            ironwood_anchor,
         }
     }
 
@@ -79,77 +90,13 @@ impl Creator {
 
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
-        self.orchard_flags_override = Some(orchard_flags);
+        self.orchard_flags = orchard_flags
+            .to_byte(orchard::bundle::BundleFormat::PreNu6_3)
+            .expect("Orchard flags must be encodable in the pre-NU6.3 format");
         self
-    }
-
-    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-    pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
-        self.ironwood_flags = ironwood_flags
-            .to_byte(orchard::bundle::BundleFormat::Nu6_3)
-            .expect("Ironwood flags must be encodable in the NU6.3 format");
-        self.select_v6();
-        self
-    }
-
-    #[cfg(zcash_unstable = "nu6.3")]
-    pub fn with_ironwood_anchor(mut self, ironwood_anchor: [u8; 32]) -> Self {
-        self.ironwood_anchor = ironwood_anchor;
-        self.select_v6();
-        self
-    }
-
-    #[cfg(zcash_unstable = "nu6.3")]
-    fn select_v6(&mut self) {
-        if BranchId::try_from(self.consensus_branch_id) == Ok(BranchId::Nu6_3) {
-            self.tx_version = V6_TX_VERSION;
-            self.version_group_id = V6_VERSION_GROUP_ID;
-        }
     }
 
     pub fn build(self) -> Pczt {
-        #[cfg(feature = "orchard")]
-        let orchard_bundle_format = {
-            #[cfg(zcash_unstable = "nu6.3")]
-            {
-                if self.tx_version == V6_TX_VERSION {
-                    orchard::bundle::BundleFormat::Nu6_3
-                } else {
-                    orchard::bundle::BundleFormat::PreNu6_3
-                }
-            }
-
-            #[cfg(not(zcash_unstable = "nu6.3"))]
-            {
-                orchard::bundle::BundleFormat::PreNu6_3
-            }
-        };
-        #[cfg(feature = "orchard")]
-        let orchard_flags = self
-            .orchard_flags_override
-            .map(|flags| {
-                flags
-                    .to_byte(orchard_bundle_format)
-                    .expect("Orchard flags must be encodable for the selected transaction format")
-            })
-            .unwrap_or(self.orchard_flags);
-        #[cfg(not(feature = "orchard"))]
-        let orchard_flags = self.orchard_flags;
-
-        #[cfg(zcash_unstable = "nu6.3")]
-        let ironwood = if self.tx_version == V6_TX_VERSION {
-            crate::orchard::Bundle {
-                actions: vec![],
-                flags: self.ironwood_flags,
-                value_sum: (0, true),
-                anchor: self.ironwood_anchor,
-                zkproof: None,
-                bsk: None,
-            }
-        } else {
-            crate::empty_ironwood_bundle()
-        };
-
         Pczt {
             global: crate::common::Global {
                 tx_version: self.tx_version,
@@ -174,17 +121,107 @@ impl Creator {
             },
             orchard: crate::orchard::Bundle {
                 actions: vec![],
-                flags: orchard_flags,
+                flags: self.orchard_flags,
                 value_sum: (0, true),
                 anchor: self.orchard_anchor,
                 zkproof: None,
                 bsk: None,
             },
             #[cfg(zcash_unstable = "nu6.3")]
-            ironwood,
+            ironwood: crate::empty_ironwood_bundle(),
         }
     }
+}
 
+#[cfg(zcash_unstable = "nu6.3")]
+/// Builder returned by [`Creator::new_v6`] for version 6 PCZTs.
+///
+/// This type keeps version 6 and Ironwood-specific configuration separate from
+/// [`Creator`], which always produces version 5 PCZTs.
+pub struct V6Creator {
+    consensus_branch_id: u32,
+    fallback_lock_time: Option<u32>,
+    expiry_height: u32,
+    coin_type: u32,
+    sapling_anchor: [u8; 32],
+    orchard_anchor: [u8; 32],
+    orchard_flags: u8,
+    ironwood_flags: u8,
+    ironwood_anchor: [u8; 32],
+}
+
+#[cfg(zcash_unstable = "nu6.3")]
+impl V6Creator {
+    pub fn with_fallback_lock_time(mut self, fallback: u32) -> Self {
+        self.fallback_lock_time = Some(fallback);
+        self
+    }
+
+    #[cfg(feature = "orchard")]
+    pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
+        self.orchard_flags = orchard_flags
+            .to_byte(orchard::bundle::BundleFormat::Nu6_3)
+            .expect("Orchard flags must be encodable in the NU6.3 format");
+        self
+    }
+
+    #[cfg(feature = "orchard")]
+    pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
+        self.ironwood_flags = ironwood_flags
+            .to_byte(orchard::bundle::BundleFormat::Nu6_3)
+            .expect("Ironwood flags must be encodable in the NU6.3 format");
+        self
+    }
+
+    pub fn with_ironwood_anchor(mut self, ironwood_anchor: [u8; 32]) -> Self {
+        self.ironwood_anchor = ironwood_anchor;
+        self
+    }
+
+    pub fn build(self) -> Pczt {
+        Pczt {
+            global: crate::common::Global {
+                tx_version: V6_TX_VERSION,
+                version_group_id: V6_VERSION_GROUP_ID,
+                consensus_branch_id: self.consensus_branch_id,
+                fallback_lock_time: self.fallback_lock_time,
+                expiry_height: self.expiry_height,
+                coin_type: self.coin_type,
+                tx_modifiable: INITIAL_TX_MODIFIABLE,
+                proprietary: BTreeMap::new(),
+            },
+            transparent: crate::transparent::Bundle {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            sapling: crate::sapling::Bundle {
+                spends: vec![],
+                outputs: vec![],
+                value_sum: 0,
+                anchor: self.sapling_anchor,
+                bsk: None,
+            },
+            orchard: crate::orchard::Bundle {
+                actions: vec![],
+                flags: self.orchard_flags,
+                value_sum: (0, true),
+                anchor: self.orchard_anchor,
+                zkproof: None,
+                bsk: None,
+            },
+            ironwood: crate::orchard::Bundle {
+                actions: vec![],
+                flags: self.ironwood_flags,
+                value_sum: (0, true),
+                anchor: self.ironwood_anchor,
+                zkproof: None,
+                bsk: None,
+            },
+        }
+    }
+}
+
+impl Creator {
     /// Builds a PCZT from the output of a [`Builder`].
     ///
     /// Returns `None` if the `TxVersion` is incompatible with PCZTs, or if
@@ -327,10 +364,32 @@ mod tests {
 
     #[cfg(zcash_unstable = "nu6.3")]
     #[test]
-    fn ironwood_anchor_selects_v6() {
-        let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .with_ironwood_anchor([1; 32])
-            .build();
+    fn new_keeps_legacy_v5_format_on_nu6_3_branch() {
+        let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32]).build();
+        let fallback = crate::empty_ironwood_bundle();
+
+        assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
+        assert_eq!(pczt.global.version_group_id, V5_VERSION_GROUP_ID);
+        assert!(pczt.ironwood.actions.is_empty());
+        assert_eq!(pczt.ironwood.flags, fallback.flags);
+        assert_eq!(pczt.ironwood.value_sum, fallback.value_sum);
+        assert_eq!(pczt.ironwood.anchor, fallback.anchor);
+        assert_eq!(pczt.ironwood.zkproof, fallback.zkproof);
+        assert_eq!(pczt.ironwood.bsk, fallback.bsk);
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    #[test]
+    fn new_v6_selects_v6() {
+        let pczt = Creator::new_v6(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            [0; 32],
+            [0; 32],
+            [1; 32],
+        )
+        .build();
 
         assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
         assert_eq!(pczt.global.version_group_id, V6_VERSION_GROUP_ID);
@@ -339,40 +398,41 @@ mod tests {
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     #[test]
-    fn explicit_orchard_flags_use_v6_format_when_v6_is_selected() {
+    fn explicit_orchard_flags_use_selected_format() {
         let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
             .with_orchard_flags(orchard::bundle::Flags::ENABLED)
-            .with_ironwood_anchor([1; 32])
             .build();
+
+        assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
+        assert_eq!(pczt.orchard.flags, 0b0000_0011);
+
+        let pczt = Creator::new_v6(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            [0; 32],
+            [0; 32],
+            [1; 32],
+        )
+        .with_orchard_flags(orchard::bundle::Flags::ENABLED)
+        .build();
 
         assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
         assert_eq!(pczt.orchard.flags, 0b0000_0111);
 
-        let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .with_orchard_flags(orchard::bundle::Flags::CROSS_ADDRESS_DISABLED)
-            .with_ironwood_anchor([1; 32])
-            .build();
+        let pczt = Creator::new_v6(
+            BranchId::Nu6_3.into(),
+            10_000_000,
+            133,
+            [0; 32],
+            [0; 32],
+            [1; 32],
+        )
+        .with_orchard_flags(orchard::bundle::Flags::CROSS_ADDRESS_DISABLED)
+        .build();
 
         assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
         assert_eq!(pczt.orchard.flags, 0b0000_0011);
-    }
-
-    #[cfg(zcash_unstable = "nu6.3")]
-    #[test]
-    fn ironwood_anchor_for_pre_nu6_3_branch_remains_legacy_v5() {
-        let pczt = Creator::new(BranchId::Nu5.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .with_ironwood_anchor([1; 32])
-            .build();
-        let fallback = crate::empty_ironwood_bundle();
-
-        assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
-        assert_eq!(pczt.global.version_group_id, V5_VERSION_GROUP_ID);
-        assert_eq!(pczt.ironwood.anchor, fallback.anchor);
-        assert_eq!(pczt.ironwood.bsk, None);
-        assert_eq!(
-            Pczt::parse(&pczt.serialize()).unwrap().ironwood.anchor,
-            fallback.anchor
-        );
     }
 
     #[cfg(all(zcash_unstable = "nu6.3", feature = "zcp-builder"))]

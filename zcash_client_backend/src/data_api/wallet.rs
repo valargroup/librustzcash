@@ -3657,14 +3657,14 @@ mod tests {
     #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
     #[test]
     fn requested_pczt_version_rejects_mismatched_created_pczt() {
-        let pczt = pczt::roles::creator::Creator::new(
+        let pczt = pczt::roles::creator::Creator::new_v6(
             BranchId::Nu6_3.into(),
             10_000_000,
             133,
             [0; 32],
             [0; 32],
+            [1; 32],
         )
-        .with_ironwood_anchor([1; 32])
         .build();
 
         match super::ensure_created_pczt_matches_requested_version(&pczt, TxVersion::V5) {
