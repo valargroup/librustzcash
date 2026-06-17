@@ -44,7 +44,7 @@ workspace.
 - `zcash_primitives::transaction::builder`:
   - NU6.3 standard builders use the NU6.3 Orchard bundle protocol when
     constructing V6 transactions.
-  - NU6.3 coinbase builders no longer expose Orchard outputs.
+  - NU6.3 coinbase builders use Ironwood, not Orchard, for shielded outputs.
   - `Builder::add_orchard_spend` and `Builder::add_ironwood_spend` now
     explicitly enforce their note-version requirements.
 - `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest

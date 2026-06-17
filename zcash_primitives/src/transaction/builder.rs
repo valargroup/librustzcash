@@ -312,47 +312,6 @@ pub enum BuildConfig {
     },
 }
 
-/// Rules for constructing an Orchard-style bundle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OrchardBuilderConfig {
-    /// Construct a standard transactional bundle using the given protocol.
-    Transactional(orchard::BundleProtocol),
-    /// Construct a coinbase bundle using the given protocol.
-    Coinbase(orchard::BundleProtocol),
-}
-
-impl OrchardBuilderConfig {
-    fn builder(self, anchor: orchard::Anchor) -> orchard::builder::Builder {
-        match self {
-            OrchardBuilderConfig::Transactional(protocol) => {
-                orchard::builder::Builder::new(protocol, anchor)
-            }
-            OrchardBuilderConfig::Coinbase(protocol) => {
-                orchard::builder::Builder::new_coinbase(protocol, anchor)
-            }
-        }
-    }
-
-    fn action_count(
-        self,
-        num_spends: usize,
-        num_outputs: usize,
-    ) -> Result<usize, orchard::BundleActionCountError> {
-        match self {
-            OrchardBuilderConfig::Transactional(protocol) => {
-                protocol.transactional_action_count(num_spends, num_outputs)
-            }
-            OrchardBuilderConfig::Coinbase(protocol) => {
-                if num_spends > 0 {
-                    Err(orchard::BundleActionCountError::SpendsDisabled)
-                } else {
-                    Ok(protocol.coinbase_action_count(num_outputs))
-                }
-            }
-        }
-    }
-}
-
 impl BuildConfig {
     /// Returns the Sapling bundle type and anchor for this configuration.
     pub fn sapling_builder_config(
@@ -369,41 +328,58 @@ impl BuildConfig {
         }
     }
 
-    /// Returns the Orchard bundle type and anchor for this configuration.
-    pub fn orchard_builder_config(&self) -> Option<(OrchardBuilderConfig, orchard::Anchor)> {
+    /// Returns the Orchard builder for this configuration.
+    fn orchard_builder(&self) -> Option<orchard::builder::Builder> {
         match self {
             BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor.as_ref().map(|a| {
-                (
-                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::LegacyOrchard),
-                    *a,
-                )
+                orchard::builder::Builder::new(orchard::BundleProtocol::LegacyOrchard, *a)
             }),
-            BuildConfig::Coinbase { .. } => Some((
-                OrchardBuilderConfig::Coinbase(orchard::BundleProtocol::LegacyOrchard),
+            BuildConfig::Coinbase { .. } => Some(orchard::builder::Builder::new_coinbase(
+                orchard::BundleProtocol::LegacyOrchard,
                 orchard::Anchor::empty_tree(),
             )),
         }
     }
 
-    /// Returns the Ironwood bundle type and anchor for this configuration.
+    /// Returns the Ironwood builder for this configuration.
     #[cfg(zcash_unstable = "nu6.3")]
-    pub fn ironwood_builder_config(&self) -> Option<(OrchardBuilderConfig, orchard::Anchor)> {
+    fn ironwood_builder(&self) -> Option<orchard::builder::Builder> {
         match self {
             BuildConfig::Standard {
                 ironwood_anchor, ..
-            } => ironwood_anchor.as_ref().map(|a| {
-                (
-                    OrchardBuilderConfig::Transactional(orchard::BundleProtocol::Ironwood),
-                    *a,
-                )
-            }),
-            BuildConfig::Coinbase { .. } => None,
+            } => ironwood_anchor
+                .as_ref()
+                .map(|a| orchard::builder::Builder::new(orchard::BundleProtocol::Ironwood, *a)),
+            BuildConfig::Coinbase { .. } => Some(orchard::builder::Builder::new_coinbase(
+                orchard::BundleProtocol::Ironwood,
+                orchard::Anchor::empty_tree(),
+            )),
         }
     }
 
     /// Returns `true` if this configuration is for building a coinbase transaction.
     pub fn is_coinbase(&self) -> bool {
         matches!(self, BuildConfig::Coinbase { .. })
+    }
+}
+
+fn orchard_action_count(
+    builder: &orchard::builder::Builder,
+    is_coinbase: bool,
+) -> Result<usize, orchard::BundleActionCountError> {
+    let num_spends = builder.spends().len();
+    let num_outputs = builder.outputs().len();
+
+    if is_coinbase {
+        if num_spends > 0 {
+            Err(orchard::BundleActionCountError::SpendsDisabled)
+        } else {
+            Ok(builder.protocol().coinbase_action_count(num_outputs))
+        }
+    } else {
+        builder
+            .protocol()
+            .transactional_action_count(num_spends, num_outputs)
     }
 }
 
@@ -677,18 +653,14 @@ impl<'a, P: consensus::Parameters> Builder<'a, P, ()> {
         let orchard_builder = if orchard_builder_available
             && params.is_nu_active(NetworkUpgrade::Nu5, target_height)
         {
-            build_config
-                .orchard_builder_config()
-                .map(|(builder_config, anchor)| builder_config.builder(anchor))
+            build_config.orchard_builder()
         } else {
             None
         };
 
         #[cfg(zcash_unstable = "nu6.3")]
         let ironwood_builder = if params.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
-            build_config
-                .ironwood_builder_config()
-                .map(|(builder_config, anchor)| builder_config.builder(anchor))
+            build_config.ironwood_builder()
         } else {
             None
         };
@@ -1073,25 +1045,21 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .as_ref()
             .map_or(0, |builder| builder.inputs().len());
 
-        let orchard_actions = self.orchard_builder.as_ref().map_or(Ok(0), |builder| {
-            let builder_config = if self.build_config.is_coinbase() {
-                OrchardBuilderConfig::Coinbase(builder.protocol())
-            } else {
-                OrchardBuilderConfig::Transactional(builder.protocol())
-            };
+        let is_coinbase = self.build_config.is_coinbase();
 
-            builder_config
-                .action_count(builder.spends().len(), builder.outputs().len())
-                .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-        })?;
+        let orchard_actions = self
+            .orchard_builder
+            .as_ref()
+            .map_or(Ok(0), |builder| orchard_action_count(builder, is_coinbase))
+            .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))?;
 
         #[cfg(zcash_unstable = "nu6.3")]
         let orchard_actions = orchard_actions
-            + self.ironwood_builder.as_ref().map_or(Ok(0), |builder| {
-                OrchardBuilderConfig::Transactional(builder.protocol())
-                    .action_count(builder.spends().len(), builder.outputs().len())
-                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-            })?;
+            + self
+                .ironwood_builder
+                .as_ref()
+                .map_or(Ok(0), |builder| orchard_action_count(builder, is_coinbase))
+                .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))?;
 
         fee_rule
             .fee_required(
@@ -1132,25 +1100,21 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .as_ref()
             .map_or(0, |builder| builder.inputs().len());
 
-        let orchard_actions = self.orchard_builder.as_ref().map_or(Ok(0), |builder| {
-            let builder_config = if self.build_config.is_coinbase() {
-                OrchardBuilderConfig::Coinbase(builder.protocol())
-            } else {
-                OrchardBuilderConfig::Transactional(builder.protocol())
-            };
+        let is_coinbase = self.build_config.is_coinbase();
 
-            builder_config
-                .action_count(builder.spends().len(), builder.outputs().len())
-                .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-        })?;
+        let orchard_actions = self
+            .orchard_builder
+            .as_ref()
+            .map_or(Ok(0), |builder| orchard_action_count(builder, is_coinbase))
+            .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))?;
 
         #[cfg(zcash_unstable = "nu6.3")]
         let orchard_actions = orchard_actions
-            + self.ironwood_builder.as_ref().map_or(Ok(0), |builder| {
-                OrchardBuilderConfig::Transactional(builder.protocol())
-                    .action_count(builder.spends().len(), builder.outputs().len())
-                    .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))
-            })?;
+            + self
+                .ironwood_builder
+                .as_ref()
+                .map_or(Ok(0), |builder| orchard_action_count(builder, is_coinbase))
+                .map_err(|e| FeeError::Bundle(orchard_action_count_error(e)))?;
 
         fee_rule
             .fee_required_zfuture(
@@ -1843,6 +1807,9 @@ mod tests {
         },
     };
 
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    use super::orchard_action_count;
+
     #[cfg(all(
         feature = "circuits",
         zcash_unstable = "nu6.3",
@@ -1966,7 +1933,7 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
-    fn nu6_3_coinbase_builder_does_not_expose_orchard() {
+    fn nu6_3_coinbase_builder_uses_ironwood_not_orchard() {
         let tx_height = TEST_NETWORK.activation_height(NetworkUpgrade::Nu5).unwrap();
         let builder = Builder::new(
             Nu63Network,
@@ -1975,6 +1942,10 @@ mod tests {
         );
 
         assert!(builder.orchard_builder.is_none());
+        assert_eq!(
+            builder.ironwood_builder.as_ref().map(|b| b.protocol()),
+            Some(orchard::BundleProtocol::Ironwood)
+        );
     }
     // This test only works with the transparent_inputs feature because we have to
     // be able to create a tx with a valid balance, without using Sapling inputs.
@@ -2179,7 +2150,7 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
-    fn nu6_3_coinbase_builder_has_no_orchard_output_option() {
+    fn nu6_3_coinbase_builder_has_ironwood_output_option() {
         let recipient = orchard::keys::FullViewingKey::from(
             &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
         )
@@ -2198,6 +2169,23 @@ mod tests {
                 MemoBytes::empty(),
             ),
             Err(Error::OrchardBuilderNotAvailable)
+        );
+
+        builder
+            .add_ironwood_output::<Infallible>(
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+        assert_eq!(
+            builder.ironwood_builder.as_ref().map(|b| b.outputs().len()),
+            Some(1)
+        );
+        assert_eq!(
+            orchard_action_count(builder.ironwood_builder.as_ref().unwrap(), true).unwrap(),
+            1
         );
     }
 
