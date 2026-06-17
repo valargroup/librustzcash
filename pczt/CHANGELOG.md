@@ -28,6 +28,8 @@ workspace.
   `pczt::orchard::Output::note_version` getters. These fields are used to
   reconstruct Orchard note commitments with the intended note plaintext
   version.
+- `pczt::roles::creator::Creator::new_v6`, for explicitly creating version 6
+  PCZTs under the NU6.3 unstable cfg.
 
 ### Changed
 - Bumped the PCZT encoding version to 2 for serialized Orchard-style note
@@ -35,6 +37,9 @@ workspace.
 - Version 5 Orchard PCZTs now parse and serialize Orchard bundle flags using
   the pre NU6.3 bundle format. Version 6 Orchard and Ironwood PCZTs continue
   to use the NU6.3 bundle format.
+- `pczt::roles::creator::Creator::new` now always creates version 5 PCZTs.
+  Ironwood metadata setters are available only through the version 6 creator
+  returned by `Creator::new_v6`.
 - Orchard-shaped PCZT bundles are now validated against pool-specific note
   plaintext versions: Orchard actions require V2 and Ironwood actions require
   V3.
