@@ -2539,6 +2539,10 @@ fn fake_compact_block_from_compact_tx(
 // values.
 pub trait CacheInsertionResult {
     fn txids(&self) -> &[TxId];
+
+    fn compact_block(&self) -> Option<&CompactBlock> {
+        None
+    }
 }
 
 /// Trait used by tests that require a block cache.

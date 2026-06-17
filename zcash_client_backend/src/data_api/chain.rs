@@ -151,7 +151,7 @@
 //! # }
 //! ```
 
-use std::ops::Range;
+use std::{collections::HashSet, ops::Range};
 
 use incrementalmerkletree::frontier::Frontier;
 use subtle::ConditionallySelectable;
@@ -159,12 +159,15 @@ use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{self, BlockHeight};
 use zip32::Scope;
 
+#[cfg(feature = "transparent-inputs")]
+use {std::collections::HashMap, transparent::bundle::OutPoint};
+
 use crate::{
     data_api::WalletWrite,
-    proto::compact_formats::CompactBlock,
+    proto::compact_formats::{CompactBlock, CompactTx},
     scanning::{
         Nullifiers, ScanningKeys,
-        compact::{BatchRunners, scan_block_with_runners},
+        compact::{BatchRunners, ScanInputs, scan_block_with_runners},
     },
 };
 
@@ -177,6 +180,31 @@ pub mod error;
 use error::Error;
 
 use super::WalletRead;
+
+fn compact_tx_has_shielded_outputs(tx: &CompactTx) -> bool {
+    let has_sapling_outputs = !tx.outputs.is_empty();
+
+    #[cfg(feature = "orchard")]
+    {
+        has_sapling_outputs || !tx.actions.is_empty()
+    }
+
+    #[cfg(not(feature = "orchard"))]
+    {
+        has_sapling_outputs
+    }
+}
+
+#[cfg(feature = "transparent-inputs")]
+fn compact_tx_transparent_spends(tx: &CompactTx) -> Vec<OutPoint> {
+    tx.vin
+        .iter()
+        .filter_map(|input| {
+            let prevout_txid: [u8; 32] = input.prevout_txid.as_slice().try_into().ok()?;
+            Some(OutPoint::new(prevout_txid, input.prevout_index))
+        })
+        .collect()
+}
 
 /// A struct containing metadata about a subtree root of the note commitment tree.
 ///
@@ -608,7 +636,7 @@ where
     // Determine whether this scan range is contiguous with the wallet's fully-scanned
     // chain tip. If so, blocks are being appended linearly (the common case for ongoing
     // sync) and we can safely use External-only IVKs for the batch — Internal/change
-    // notes are recovered by the targeted three-trigger check inside
+    // notes are recovered by the targeted relevance checks inside
     // scan_block_with_runners. If non-contiguous (ChainTip jump, FoundNote backfill,
     // etc.), blocks may be scanned out of order, which means the wallet might not yet
     // know the nullifiers being spent. In that case, fall back to both IVKs for
@@ -670,12 +698,54 @@ where
         Some(limit),
         |block: CompactBlock| {
             scan_summary.scanned_range.end = block.height() + 1;
+            let wallet_relevant_txids = if is_contiguous {
+                let candidate_txids = block
+                    .vtx
+                    .iter()
+                    .filter(|tx| compact_tx_has_shielded_outputs(tx))
+                    .map(|tx| tx.txid())
+                    .collect::<HashSet<_>>();
+
+                let wallet_relevant_txids = data_db
+                    .get_txids_with_raw_transaction_data(&candidate_txids)
+                    .map_err(Error::Wallet)?;
+
+                #[cfg(feature = "transparent-inputs")]
+                let wallet_relevant_txids = {
+                    let mut wallet_relevant_txids = wallet_relevant_txids;
+                    let tx_spends = block
+                        .vtx
+                        .iter()
+                        .filter(|tx| compact_tx_has_shielded_outputs(tx))
+                        .filter_map(|tx| {
+                            let transparent_spends = compact_tx_transparent_spends(tx);
+                            (!transparent_spends.is_empty())
+                                .then(|| (tx.txid(), transparent_spends))
+                        })
+                        .collect::<HashMap<_, _>>();
+
+                    wallet_relevant_txids.extend(
+                        data_db
+                            .get_txids_spending_wallet_transparent_outputs(&tx_spends)
+                            .map_err(Error::Wallet)?,
+                    );
+
+                    wallet_relevant_txids
+                };
+
+                wallet_relevant_txids
+            } else {
+                HashSet::new()
+            };
             let scanned_block = scan_block_with_runners::<_, _, _, (), ()>(
                 params,
                 block,
-                &scanning_keys,
-                &internal_keys,
-                &nullifiers,
+                ScanInputs::new(
+                    &scanning_keys,
+                    &internal_keys,
+                    &nullifiers,
+                    &wallet_relevant_txids,
+                ),
                 prior_block_metadata.as_ref(),
                 Some(&mut runners),
             )

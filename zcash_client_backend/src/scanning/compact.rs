@@ -8,7 +8,7 @@ use subtle::ConditionallySelectable;
 
 use tracing::{debug, trace};
 use zcash_note_encryption::batch;
-use zcash_primitives::transaction::components::sapling::zip212_enforcement;
+use zcash_primitives::transaction::{TxId, components::sapling::zip212_enforcement};
 use zcash_protocol::{
     ShieldedProtocol,
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
@@ -172,13 +172,34 @@ where
     }
 }
 
+pub(crate) struct ScanInputs<'a, AccountId, IvkTag> {
+    scanning_keys: &'a ScanningKeys<AccountId, IvkTag>,
+    internal_keys: &'a ScanningKeys<AccountId, IvkTag>,
+    nullifiers: &'a Nullifiers<AccountId>,
+    wallet_relevant_txids: &'a HashSet<TxId>,
+}
+
+impl<'a, AccountId, IvkTag> ScanInputs<'a, AccountId, IvkTag> {
+    pub(crate) fn new(
+        scanning_keys: &'a ScanningKeys<AccountId, IvkTag>,
+        internal_keys: &'a ScanningKeys<AccountId, IvkTag>,
+        nullifiers: &'a Nullifiers<AccountId>,
+        wallet_relevant_txids: &'a HashSet<TxId>,
+    ) -> Self {
+        Self {
+            scanning_keys,
+            internal_keys,
+            nullifiers,
+            wallet_relevant_txids,
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, fields(height = block.height))]
 pub(crate) fn scan_block_with_runners<P, AccountId, IvkTag, TS, TO>(
     params: &P,
     block: CompactBlock,
-    scanning_keys: &ScanningKeys<AccountId, IvkTag>,
-    internal_keys: &ScanningKeys<AccountId, IvkTag>,
-    nullifiers: &Nullifiers<AccountId>,
+    scan_inputs: ScanInputs<'_, AccountId, IvkTag>,
     prior_block_metadata: Option<&BlockMetadata>,
     mut batch_runners: Option<&mut BatchRunners<IvkTag, TS, TO>>,
 ) -> Result<ScannedBlock<AccountId>, ScanError>
@@ -246,7 +267,7 @@ where
 
         let (sapling_spends, sapling_unlinked_nullifiers) = find_spent(
             &tx.spends,
-            &nullifiers.sapling,
+            &scan_inputs.nullifiers.sapling,
             |spend| {
                 spend.nf().expect(
                     "Could not deserialize nullifier for spend from protobuf representation.",
@@ -261,7 +282,7 @@ where
         let orchard_spends = {
             let (orchard_spends, orchard_unlinked_nullifiers) = find_spent(
                 &tx.actions,
-                &nullifiers.orchard,
+                &scan_inputs.nullifiers.orchard,
                 |spend| {
                     spend.nf().expect(
                         "Could not deserialize nullifier for spend from protobuf representation.",
@@ -285,7 +306,7 @@ where
             pos_tracker.compact_tx_contains_last_sapling_outputs_in_block(&tx),
             txid,
             |output_idx| pos_tracker.sapling_note_position(output_idx),
-            &scanning_keys.sapling,
+            &scan_inputs.scanning_keys.sapling,
             &spent_from_accounts,
             &tx.outputs
                 .iter()
@@ -323,7 +344,7 @@ where
             pos_tracker.compact_tx_contains_last_orchard_actions_in_block(&tx),
             txid,
             |output_idx| pos_tracker.orchard_note_position(output_idx),
-            &scanning_keys.orchard,
+            &scan_inputs.scanning_keys.orchard,
             &spent_from_accounts,
             &tx.actions
                 .iter()
@@ -354,11 +375,9 @@ where
         #[cfg(feature = "orchard")]
         orchard_note_commitments.append(&mut orchard_nc);
 
-        // Targeted Internal IVK pass: when a transaction is identified as
-        // wallet-relevant (by nullifier match, External-IVK match, or the
-        // shielding-transaction pattern), try Internal IVK on its shielded
-        // outputs to recover change notes. This avoids trying Internal IVK on
-        // every output in the block while still finding all wallet notes.
+        // Targeted Internal IVK pass: when a transaction is identified as wallet-relevant, try
+        // Internal IVK on its shielded outputs to recover change notes. This avoids trying
+        // Internal IVK on every output in the block while still finding wallet notes.
         let has_shielded_outputs = !tx.outputs.is_empty();
         #[cfg(feature = "orchard")]
         let has_shielded_outputs = has_shielded_outputs || !tx.actions.is_empty();
@@ -371,6 +390,10 @@ where
         #[cfg(feature = "orchard")]
         let trigger_external = trigger_external || !orchard_outputs.is_empty();
 
+        // Wallet-relevant transaction IDs cover compact block streams that omit transparent inputs,
+        // and restore cases where transparent inputs can be matched to wallet UTXOs.
+        let trigger_wallet_relevant_txid = scan_inputs.wallet_relevant_txids.contains(&txid);
+
         // Shielding pattern: transparent inputs + shielded outputs + no
         // shielded spends. This catches transactions that convert transparent
         // funds to Internal-scope shielded notes and would otherwise be
@@ -382,14 +405,20 @@ where
         let trigger_shielding =
             !tx.vin.is_empty() && has_shielded_outputs && has_no_shielded_spends;
 
-        if (trigger_nullifier || trigger_external || trigger_shielding) && has_shielded_outputs {
+        if (trigger_nullifier
+            || trigger_external
+            || trigger_shielding
+            || trigger_wallet_relevant_txid)
+            && has_shielded_outputs
+        {
             tracing::debug!(
-                "Targeted Internal IVK on tx {} at height {} (triggers: nullifier={}, external={}, shielding={})",
+                "Targeted Internal IVK on tx {} at height {} (triggers: nullifier={}, external={}, shielding={}, wallet_relevant_txid={})",
                 txid,
                 cur_height,
                 trigger_nullifier,
                 trigger_external,
                 trigger_shielding,
+                trigger_wallet_relevant_txid,
             );
             // Try Internal IVK on Sapling outputs of this transaction.
             if !tx.outputs.is_empty() {
@@ -418,7 +447,7 @@ where
                         false, // not last commitments — already tracked
                         txid,
                         |output_idx| pos_tracker.sapling_note_position(output_idx),
-                        &internal_keys.sapling,
+                        &scan_inputs.internal_keys.sapling,
                         &spent_from_accounts,
                         &decoded_sapling,
                         None::<
@@ -485,7 +514,7 @@ where
                         false,
                         txid,
                         |output_idx| pos_tracker.orchard_note_position(output_idx),
-                        &internal_keys.orchard,
+                        &scan_inputs.internal_keys.orchard,
                         &spent_from_accounts,
                         &decoded_orchard,
                         None::<
@@ -755,22 +784,26 @@ impl PositionTracker {
 #[cfg(test)]
 mod tests {
 
-    use std::convert::Infallible;
+    use std::{collections::HashSet, convert::Infallible};
 
     use incrementalmerkletree::{Marking, Position, Retention};
     use sapling::Nullifier;
     use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::{
+        TxId,
         consensus::{BlockHeight, Network},
         value::Zatoshis,
     };
-    use zip32::AccountId;
+    use zip32::{AccountId, Scope};
 
-    use super::{BatchRunners, scan_block_with_runners};
+    use super::{BatchRunners, ScanInputs, scan_block_with_runners};
     use crate::{
         data_api::BlockMetadata,
-        scanning::{Nullifiers, ScanningKeys, scan_block, testing::fake_compact_block},
+        scanning::{
+            Nullifiers, ScanningKeys, scan_block,
+            testing::{fake_compact_block, fake_compact_block_with_internal_output},
+        },
     };
 
     #[test]
@@ -811,9 +844,12 @@ mod tests {
             let scanned_block = scan_block_with_runners(
                 &network,
                 cb,
-                &scanning_keys,
-                &empty_internal,
-                &Nullifiers::empty(),
+                ScanInputs::new(
+                    &scanning_keys,
+                    &empty_internal,
+                    &Nullifiers::empty(),
+                    &HashSet::new(),
+                ),
                 Some(&BlockMetadata::from_parts(
                     BlockHeight::from(0),
                     BlockHash([0u8; 32]),
@@ -899,9 +935,12 @@ mod tests {
             let scanned_block = scan_block_with_runners(
                 &network,
                 cb,
-                &scanning_keys,
-                &empty_internal,
-                &Nullifiers::empty(),
+                ScanInputs::new(
+                    &scanning_keys,
+                    &empty_internal,
+                    &Nullifiers::empty(),
+                    &HashSet::new(),
+                ),
                 None,
                 batch_runners.as_mut(),
             )
@@ -933,6 +972,107 @@ mod tests {
                     }
                 ]
             );
+        }
+
+        go(false);
+        go(true);
+    }
+
+    #[test]
+    fn scan_block_with_wallet_relevant_txid_recovers_internal_output() {
+        fn scan_with_relevant_txids(
+            network: &Network,
+            cb: crate::proto::compact_formats::CompactBlock,
+            scanning_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
+            internal_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
+            wallet_relevant_txids: &HashSet<TxId>,
+            scan_multithreaded: bool,
+        ) -> crate::data_api::ScannedBlock<AccountId> {
+            let mut batch_runners = if scan_multithreaded {
+                let mut runners = BatchRunners::<_, (), ()>::for_keys(10, scanning_keys);
+                runners.add_block(network, cb.clone()).unwrap();
+                runners.flush();
+
+                Some(runners)
+            } else {
+                None
+            };
+
+            scan_block_with_runners(
+                network,
+                cb,
+                ScanInputs::new(
+                    scanning_keys,
+                    internal_keys,
+                    &Nullifiers::empty(),
+                    wallet_relevant_txids,
+                ),
+                None,
+                batch_runners.as_mut(),
+            )
+            .unwrap()
+        }
+
+        fn go(scan_multithreaded: bool) {
+            let network = Network::TestNetwork;
+            let account = AccountId::ZERO;
+            let usk =
+                UnifiedSpendingKey::from_seed(&network, &[0u8; 32], account).expect("Valid USK");
+            let ufvk = usk.to_unified_full_viewing_key();
+            let sapling_dfvk = ufvk.sapling().expect("Sapling key is present").clone();
+            let scanning_keys = ScanningKeys::from_account_ufvks_with_scopes(
+                [(account, ufvk.clone())],
+                &[Scope::External],
+            );
+            let internal_keys =
+                ScanningKeys::from_account_ufvks_with_scopes([(account, ufvk)], &[Scope::Internal]);
+
+            let cb = fake_compact_block_with_internal_output(
+                1u32.into(),
+                BlockHash([0; 32]),
+                Nullifier([0; 32]),
+                &sapling_dfvk,
+                Zatoshis::const_from_u64(5),
+                false,
+                Some((0, 0)),
+            );
+            assert_eq!(cb.vtx.len(), 2);
+            let txid = cb.vtx[1].txid();
+
+            // With External keys only and no wallet relevance signal, the Internal-scope output is
+            // invisible. The fake transaction also contains a shielded spend, so the broad
+            // transparent-input shielding-pattern trigger is not involved.
+            let scanned_block = scan_with_relevant_txids(
+                &network,
+                cb.clone(),
+                &scanning_keys,
+                &internal_keys,
+                &HashSet::new(),
+                scan_multithreaded,
+            );
+            assert!(scanned_block.transactions().is_empty());
+
+            let wallet_relevant_txids = HashSet::from([txid]);
+            let scanned_block = scan_with_relevant_txids(
+                &network,
+                cb,
+                &scanning_keys,
+                &internal_keys,
+                &wallet_relevant_txids,
+                scan_multithreaded,
+            );
+            let txs = scanned_block.transactions();
+            assert_eq!(txs.len(), 1);
+
+            let tx = &txs[0];
+            assert_eq!(tx.block_index(), 1.into());
+            assert_eq!(tx.sapling_outputs().len(), 1);
+            assert_eq!(tx.sapling_outputs()[0].account_id(), &account);
+            assert_eq!(
+                tx.sapling_outputs()[0].recipient_key_scope(),
+                Some(Scope::Internal)
+            );
+            assert_eq!(tx.sapling_outputs()[0].note().value().inner(), 5);
         }
 
         go(false);

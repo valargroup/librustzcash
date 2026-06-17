@@ -47,6 +47,7 @@ pub(crate) struct BlockCacheInsertionResult {
     txids: Vec<TxId>,
     #[allow(dead_code)]
     note_commitments: NoteCommitments,
+    compact_block: CompactBlock,
 }
 
 impl BlockCacheInsertionResult {
@@ -59,6 +60,10 @@ impl BlockCacheInsertionResult {
 impl CacheInsertionResult for BlockCacheInsertionResult {
     fn txids(&self) -> &[TxId] {
         &self.txids[..]
+    }
+
+    fn compact_block(&self) -> Option<&CompactBlock> {
+        Some(&self.compact_block)
     }
 }
 
@@ -85,6 +90,7 @@ impl TestCache for BlockCache {
         BlockCacheInsertionResult {
             txids: cb.vtx.iter().map(|tx| tx.txid()).collect(),
             note_commitments,
+            compact_block: cb.clone(),
         }
     }
 
@@ -124,12 +130,17 @@ impl FsBlockCache {
 pub struct FsBlockCacheInsertionResult {
     txids: Vec<TxId>,
     pub(crate) block_meta: BlockMeta,
+    compact_block: CompactBlock,
 }
 
 #[cfg(feature = "unstable")]
 impl CacheInsertionResult for FsBlockCacheInsertionResult {
     fn txids(&self) -> &[TxId] {
         &self.txids[..]
+    }
+
+    fn compact_block(&self) -> Option<&CompactBlock> {
+        Some(&self.compact_block)
     }
 }
 
@@ -163,7 +174,11 @@ impl TestCache for FsBlockCache {
             .write_all(&cb.encode_to_vec())
             .unwrap();
 
-        FsBlockCacheInsertionResult { txids, block_meta }
+        FsBlockCacheInsertionResult {
+            txids,
+            block_meta,
+            compact_block: cb.clone(),
+        }
     }
 
     fn truncate_to_height(&mut self, height: zcash_protocol::consensus::BlockHeight) {

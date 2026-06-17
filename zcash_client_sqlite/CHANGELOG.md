@@ -14,6 +14,10 @@ workspace.
 - Scanning now recovers internal change from wallet-created shielded spends
   whose stored transaction has no expiry height, and from spends whose mined
   status is learned before their containing block has been scanned.
+- Scanning now recovers internal outputs from shielding transactions that spend
+  wallet transparent funds when the wallet can identify the transaction from
+  local raw transaction data or from compact transparent inputs that spend known
+  wallet UTXOs.
 
 ## [0.21.0] - 2026-06-02
 

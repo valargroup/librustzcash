@@ -2901,6 +2901,57 @@ pub(crate) fn get_transaction<P: Parameters>(
     .transpose()
 }
 
+/// Returns the subset of the provided txids for which this wallet has local raw transaction data.
+pub(crate) fn get_txids_with_raw_transaction_data(
+    conn: &rusqlite::Connection,
+    txids: &HashSet<TxId>,
+) -> Result<HashSet<TxId>, SqliteClientError> {
+    use rusqlite::types::Value;
+    use std::rc::Rc;
+
+    if txids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let txid_values: Vec<Value> = txids
+        .iter()
+        .map(|txid| Value::Blob(txid.as_ref().to_vec()))
+        .collect();
+    let txids_ptr = Rc::new(txid_values);
+
+    let mut stmt = conn.prepare_cached(
+        "SELECT txid
+         FROM transactions
+         WHERE raw IS NOT NULL
+         AND txid IN rarray(:txids_ptr)",
+    )?;
+    let rows = stmt.query_and_then(
+        named_params! {
+            ":txids_ptr": &txids_ptr,
+        },
+        |row| row.get::<_, [u8; 32]>("txid").map(TxId::from_bytes),
+    )?;
+
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(SqliteClientError::from)
+}
+
+/// Returns transaction IDs that spend transparent outputs known to belong to this wallet.
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn get_txids_spending_wallet_transparent_outputs(
+    conn: &rusqlite::Connection,
+    tx_spends: &HashMap<TxId, Vec<OutPoint>>,
+) -> Result<HashSet<TxId>, SqliteClientError> {
+    let mut wallet_txids = HashSet::new();
+    for (txid, spends) in tx_spends {
+        if !transparent::detect_spending_accounts(conn, spends.iter())?.is_empty() {
+            wallet_txids.insert(*txid);
+        }
+    }
+
+    Ok(wallet_txids)
+}
+
 /// Returns the memo for a sent note, if the sent note is known to the wallet.
 pub(crate) fn get_sent_memo(
     conn: &rusqlite::Connection,

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     num::NonZeroU32,
 };
 
@@ -37,7 +37,7 @@ use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(feature = "transparent-inputs")]
 use {
-    transparent::{address::TransparentAddress, keys::NonHardenedChildIndex},
+    transparent::{address::TransparentAddress, bundle::OutPoint, keys::NonHardenedChildIndex},
     zcash_client_backend::wallet::{Exposure, TransparentAddressMetadata},
     zip32::Scope,
 };
@@ -567,6 +567,36 @@ impl<P: consensus::Parameters> WalletRead for MemoryWalletDb<P> {
                 }
             })
             .transpose()
+    }
+
+    fn get_txids_with_raw_transaction_data(
+        &self,
+        txids: &HashSet<TxId>,
+    ) -> Result<HashSet<TxId>, Self::Error> {
+        Ok(txids
+            .iter()
+            .filter(|txid| self.tx_table.get(txid).and_then(|tx| tx.raw()).is_some())
+            .copied()
+            .collect())
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn get_txids_spending_wallet_transparent_outputs(
+        &self,
+        tx_spends: &HashMap<TxId, Vec<OutPoint>>,
+    ) -> Result<HashSet<TxId>, Self::Error> {
+        let mut wallet_txids = HashSet::new();
+        for (txid, spends) in tx_spends {
+            if !self
+                .transparent_received_outputs
+                .detect_spending_accounts(spends.iter())?
+                .is_empty()
+            {
+                wallet_txids.insert(*txid);
+            }
+        }
+
+        Ok(wallet_txids)
     }
 
     fn get_sapling_nullifiers(

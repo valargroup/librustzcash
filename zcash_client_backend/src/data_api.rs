@@ -1770,6 +1770,36 @@ pub trait WalletRead {
     /// available.
     fn get_transaction(&self, txid: TxId) -> Result<Option<Transaction>, Self::Error>;
 
+    /// Returns the subset of the provided transaction IDs for which the wallet has local raw
+    /// transaction data.
+    ///
+    /// This is intended for scan-relevance checks, where locally-created transactions can identify
+    /// wallet-relevant compact transactions even when the compact stream omits transparent inputs.
+    /// It does not indicate that the transaction is mined or affects the wallet balance. The
+    /// default implementation is conservative; backends should override this when they can answer
+    /// this without parsing full transactions.
+    fn get_txids_with_raw_transaction_data(
+        &self,
+        _txids: &HashSet<TxId>,
+    ) -> Result<HashSet<TxId>, Self::Error> {
+        Ok(HashSet::new())
+    }
+
+    /// Returns the subset of the provided transaction IDs for which the compact transaction spends
+    /// at least one transparent output known to belong to this wallet.
+    ///
+    /// This is intended for scan-relevance checks during restore. If a compact transaction includes
+    /// transparent inputs, a wallet backend can use them to identify shielding transactions that
+    /// spend transparent wallet funds, even when the wallet does not have local raw transaction data
+    /// for the spending transaction. The default implementation is conservative.
+    #[cfg(feature = "transparent-inputs")]
+    fn get_txids_spending_wallet_transparent_outputs(
+        &self,
+        _tx_spends: &HashMap<TxId, Vec<OutPoint>>,
+    ) -> Result<HashSet<TxId>, Self::Error> {
+        Ok(HashSet::new())
+    }
+
     /// Returns the nullifiers for Sapling notes that the wallet is tracking, along with their
     /// associated account IDs, that are either unspent or have not yet been confirmed as spent (in
     /// that a spending transaction known to the wallet has not yet been included in a block).

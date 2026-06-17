@@ -295,7 +295,8 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
     /// which is used by [`scan_cached_blocks`] to halve the key-agreement work per
     /// output during batch trial decryption. Change notes are instead recovered by
     /// a targeted Internal-IVK pass on wallet-relevant transactions identified by
-    /// nullifier matching, External-IVK matching, or the shielding transaction pattern.
+    /// scan-relevance checks such as nullifier matching, External-IVK matching,
+    /// or shielding transaction detection.
     ///
     /// [`scan_cached_blocks`]: crate::data_api::chain::scan_cached_blocks
     pub(crate) fn from_account_ufvks_with_scopes(
@@ -663,9 +664,7 @@ where
     compact::scan_block_with_runners::<_, _, _, (), ()>(
         params,
         block,
-        scanning_keys,
-        &empty_internal,
-        nullifiers,
+        compact::ScanInputs::new(scanning_keys, &empty_internal, nullifiers, &HashSet::new()),
         prior_block_metadata,
         None,
     )
@@ -944,8 +943,57 @@ pub mod testing {
         tx_after: bool,
         initial_tree_sizes: Option<(u32, u32)>,
     ) -> CompactBlock {
+        fake_compact_block_with_output_scope(
+            height,
+            prev_hash,
+            nf,
+            dfvk,
+            value,
+            zip32::Scope::External,
+            tx_after,
+            initial_tree_sizes,
+        )
+    }
+
+    /// Create a fake CompactBlock at the given height, with a transaction containing a
+    /// single spend of the given nullifier and a single internal output paying the given account.
+    pub fn fake_compact_block_with_internal_output(
+        height: BlockHeight,
+        prev_hash: BlockHash,
+        nf: Nullifier,
+        dfvk: &DiversifiableFullViewingKey,
+        value: Zatoshis,
+        tx_after: bool,
+        initial_tree_sizes: Option<(u32, u32)>,
+    ) -> CompactBlock {
+        fake_compact_block_with_output_scope(
+            height,
+            prev_hash,
+            nf,
+            dfvk,
+            value,
+            zip32::Scope::Internal,
+            tx_after,
+            initial_tree_sizes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fake_compact_block_with_output_scope(
+        height: BlockHeight,
+        prev_hash: BlockHash,
+        nf: Nullifier,
+        dfvk: &DiversifiableFullViewingKey,
+        value: Zatoshis,
+        output_scope: zip32::Scope,
+        tx_after: bool,
+        initial_tree_sizes: Option<(u32, u32)>,
+    ) -> CompactBlock {
         let zip212_enforcement = zip212_enforcement(&Network::TestNetwork, height);
-        let to = dfvk.default_address().1;
+        let to = match output_scope {
+            zip32::Scope::External => dfvk.default_address().1,
+            zip32::Scope::Internal => dfvk.change_address().1,
+        };
 
         // Create a fake Note for the account
         let mut rng = OsRng;

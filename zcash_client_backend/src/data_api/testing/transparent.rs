@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use assert_matches::assert_matches;
 
@@ -13,7 +13,7 @@ use zcash_keys::{
     keys::{UnifiedAddressRequest, transparent::gap_limits::GapLimits},
 };
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::{local_consensus::LocalNetwork, value::Zatoshis};
+use zcash_protocol::{TxId, local_consensus::LocalNetwork, value::Zatoshis};
 
 #[cfg(feature = "transparent-key-import")]
 use {
@@ -99,14 +99,15 @@ where
         .with_account_from_sapling_activation(BlockHash([0; 32]))
         .build();
 
-    let birthday = st.test_account().unwrap().birthday().height();
-    let account_id = st.test_account().unwrap().id();
-    let uaddr = st
-        .wallet()
-        .get_last_generated_address_matching(account_id, UnifiedAddressRequest::AllAvailableKeys)
+    let test_account = st.test_account().unwrap();
+    let birthday = test_account.birthday().height();
+    let account_id = test_account.id();
+    let taddr = test_account
+        .ufvk()
         .unwrap()
-        .unwrap();
-    let taddr = uaddr.transparent().unwrap();
+        .default_transparent_address()
+        .unwrap()
+        .0;
 
     let height_1 = birthday + 12345;
     st.wallet_mut().update_chain_tip(height_1).unwrap();
@@ -143,7 +144,7 @@ where
     // Confirm that we see the output unspent as of `height_1`.
     assert_matches!(
         st.wallet().get_spendable_transparent_outputs(
-            taddr,
+            &taddr,
             target_height,
             ConfirmationsPolicy::MIN,
             TransparentOutputFilter::All,
@@ -177,7 +178,7 @@ where
     assert_matches!(
         st.wallet()
             .get_spendable_transparent_outputs(
-                taddr,
+                &taddr,
                 target_height,
                 ConfirmationsPolicy::MIN,
                 TransparentOutputFilter::All
@@ -196,7 +197,7 @@ where
     // If we include `height_2` then the output is returned.
     assert_matches!(
         st.wallet()
-            .get_spendable_transparent_outputs(taddr, TargetHeight::from(height_2 + 1), ConfirmationsPolicy::MIN, TransparentOutputFilter::All)
+            .get_spendable_transparent_outputs(&taddr, TargetHeight::from(height_2 + 1), ConfirmationsPolicy::MIN, TransparentOutputFilter::All)
             .as_deref(),
         Ok([ret]) if (ret.outpoint(), ret.txout(), ret.mined_height()) == (utxo.outpoint(), utxo.txout(), Some(height_2))
     );
@@ -207,8 +208,60 @@ where
             TargetHeight::from(height_2 + 1),
             ConfirmationsPolicy::MIN
         ),
-        Ok(h) if h.get(taddr).map(|(_, b)| b.spendable_value()) == Some(value)
+        Ok(h) if h.get(&taddr).map(|(_, b)| b.spendable_value()) == Some(value)
     );
+}
+
+pub fn txids_spending_transparent_outputs<DSF>(dsf: DSF)
+where
+    DSF: DataStoreFactory,
+    <<DSF as DataStoreFactory>::DataStore as WalletWrite>::UtxoRef: std::fmt::Debug,
+{
+    let mut st = TestBuilder::new()
+        .with_data_store_factory(dsf)
+        .with_account_from_sapling_activation(BlockHash([0; 32]))
+        .build();
+
+    let test_account = st.test_account().unwrap();
+    let birthday = test_account.birthday().height();
+    let account_id = test_account.id();
+    let taddr = test_account
+        .ufvk()
+        .unwrap()
+        .default_transparent_address()
+        .unwrap()
+        .0;
+
+    let height = birthday + 12345;
+    st.wallet_mut().update_chain_tip(height).unwrap();
+
+    let outpoint = OutPoint::fake();
+    let utxo = WalletTransparentOutput::from_parts(
+        outpoint.clone(),
+        TxOut::new(Zatoshis::const_from_u64(100000), taddr.script().into()),
+        Some(height),
+        Some(account_id),
+        Some(TransparentKeyScope::EXTERNAL),
+        None,
+    )
+    .unwrap();
+    st.wallet_mut()
+        .put_received_transparent_utxo(&utxo)
+        .unwrap();
+
+    let spending_txid = TxId::from_bytes([2; 32]);
+    let unrelated_txid = TxId::from_bytes([3; 32]);
+    let tx_spends = HashMap::from([
+        (spending_txid, vec![outpoint]),
+        (unrelated_txid, vec![OutPoint::new([4; 32], 0)]),
+    ]);
+
+    let txids = st
+        .wallet()
+        .get_txids_spending_wallet_transparent_outputs(&tx_spends)
+        .unwrap();
+    assert!(txids.contains(&spending_txid));
+    assert!(!txids.contains(&unrelated_txid));
 }
 
 pub fn transparent_balance_across_shielding<DSF>(dsf: DSF, cache: impl TestCache)

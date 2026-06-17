@@ -2396,6 +2396,13 @@ mod tests {
     }
 
     #[test]
+    fn txids_spending_transparent_outputs() {
+        zcash_client_backend::data_api::testing::transparent::txids_spending_transparent_outputs(
+            TestDbFactory::default(),
+        );
+    }
+
+    #[test]
     fn transparent_balance_across_shielding() {
         zcash_client_backend::data_api::testing::transparent::transparent_balance_across_shielding(
             TestDbFactory::default(),

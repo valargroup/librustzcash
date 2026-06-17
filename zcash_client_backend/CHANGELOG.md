@@ -43,6 +43,12 @@ workspace.
 - `zcash_client_backend::sync`:
   - `decryptor` module, behind the `sync-decryptor` feature flag, providing a
     Tokio-based batch decryption engine for full blocks and transactions.
+- `zcash_client_backend::data_api::WalletRead::get_txids_with_raw_transaction_data`,
+  which lets wallet backends identify locally stored transactions for scan
+  relevance checks without parsing full transactions.
+- `zcash_client_backend::data_api::WalletRead::get_txids_spending_wallet_transparent_outputs`,
+  behind the `transparent-inputs` feature flag, which lets wallet backends
+  identify compact transactions that spend wallet transparent outputs.
 
 ### Changed
 - `zcash_client_backend::data_api`:
@@ -80,6 +86,12 @@ workspace.
   addition to `propose_shielding`.
 - `zcash_client_backend::wallet::WalletTx::new` now takes a `transparent_outputs`
   argument.
+
+### Fixed
+- Compact block scanning now recovers internal outputs from shielding
+  transactions that spend wallet transparent funds when the wallet can identify
+  the transaction from local raw transaction data or from compact transparent
+  inputs that spend known wallet UTXOs.
 
 ### Removed
 - `zcash_client_backend::data_api::WalletUtxo` (use `WalletTransparentOutput`

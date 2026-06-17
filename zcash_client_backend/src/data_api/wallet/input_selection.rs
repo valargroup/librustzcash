@@ -12,7 +12,7 @@ use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_primitives::transaction::fees::{
     FeeRule,
-    transparent::{self as transparent_fees, InputSize},
+    transparent::InputSize,
     zip317::{P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE},
 };
 use zcash_protocol::{
@@ -32,6 +32,9 @@ use crate::{
     proposal::{Proposal, ProposalError, ShieldedInputs},
     wallet::WalletTransparentOutput,
 };
+
+#[cfg(feature = "transparent-inputs")]
+use zcash_primitives::transaction::fees::transparent as transparent_fees;
 
 use super::ConfirmationsPolicy;
 

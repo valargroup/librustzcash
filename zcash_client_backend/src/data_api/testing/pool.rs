@@ -3563,9 +3563,49 @@ where
     assert_eq!(tx_summary.sent_note_count(), 0);
     assert!(tx_summary.is_shielding());
 
-    // Generate and scan the block including the transaction
-    let (h, _) = st.generate_next_block_including(*txids.first());
+    // Generate and scan the block including the transaction. This compact block mirrors
+    // `GetBlockRange` shielded-only filtering, where the shielded outputs are present but the
+    // transparent inputs can be omitted.
+    let (h, insertion_result) = st.generate_next_block_including(*txids.first());
+    let compact_tx = insertion_result
+        .compact_block()
+        .unwrap()
+        .vtx
+        .iter()
+        .find(|tx| tx.txid() == *txids.first())
+        .unwrap();
+    assert!(compact_tx.vin.is_empty());
+    assert!(
+        !compact_tx.outputs.is_empty() || {
+            #[cfg(feature = "orchard")]
+            {
+                !compact_tx.actions.is_empty()
+            }
+            #[cfg(not(feature = "orchard"))]
+            {
+                false
+            }
+        }
+    );
     let scan_result = st.scan_cached_blocks(h, 1);
+
+    // The wallet had a 50,000 zat internal note before shielding. Requiring a 100,000 zat
+    // selection proves that the newly shielded output was recovered with spend metadata.
+    let spendable = T::select_spendable_notes(
+        &st,
+        account.id(),
+        TargetValue::AtLeast(Zatoshis::const_from_u64(100000)),
+        TargetHeight::from(h + 1),
+        ConfirmationsPolicy::MIN,
+        &[],
+    )
+    .unwrap();
+    let selected_value = spendable
+        .iter()
+        .map(|note| T::note_value(note.note()))
+        .sum::<Option<Zatoshis>>()
+        .unwrap();
+    assert!(selected_value >= Zatoshis::const_from_u64(100000));
 
     // Ensure that the transaction metadata is still correct after the update produced by scanning.
     let tx_summary = st.get_tx_from_history(*txids.first()).unwrap().unwrap();

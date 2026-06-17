@@ -861,6 +861,21 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletRea
             .map(|res| res.map(|(_, tx)| tx))
     }
 
+    fn get_txids_with_raw_transaction_data(
+        &self,
+        txids: &HashSet<TxId>,
+    ) -> Result<HashSet<TxId>, Self::Error> {
+        wallet::get_txids_with_raw_transaction_data(self.conn.borrow(), txids)
+    }
+
+    #[cfg(feature = "transparent-inputs")]
+    fn get_txids_spending_wallet_transparent_outputs(
+        &self,
+        tx_spends: &HashMap<TxId, Vec<transparent::bundle::OutPoint>>,
+    ) -> Result<HashSet<TxId>, Self::Error> {
+        wallet::get_txids_spending_wallet_transparent_outputs(self.conn.borrow(), tx_spends)
+    }
+
     fn get_sapling_nullifiers(
         &self,
         query: NullifierQuery,
