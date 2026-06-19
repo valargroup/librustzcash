@@ -8,6 +8,11 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
+## [0.8.0] - PLANNED
+
+### Added
+- `pczt::v1`, containing the version 1 PCZT format types.
+
 ## [0.7.0] - 2026-06-02
 
 ### Changed
