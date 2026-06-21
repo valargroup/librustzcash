@@ -439,7 +439,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest {
         orchard_bundle.map(|b| {
-            b.commitment_for_domain(orchard_commitment_domain(version))
+            b.commitment(orchard_commitment_domain(version))
                 .expect("Orchard bundle flags must be representable in their transaction format")
                 .0
         })
@@ -452,7 +452,7 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::IronwoodDigest {
         ironwood_bundle.map(|b| {
-            b.commitment_for_domain(ironwood_v6_domain())
+            b.commitment(ironwood_v6_domain())
                 .expect("Ironwood bundle flags must be representable")
                 .0
         })
@@ -512,7 +512,7 @@ pub(crate) fn to_hash(
     h.write_all(
         orchard_digest
             .unwrap_or_else(|| {
-                orchard::commitments::hash_bundle_txid_empty_with_domain(orchard_commitment_domain(
+                orchard::commitments::hash_bundle_txid_empty(orchard_commitment_domain(
                     _txversion,
                 ))
             })
@@ -556,7 +556,7 @@ pub(crate) fn to_hash_v6(
     h.write_all(
         orchard_digest
             .unwrap_or_else(|| {
-                orchard::commitments::hash_bundle_txid_empty_with_domain(orchard_commitment_domain(
+                orchard::commitments::hash_bundle_txid_empty(orchard_commitment_domain(
                     TxVersion::V6,
                 ))
             })
@@ -566,7 +566,7 @@ pub(crate) fn to_hash_v6(
     h.write_all(
         ironwood_digest
             .unwrap_or_else(|| {
-                orchard::commitments::hash_bundle_txid_empty_with_domain(ironwood_v6_domain())
+                orchard::commitments::hash_bundle_txid_empty(ironwood_v6_domain())
             })
             .as_bytes(),
     )
@@ -710,12 +710,12 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
     ) -> Self::OrchardDigest {
         orchard_bundle.map_or_else(
             || {
-                orchard::commitments::hash_bundle_auth_empty_with_domain(orchard_commitment_domain(
+                orchard::commitments::hash_bundle_auth_empty(orchard_commitment_domain(
                     version,
                 ))
             },
             |b| {
-                b.authorizing_commitment_for_domain(orchard_commitment_domain(version))
+                b.authorizing_commitment(orchard_commitment_domain(version))
                     .0
             },
         )
@@ -728,8 +728,8 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         ironwood_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::IronwoodDigest {
         ironwood_bundle.map_or_else(
-            || orchard::commitments::hash_bundle_auth_empty_with_domain(ironwood_v6_domain()),
-            |b| b.authorizing_commitment_for_domain(ironwood_v6_domain()).0,
+            || orchard::commitments::hash_bundle_auth_empty(ironwood_v6_domain()),
+            |b| b.authorizing_commitment(ironwood_v6_domain()).0,
         )
     }
 
