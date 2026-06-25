@@ -165,7 +165,7 @@ where
             ironwood: BatchRunner::new(
                 batch_size_threshold,
                 scanning_keys
-                    .orchard()
+                    .ironwood()
                     .iter()
                     .map(|(id, key)| (id.clone(), key.prepare())),
             ),

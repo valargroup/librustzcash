@@ -105,6 +105,9 @@ workspace.
   for a transaction's Orchard bundle is now selected by the consensus branch
   rather than the transaction version, so an explicit version 5 request after
   NU6.3 still uses the NU6.3 Orchard pool restriction.
+- `zcash_client_backend::scanning::ScanningKeys::new` now takes an additional
+  NU6.3-gated `ironwood` argument (a map of Ironwood scanning keys), parallel to
+  the existing `orchard` argument.
 
 ### Fixed
 - Per ZIP 229, the NU6.3 Orchard cross-address restriction is now enforced for
@@ -118,6 +121,11 @@ workspace.
 - Orchard fee and change calculation now counts Orchard actions using the
   consensus branch's pool restriction, avoiding underestimation for legacy
   Orchard change after NU6.3.
+- Ironwood (v3) note scanning and decryption now use the Ironwood
+  note-encryption domain. Previously the full/compact block scanners and the
+  transaction decryption and sent-output recovery paths trial-decrypted Ironwood
+  actions with the Orchard (v2) domain, so wallets could fail to detect incoming
+  Ironwood notes or recover Ironwood sent-output memos in v6 transactions.
 - `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
   Ironwood sent output metadata added by `create_pczt_from_proposal`.
 
