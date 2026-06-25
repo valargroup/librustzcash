@@ -25,6 +25,8 @@ use crate::{
     wallet::{WalletSpend, WalletTx},
 };
 
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+use orchard::note_encryption::IronwoodDomain;
 #[cfg(feature = "orchard")]
 use orchard::{note_encryption::OrchardDomain, primitives::redpallas, tree::MerkleHashOrchard};
 
@@ -66,6 +68,21 @@ type TaggedOrchardBatchRunner<IvkTag, Tasks> = BatchRunner<
     FullDecryptor,
     Tasks,
 >;
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+type TaggedIronwoodBatch<IvkTag> = Batch<
+    IvkTag,
+    IronwoodDomain,
+    orchard::Action<redpallas::Signature<redpallas::SpendAuth>>,
+    FullDecryptor,
+>;
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+type TaggedIronwoodBatchRunner<IvkTag, Tasks> = BatchRunner<
+    IvkTag,
+    IronwoodDomain,
+    orchard::Action<redpallas::Signature<redpallas::SpendAuth>>,
+    FullDecryptor,
+    Tasks,
+>;
 
 pub(crate) trait SaplingTasks<IvkTag>: Tasks<TaggedSaplingBatch<IvkTag>> {}
 impl<IvkTag, T: Tasks<TaggedSaplingBatch<IvkTag>>> SaplingTasks<IvkTag> for T {}
@@ -75,10 +92,20 @@ pub(crate) trait OrchardTasks<IvkTag> {}
 #[cfg(not(feature = "orchard"))]
 impl<IvkTag, T> OrchardTasks<IvkTag> for T {}
 
-#[cfg(feature = "orchard")]
+#[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
 pub(crate) trait OrchardTasks<IvkTag>: Tasks<TaggedOrchardBatch<IvkTag>> {}
-#[cfg(feature = "orchard")]
+#[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
 impl<IvkTag, T: Tasks<TaggedOrchardBatch<IvkTag>>> OrchardTasks<IvkTag> for T {}
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+pub(crate) trait OrchardTasks<IvkTag>:
+    Tasks<TaggedOrchardBatch<IvkTag>> + Tasks<TaggedIronwoodBatch<IvkTag>>
+{
+}
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+impl<IvkTag, T: Tasks<TaggedOrchardBatch<IvkTag>> + Tasks<TaggedIronwoodBatch<IvkTag>>>
+    OrchardTasks<IvkTag> for T
+{
+}
 
 pub(crate) struct BatchRunners<IvkTag, TS: SaplingTasks<IvkTag>, TO: OrchardTasks<IvkTag>> {
     sapling: TaggedSaplingBatchRunner<IvkTag, TS>,
@@ -87,7 +114,7 @@ pub(crate) struct BatchRunners<IvkTag, TS: SaplingTasks<IvkTag>, TO: OrchardTask
     #[cfg(not(feature = "orchard"))]
     orchard: PhantomData<TO>,
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-    ironwood: TaggedOrchardBatchRunner<IvkTag, TO>,
+    ironwood: TaggedIronwoodBatchRunner<IvkTag, TO>,
     #[cfg(not(all(feature = "orchard", zcash_unstable = "nu6.3")))]
     ironwood: PhantomData<TO>,
 }
@@ -176,7 +203,7 @@ where
         #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
         let ironwood_batch = tx.ironwood_bundle().map(|bundle| {
             self.ironwood
-                .process_outputs(OrchardDomain::for_action, bundle.actions().iter().cloned())
+                .process_outputs(IronwoodDomain::for_action, bundle.actions().iter().cloned())
         });
 
         PendingBatch {
@@ -208,7 +235,7 @@ pub(crate) struct PendingBatch<IvkTag> {
     #[cfg(feature = "orchard")]
     orchard_batch: Option<BatchReceiver<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-    ironwood_batch: Option<BatchReceiver<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
+    ironwood_batch: Option<BatchReceiver<IvkTag, IronwoodDomain, <IronwoodDomain as Domain>::Memo>>,
 }
 
 impl<IvkTag> PendingBatch<IvkTag> {
@@ -277,7 +304,7 @@ pub struct BatchResult<IvkTag> {
         HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     ironwood:
-        HashMap<usize, DecryptedOutput<IvkTag, OrchardDomain, <OrchardDomain as Domain>::Memo>>,
+        HashMap<usize, DecryptedOutput<IvkTag, IronwoodDomain, <IronwoodDomain as Domain>::Memo>>,
 }
 
 /// Decrypts a block with a set of [`ScanningKeys`].
@@ -630,12 +657,12 @@ where
                     NoteCommitmentTree::Ironwood,
                     |output_idx| orchard_action_count_for_ironwood + output_idx,
                     |output_idx| pos_tracker.ironwood_note_position(output_idx),
-                    &scanning_keys.orchard,
+                    &scanning_keys.ironwood,
                     &spent_from_accounts,
                     &bundle
                         .actions()
                         .iter()
-                        .map(|action| (OrchardDomain::for_action(action), action.clone()))
+                        .map(|action| (IronwoodDomain::for_action(action), action.clone()))
                         .collect::<Vec<_>>(),
                     Some(move |_| ironwood_decrypted),
                     batch::try_note_decryption,

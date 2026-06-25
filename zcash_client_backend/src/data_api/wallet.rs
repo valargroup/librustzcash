@@ -3434,7 +3434,7 @@ where
                 .enumerate()
                 .filter_map(|(raw_output_index, (action, output_info))| {
                     output_info.map(|output_info| {
-                        let domain = OrchardDomain::for_action(action);
+                        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
                         to_sent_transaction_output::<_, _, _, DbT, _>(
                             domain,
                             output_info.note,

@@ -808,7 +808,6 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(zcash_unstable = "nu6.3")]
-    #[ignore = "Ironwood V3 note scanning regresses with the orchard OrchardDomain->V2-only change; restored in the follow-up IronwoodDomain scanning PR"]
     fn create_proposed_transfer_spends_v3_notes_as_ironwood() {
         let network = network_with_nu6_3();
         let mut st = TestBuilder::new()
@@ -972,7 +971,6 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(zcash_unstable = "nu6.3")]
-    #[ignore = "Ironwood V3 note scanning regresses with the orchard OrchardDomain->V2-only change; restored in the follow-up IronwoodDomain scanning PR"]
     fn send_max_from_orchard_note_after_nu6_3_outputs_ironwood() {
         let network = network_with_nu6_3();
         let mut st = TestBuilder::new()

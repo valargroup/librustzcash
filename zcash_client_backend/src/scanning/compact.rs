@@ -22,6 +22,8 @@ use crate::{
     wallet::{WalletSpend, WalletTx},
 };
 
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+use orchard::note_encryption::IronwoodDomain;
 #[cfg(feature = "orchard")]
 use orchard::{
     note_encryption::{CompactAction, OrchardDomain},
@@ -52,6 +54,17 @@ type TaggedOrchardBatch<IvkTag> =
 type TaggedOrchardBatchRunner<IvkTag, Tasks> = BatchRunner<
     IvkTag,
     OrchardDomain,
+    orchard::note_encryption::CompactAction,
+    CompactDecryptor,
+    Tasks,
+>;
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+type TaggedIronwoodBatch<IvkTag> =
+    Batch<IvkTag, IronwoodDomain, orchard::note_encryption::CompactAction, CompactDecryptor>;
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+type TaggedIronwoodBatchRunner<IvkTag, Tasks> = BatchRunner<
+    IvkTag,
+    IronwoodDomain,
     orchard::note_encryption::CompactAction,
     CompactDecryptor,
     Tasks,
@@ -93,10 +106,20 @@ pub(crate) trait OrchardTasks<IvkTag> {}
 #[cfg(not(feature = "orchard"))]
 impl<IvkTag, T> OrchardTasks<IvkTag> for T {}
 
-#[cfg(feature = "orchard")]
+#[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
 pub(crate) trait OrchardTasks<IvkTag>: Tasks<TaggedOrchardBatch<IvkTag>> {}
-#[cfg(feature = "orchard")]
+#[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
 impl<IvkTag, T: Tasks<TaggedOrchardBatch<IvkTag>>> OrchardTasks<IvkTag> for T {}
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+pub(crate) trait OrchardTasks<IvkTag>:
+    Tasks<TaggedOrchardBatch<IvkTag>> + Tasks<TaggedIronwoodBatch<IvkTag>>
+{
+}
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+impl<IvkTag, T: Tasks<TaggedOrchardBatch<IvkTag>> + Tasks<TaggedIronwoodBatch<IvkTag>>>
+    OrchardTasks<IvkTag> for T
+{
+}
 
 pub(crate) struct BatchRunners<IvkTag, TS: SaplingTasks<IvkTag>, TO: OrchardTasks<IvkTag>> {
     sapling: TaggedSaplingBatchRunner<IvkTag, TS>,
@@ -105,7 +128,7 @@ pub(crate) struct BatchRunners<IvkTag, TS: SaplingTasks<IvkTag>, TO: OrchardTask
     #[cfg(not(feature = "orchard"))]
     orchard: PhantomData<TO>,
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-    ironwood: TaggedOrchardBatchRunner<IvkTag, TO>,
+    ironwood: TaggedIronwoodBatchRunner<IvkTag, TO>,
     #[cfg(not(all(feature = "orchard", zcash_unstable = "nu6.3")))]
     ironwood: PhantomData<TO>,
 }
@@ -217,7 +240,7 @@ where
             self.ironwood.add_outputs(
                 block_hash,
                 txid,
-                OrchardDomain::for_compact_action,
+                IronwoodDomain::for_compact_action,
                 tx.ironwood_actions
                     .iter()
                     .enumerate()
@@ -477,7 +500,7 @@ where
             // unique Orchard output identifiers.
             |output_idx| tx.actions.len() + output_idx,
             |output_idx| pos_tracker.ironwood_note_position(output_idx),
-            &scanning_keys.orchard,
+            &scanning_keys.ironwood,
             &spent_from_accounts,
             &tx.ironwood_actions
                 .iter()
@@ -486,7 +509,7 @@ where
                     let action = CompactAction::try_from(action).map_err(|_| {
                         invalid_compact_encoding(cur_height, txid, NoteCommitmentTree::Ironwood, i)
                     })?;
-                    Ok((OrchardDomain::for_compact_action(&action), action))
+                    Ok((IronwoodDomain::for_compact_action(&action), action))
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             batch_runners

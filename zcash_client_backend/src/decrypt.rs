@@ -18,7 +18,7 @@ use zip32::Scope;
 use crate::data_api::{DecryptedTransaction, NoteCommitmentTree};
 
 #[cfg(feature = "orchard")]
-use orchard::{note_encryption::OrchardDomain, primitives::redpallas};
+use orchard::primitives::redpallas;
 
 /// An enumeration of the possible relationships a TXO can have to the wallet.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -142,12 +142,22 @@ impl<A> DecryptedOutput<orchard::note::Note, A> {
 }
 
 #[cfg(feature = "orchard")]
-fn decrypt_orchard_outputs<AccountId: Copy>(
+fn decrypt_orchard_outputs<AccountId: Copy, V>(
     ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
     actions: &NonEmpty<orchard::Action<redpallas::Signature<redpallas::SpendAuth>>>,
     index_offset: usize,
     note_commitment_tree: NoteCommitmentTree,
-) -> Vec<DecryptedOutput<orchard::note::Note, AccountId>> {
+) -> Vec<DecryptedOutput<orchard::note::Note, AccountId>>
+where
+    V: orchard::note_encryption::DomainVersion,
+    orchard::note_encryption::NoteEncryptionDomain<V>: zcash_note_encryption::Domain<
+            Note = orchard::note::Note,
+            Memo = [u8; 512],
+            IncomingViewingKey = orchard::keys::PreparedIncomingViewingKey,
+            OutgoingViewingKey = orchard::keys::OutgoingViewingKey,
+            ValueCommitment = orchard::value::ValueCommitment,
+        >,
+{
     ufvks
         .iter()
         .flat_map(|(account, ufvk)| ufvk.orchard().into_iter().map(|fvk| (*account, fvk)))
@@ -159,7 +169,8 @@ fn decrypt_orchard_outputs<AccountId: Copy>(
             let ovk = fvk.to_ovk(Scope::External);
 
             actions.iter().enumerate().flat_map(move |(index, action)| {
-                let domain = OrchardDomain::for_action(action);
+                let domain =
+                    orchard::note_encryption::NoteEncryptionDomain::<V>::for_action(action);
                 try_note_decryption(&domain, &ivk_external, action)
                     .map(|ret| (ret, TransferType::Incoming))
                     .or_else(|| {
@@ -282,7 +293,12 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
     let orchard_outputs: Vec<_> = orchard_bundle
         .iter()
         .flat_map(|bundle| {
-            decrypt_orchard_outputs(ufvks, bundle.actions(), 0, NoteCommitmentTree::Orchard)
+            decrypt_orchard_outputs::<_, orchard::note_encryption::OrchardVersion>(
+                ufvks,
+                bundle.actions(),
+                0,
+                NoteCommitmentTree::Orchard,
+            )
         })
         .collect();
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
@@ -293,7 +309,7 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
         // unique Orchard output identifiers.
         let orchard_action_count = orchard_bundle.map_or(0, |bundle| bundle.actions().len());
         orchard_outputs.extend(tx.ironwood_bundle().iter().flat_map(|bundle| {
-            decrypt_orchard_outputs(
+            decrypt_orchard_outputs::<_, orchard::note_encryption::IronwoodVersion>(
                 ufvks,
                 bundle.actions(),
                 orchard_action_count,

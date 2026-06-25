@@ -22,6 +22,8 @@ use crate::{
     wallet::WalletOutput,
 };
 
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+use orchard::note_encryption::IronwoodDomain;
 #[cfg(feature = "orchard")]
 use orchard::note_encryption::OrchardDomain;
 
@@ -183,8 +185,17 @@ impl<AccountId> ScanningKeyOps<SaplingDomain, AccountId, sapling::Nullifier>
 }
 
 #[cfg(feature = "orchard")]
-impl<AccountId> ScanningKeyOps<OrchardDomain, AccountId, orchard::note::Nullifier>
-    for ScanningKey<orchard::keys::IncomingViewingKey, orchard::keys::FullViewingKey, AccountId>
+impl<AccountId, V: orchard::note_encryption::DomainVersion>
+    ScanningKeyOps<
+        orchard::note_encryption::NoteEncryptionDomain<V>,
+        AccountId,
+        orchard::note::Nullifier,
+    > for ScanningKey<orchard::keys::IncomingViewingKey, orchard::keys::FullViewingKey, AccountId>
+where
+    orchard::note_encryption::NoteEncryptionDomain<V>: Domain<
+            IncomingViewingKey = orchard::keys::PreparedIncomingViewingKey,
+            Note = orchard::note::Note,
+        >,
 {
     fn prepare(&self) -> orchard::keys::PreparedIncomingViewingKey {
         orchard::keys::PreparedIncomingViewingKey::new(&self.ivk)
@@ -218,6 +229,11 @@ pub struct ScanningKeys<AccountId, IvkTag> {
         IvkTag,
         Box<dyn ScanningKeyOps<OrchardDomain, AccountId, orchard::note::Nullifier> + Send + Sync>,
     >,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    ironwood: HashMap<
+        IvkTag,
+        Box<dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier> + Send + Sync>,
+    >,
 }
 
 impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
@@ -235,11 +251,21 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
                     + Sync,
             >,
         >,
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))] ironwood: HashMap<
+            IvkTag,
+            Box<
+                dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier>
+                    + Send
+                    + Sync,
+            >,
+        >,
     ) -> Self {
         Self {
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+            ironwood,
         }
     }
 
@@ -249,6 +275,8 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
             sapling: HashMap::new(),
             #[cfg(feature = "orchard")]
             orchard: HashMap::new(),
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+            ironwood: HashMap::new(),
         }
     }
 
@@ -272,6 +300,20 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
     > {
         &self.orchard
     }
+
+    /// Returns the keys to be used for incoming Ironwood (V3) note detection.
+    ///
+    /// These are the same Orchard viewing keys, boxed for the Ironwood note-encryption
+    /// domain so that they trial-decrypt V3 (Ironwood) note plaintexts.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    pub fn ironwood(
+        &self,
+    ) -> &HashMap<
+        IvkTag,
+        Box<dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier> + Send + Sync>,
+    > {
+        &self.ironwood
+    }
 }
 
 impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
@@ -293,6 +335,15 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
             (AccountId, Scope),
             Box<
                 dyn ScanningKeyOps<OrchardDomain, AccountId, orchard::note::Nullifier>
+                    + Send
+                    + Sync,
+            >,
+        > = HashMap::new();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let mut ironwood: HashMap<
+            (AccountId, Scope),
+            Box<
+                dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier>
                     + Send
                     + Sync,
             >,
@@ -325,6 +376,16 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
                             key_scope: Some(scope),
                         }),
                     );
+                    #[cfg(zcash_unstable = "nu6.3")]
+                    ironwood.insert(
+                        (account_id, scope),
+                        Box::new(ScanningKey {
+                            ivk: fvk.to_ivk(scope),
+                            nk: Some(fvk.clone()),
+                            account_id,
+                            key_scope: Some(scope),
+                        }),
+                    );
                 }
             }
         }
@@ -333,6 +394,8 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+            ironwood,
         }
     }
 }
