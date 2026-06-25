@@ -1059,6 +1059,67 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn legacy_orchard_change_counts_actions_after_nu6_3() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        )
+        .with_legacy_orchard_change();
+
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[] as &[TxOut],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[
+                    TestOrchardInput {
+                        note_id: 0,
+                        value: Zatoshis::const_from_u64(50000),
+                        is_ironwood: false,
+                    },
+                    TestOrchardInput {
+                        note_id: 1,
+                        value: Zatoshis::const_from_u64(50000),
+                        is_ironwood: false,
+                    },
+                ][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change() == [ChangeValue::orchard(Zatoshis::const_from_u64(85000), None)] &&
+                balance.fee_required() == Zatoshis::const_from_u64(15000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     fn legacy_orchard_change_disallows_ironwood_dust_after_nu6_3() {
         use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
 

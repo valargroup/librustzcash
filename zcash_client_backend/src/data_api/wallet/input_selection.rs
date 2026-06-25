@@ -907,6 +907,10 @@ where
 
     #[cfg(feature = "orchard")]
     let orchard_action_count = {
+        let orchard_pool_restrictions = orchard_fees::bundle_pool_restrictions_for_target_height(
+            params,
+            BlockHeight::from(target_height),
+        );
         let requested_orchard_output: usize = if recipient.can_receive_as(PoolType::ORCHARD) {
             payment_pools.insert(0, PoolType::ORCHARD);
             1
@@ -941,7 +945,7 @@ where
 
         let orchard_input_count = spendable_notes.orchard().len() - ironwood_input_count;
         let orchard_actions = orchard_fees::transactional_action_count(
-            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
+            orchard_pool_restrictions,
             orchard_input_count,
             requested_orchard_actions,
         )
@@ -1354,11 +1358,14 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             #[cfg(feature = "orchard")]
             PoolType::ORCHARD => {
                 let count = orchard_fees::transactional_action_count(
-                    ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
+                    orchard_fees::bundle_pool_restrictions_for_target_height(
+                        params,
+                        BlockHeight::from(target_height),
+                    ),
                     0,
                     1,
                 )
-                .expect("legacy Orchard protocol permits any transactional spend and output count");
+                .expect("Orchard protocol permits a single transactional output");
                 (0usize, count)
             }
             // Unreachable: `resolve_shielded_destination` rejects transparent

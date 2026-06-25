@@ -116,13 +116,14 @@ where
 
 #[cfg(feature = "orchard")]
 fn orchard_action_count_from_parts<E, NoteRefT>(
+    orchard_pool_restrictions: orchard::bundle::BundlePoolRestrictions,
     orchard_inputs: usize,
     ironwood_inputs: usize,
     orchard_outputs: usize,
     ironwood_outputs: usize,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
     let orchard_actions = orchard_fees::transactional_action_count(
-        orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
+        orchard_pool_restrictions,
         orchard_inputs,
         orchard_outputs,
     )
@@ -152,6 +153,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
 
 #[cfg(feature = "orchard")]
 fn orchard_action_count<NoteRefT: Clone, E>(
+    orchard_pool_restrictions: orchard::bundle::BundlePoolRestrictions,
     orchard: &impl orchard_fees::BundleView<NoteRefT>,
     orchard_output_count: usize,
     ironwood_output_count: usize,
@@ -166,6 +168,7 @@ fn orchard_action_count<NoteRefT: Clone, E>(
     let ironwood_inputs = 0usize;
 
     orchard_action_count_from_parts(
+        orchard_pool_restrictions,
         orchard.inputs().len() - ironwood_inputs,
         ironwood_inputs,
         orchard_output_count,
@@ -350,6 +353,11 @@ where
     )?;
 
     let change_pool = select_change_pool(&net_flows, cfg.fallback_change_pool);
+    #[cfg(feature = "orchard")]
+    let orchard_pool_restrictions = orchard_fees::bundle_pool_restrictions_for_target_height(
+        cfg.params,
+        BlockHeight::from(target_height),
+    );
     #[cfg(zcash_unstable = "nu6.3")]
     let orchard_outputs_are_ironwood = !cfg.force_legacy_orchard_change
         && cfg.params.is_nu_active(
@@ -398,6 +406,8 @@ where
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(feature = "orchard")]
+            orchard_pool_restrictions,
             #[cfg(zcash_unstable = "nu6.3")]
             orchard_outputs_are_ironwood,
             cfg.marginal_fee,
@@ -454,7 +464,12 @@ where
         #[cfg(not(zcash_unstable = "nu6.3"))]
         let ironwood_output_count = 0;
 
-        orchard_action_count::<NoteRefT, E>(orchard, orchard_output_count, ironwood_output_count)
+        orchard_action_count::<NoteRefT, E>(
+            orchard_pool_restrictions,
+            orchard,
+            orchard_output_count,
+            ironwood_output_count,
+        )
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count =
@@ -723,6 +738,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     transparent_outputs: &[impl transparent::OutputView],
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
+    #[cfg(feature = "orchard")] orchard_pool_restrictions: orchard::bundle::BundlePoolRestrictions,
     #[cfg(zcash_unstable = "nu6.3")] orchard_outputs_are_ironwood: bool,
     marginal_fee: Zatoshis,
     grace_actions: usize,
@@ -929,6 +945,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
 
             #[cfg(feature = "orchard")]
             let o_action_count = orchard_action_count_from_parts(
+                orchard_pool_restrictions,
                 o_req_orchard_inputs + usize::from(matches!(_o_extra, Some(false))),
                 o_req_ironwood_inputs + usize::from(matches!(_o_extra, Some(true))),
                 o_base_orchard_outputs_len + change.orchard,

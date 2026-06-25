@@ -115,6 +115,9 @@ workspace.
   bypassed by using a version 5 transaction. In particular, a cross-address
   Orchard output (an ordinary, non-change recipient) can no longer be built into a
   version 5 transaction after NU6.3.
+- Orchard fee and change calculation now counts Orchard actions using the
+  consensus branch's pool restriction, avoiding underestimation for legacy
+  Orchard change after NU6.3.
 - `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
   Ironwood sent output metadata added by `create_pczt_from_proposal`.
 
