@@ -59,7 +59,17 @@ pub struct LocalNetwork {
 /// Parameters implementation for `LocalNetwork`
 impl Parameters for LocalNetwork {
     fn network_type(&self) -> NetworkType {
-        NetworkType::Regtest
+        // Mainnet-masquerade (`--cfg zcash_regtest_mainnet_keys`, OFF by default): report this
+        // regtest network as `Main`, so the wallet derives at mainnet coin type 133' and mainnet
+        // HRPs (u1/uview1) and EVERY "is this key/address for our network?" check passes natively
+        // (Main == Main) — while `activation_height` below keeps the testnet's custom NU schedule.
+        // This is the wallet-side half of the masquerade; the node side is zebra's chain_name +
+        // zcash_address::convert_if_network gates. When the cfg is absent this is unchanged (Regtest).
+        #[cfg(zcash_regtest_mainnet_keys)]
+        let net = NetworkType::Main;
+        #[cfg(not(zcash_regtest_mainnet_keys))]
+        let net = NetworkType::Regtest;
+        net
     }
 
     fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
@@ -292,6 +302,44 @@ mod tests {
         assert_eq!(
             regtest.b58_script_address_prefix(),
             constants::regtest::B58_SCRIPT_ADDRESS_PREFIX
+        );
+    }
+
+    /// Mainnet-masquerade (`--cfg zcash_regtest_mainnet_keys`): LocalNetwork reports as mainnet, so
+    /// the wallet derives at coin type 133' with mainnet HRPs (u1/uview1) and every network-equality
+    /// check (UFVK/UIVK/UA decode `net == params.network_type()`) passes natively — while the custom
+    /// NU activation heights are preserved. Only compiled/run with the opt-in cfg set.
+    #[cfg(zcash_regtest_mainnet_keys)]
+    #[test]
+    fn regtest_masquerades_as_mainnet() {
+        use crate::consensus::NetworkType;
+        let regtest = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            #[cfg(zcash_unstable = "nu6.3")]
+            nu6_3: Some(BlockHeight::from_u32(10)),
+            #[cfg(zcash_unstable = "nu7")]
+            nu7: Some(BlockHeight::from_u32(10)),
+            #[cfg(zcash_unstable = "zfuture")]
+            z_future: Some(BlockHeight::from_u32(10)),
+        };
+        // Reports as mainnet → mainnet coin type + HRPs, so key/address decodes match natively.
+        assert_eq!(regtest.network_type(), NetworkType::Main);
+        assert_eq!(regtest.coin_type(), constants::mainnet::COIN_TYPE);
+        assert_eq!(regtest.coin_type(), 133);
+        assert_eq!(regtest.hrp_unified_address(), "u");
+        assert_eq!(regtest.hrp_unified_fvk(), "uview");
+        // ...but the custom testnet NU schedule is preserved (NOT real mainnet heights).
+        assert_eq!(
+            regtest.activation_height(NetworkUpgrade::Nu5),
+            Some(BlockHeight::from_u32(6))
         );
     }
 }
