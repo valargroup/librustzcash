@@ -93,7 +93,7 @@ impl Creator {
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
         self.orchard_flags = orchard_flags
-            .to_byte(orchard::bundle::BundleFormat::PreNu6_3)
+            .to_byte(orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only)
             .expect("Orchard flags must be encodable in the pre-NU6.3 format");
         self
     }
@@ -162,7 +162,7 @@ impl V6Creator {
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
         self.orchard_flags = orchard_flags
-            .to_byte(orchard::bundle::BundleFormat::Nu6_3)
+            .to_byte(orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward)
             .expect("Orchard flags must be encodable in the NU6.3 format");
         self
     }
@@ -170,7 +170,7 @@ impl V6Creator {
     #[cfg(feature = "orchard")]
     pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
         self.ironwood_flags = ironwood_flags
-            .to_byte(orchard::bundle::BundleFormat::Nu6_3)
+            .to_byte(orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward)
             .expect("Ironwood flags must be encodable in the NU6.3 format");
         self
     }
@@ -274,24 +274,33 @@ impl Creator {
             #[cfg(zcash_unstable = "nu6.3")]
             {
                 if parts.version == zcash_primitives::transaction::TxVersion::V6 {
-                    orchard::bundle::BundleFormat::Nu6_3
+                    orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward
                 } else {
-                    orchard::bundle::BundleFormat::PreNu6_3
+                    orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
                 }
             }
 
             #[cfg(not(zcash_unstable = "nu6.3"))]
             {
-                orchard::bundle::BundleFormat::PreNu6_3
+                orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
             }
         };
         #[cfg(zcash_unstable = "nu6.3")]
         let default_orchard_flags = match orchard_bundle_format {
-            orchard::bundle::BundleFormat::PreNu6_3 => LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only => {
+                LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED
+            }
             _ => NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED,
         };
         #[cfg(not(zcash_unstable = "nu6.3"))]
         let default_orchard_flags = LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED;
+        // Reject an Orchard bundle whose flags cannot be encoded under this
+        // transaction's Orchard pool restriction (e.g. an Ironwood bundle, which
+        // permits cross-address transfers, supplied as Orchard parts). Without
+        // this, `serialize_from` would panic instead of failing gracefully.
+        if let Some(bundle) = parts.orchard.as_ref() {
+            bundle.flags().to_byte(orchard_bundle_format)?;
+        }
         let orchard = parts
             .orchard
             .map(|bundle| crate::orchard::Bundle::serialize_from(bundle, orchard_bundle_format))
@@ -312,7 +321,7 @@ impl Creator {
                 .map(|bundle| {
                     crate::orchard::Bundle::serialize_from(
                         bundle,
-                        orchard::bundle::BundleFormat::Nu6_3,
+                        orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
                     )
                 })
                 .unwrap_or_else(crate::empty_ironwood_bundle)
@@ -416,20 +425,9 @@ mod tests {
         assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
         assert_eq!(pczt.orchard.flags, 0b0000_0011);
 
-        let pczt = Creator::new_v6(
-            BranchId::Nu6_3.into(),
-            10_000_000,
-            133,
-            [0; 32],
-            [0; 32],
-            [1; 32],
-        )
-        .with_orchard_flags(orchard::bundle::Flags::ENABLED)
-        .build();
-
-        assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
-        assert_eq!(pczt.orchard.flags, 0b0000_0111);
-
+        // The Orchard pool at NU6.3 forbids cross-address transfers, so a v6
+        // Orchard bundle must disable them; the encoded byte never sets bit 2.
+        // (`with_orchard_flags(Flags::ENABLED)` is not representable for v6.)
         let pczt = Creator::new_v6(
             BranchId::Nu6_3.into(),
             10_000_000,

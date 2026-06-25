@@ -71,7 +71,7 @@ impl super::Updater {
                 orchard,
                 ironwood: crate::orchard::Bundle::serialize_from(
                     bundle,
-                    orchard::bundle::BundleFormat::Nu6_3,
+                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
                 ),
             },
         })

@@ -90,7 +90,10 @@ impl IoFinalizer {
             ironwood
                 .finalize_io(shielded_sighash, OsRng)
                 .map_err(Error::IronwoodFinalize)?;
-            crate::orchard::Bundle::serialize_from(ironwood, orchard::bundle::BundleFormat::Nu6_3)
+            crate::orchard::Bundle::serialize_from(
+                ironwood,
+                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+            )
         } else {
             crate::empty_ironwood_bundle()
         };

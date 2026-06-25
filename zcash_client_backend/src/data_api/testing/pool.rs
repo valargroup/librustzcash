@@ -6365,16 +6365,17 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
     #[cfg(zcash_unstable = "nu6.3")]
     let orchard_circuit_version =
         if *pczt_updated.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION {
-            ::orchard::BundleProtocol::OrchardPostNu6_3.circuit_version()
+            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward.circuit_version()
         } else {
-            ::orchard::BundleProtocol::OrchardPreNu6_3.circuit_version()
+            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version()
         };
     #[cfg(not(zcash_unstable = "nu6.3"))]
-    let orchard_circuit_version = ::orchard::BundleProtocol::OrchardPreNu6_3.circuit_version();
+    let orchard_circuit_version =
+        ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version();
     let orchard_pk = ::orchard::circuit::ProvingKey::build(orchard_circuit_version);
     #[cfg(zcash_unstable = "nu6.3")]
     let ironwood_pk = ::orchard::circuit::ProvingKey::build(
-        ::orchard::BundleProtocol::IronwoodPostNu6_3.circuit_version(),
+        ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward.circuit_version(),
     );
     let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)

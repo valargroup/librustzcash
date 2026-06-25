@@ -141,12 +141,13 @@ impl<'a> TransactionExtractor<'a> {
         let tx = tx_data.freeze().expect("v5 tx can't fail here");
         #[cfg(zcash_unstable = "nu6.3")]
         let orchard_circuit_version = if tx.version().has_ironwood() {
-            ::orchard::BundleProtocol::OrchardPostNu6_3.circuit_version()
+            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward.circuit_version()
         } else {
-            ::orchard::BundleProtocol::OrchardPreNu6_3.circuit_version()
+            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version()
         };
         #[cfg(not(zcash_unstable = "nu6.3"))]
-        let orchard_circuit_version = ::orchard::BundleProtocol::OrchardPreNu6_3.circuit_version();
+        let orchard_circuit_version =
+            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version();
 
         // Now that we have a supposedly fully-authorized transaction, verify it.
         if let Some(bundle) = tx.sapling_bundle() {
@@ -169,7 +170,7 @@ impl<'a> TransactionExtractor<'a> {
             orchard::verify_bundle(
                 bundle,
                 ironwood_vk,
-                ::orchard::BundleProtocol::IronwoodPostNu6_3.circuit_version(),
+                ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward.circuit_version(),
                 *shielded_sighash.as_ref(),
             )
             .map_err(Error::Ironwood)?;

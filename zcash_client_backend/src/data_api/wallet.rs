@@ -1396,6 +1396,7 @@ where
             .and_then(|bundle| {
                 bundle
                     .decrypt_output_with_key(
+                        ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
                         raw_ironwood_output_index,
                         &orchard_fvk.to_ivk(Scope::Internal),
                     )
@@ -2557,7 +2558,11 @@ where
                     .orchard_bundle()
                     .and_then(|bundle| {
                         bundle
-                            .decrypt_output_with_key(output_index, &orchard_internal_ivk)
+                            .decrypt_output_with_key(
+                                ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
+                                output_index,
+                                &orchard_internal_ivk,
+                            )
                             .map(|(note, _, _)| Note::Orchard(note))
                     })
                     .expect("Wallet-internal outputs must be decryptable with the wallet's IVK")
@@ -2593,7 +2598,11 @@ where
                         .ironwood_bundle()
                         .and_then(|bundle| {
                             bundle
-                                .decrypt_output_with_key(raw_output_index, &orchard_internal_ivk)
+                                .decrypt_output_with_key(
+                                ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                                raw_output_index,
+                                &orchard_internal_ivk,
+                            )
                                 .map(|(note, _, _)| Note::Orchard(note))
                         })
                         .expect(

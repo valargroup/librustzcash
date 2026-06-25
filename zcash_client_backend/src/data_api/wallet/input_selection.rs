@@ -941,7 +941,7 @@ where
 
         let orchard_input_count = spendable_notes.orchard().len() - ironwood_input_count;
         let orchard_actions = orchard_fees::transactional_action_count(
-            orchard::BundleProtocol::OrchardPreNu6_3,
+            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
             orchard_input_count,
             requested_orchard_actions,
         )
@@ -950,7 +950,7 @@ where
         #[cfg(zcash_unstable = "nu6.3")]
         {
             let ironwood_actions = orchard_fees::transactional_action_count(
-                orchard::BundleProtocol::IronwoodPostNu6_3,
+                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
                 ironwood_input_count,
                 requested_ironwood_actions,
             )
@@ -1354,7 +1354,7 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             #[cfg(feature = "orchard")]
             PoolType::ORCHARD => {
                 let count = orchard_fees::transactional_action_count(
-                    ::orchard::BundleProtocol::OrchardPreNu6_3,
+                    ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
                     0,
                     1,
                 )

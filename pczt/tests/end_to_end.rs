@@ -45,7 +45,7 @@ static IRONWOOD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::
 fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
     ORCHARD_PROVING_KEY.get_or_init(|| {
         orchard::circuit::ProvingKey::build(
-            orchard::BundleProtocol::OrchardPreNu6_3.circuit_version(),
+            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version(),
         )
     })
 }
@@ -54,7 +54,7 @@ fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
 fn ironwood_proving_key() -> &'static orchard::circuit::ProvingKey {
     IRONWOOD_PROVING_KEY.get_or_init(|| {
         orchard::circuit::ProvingKey::build(
-            orchard::BundleProtocol::IronwoodPostNu6_3.circuit_version(),
+            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward.circuit_version(),
         )
     })
 }
@@ -783,7 +783,7 @@ fn orchard_to_orchard() {
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::BundleProtocol::OrchardPreNu6_3,
+            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
             orchard::builder::BundleType::DEFAULT,
             orchard::Anchor::empty_tree(),
         );
@@ -903,7 +903,7 @@ fn v6_orchard_anchor_can_be_updated_after_signing() {
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::BundleProtocol::OrchardPreNu6_3,
+            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
             orchard::builder::BundleType::DEFAULT,
             orchard::Anchor::empty_tree(),
         );
@@ -1061,7 +1061,7 @@ fn ironwood_to_ironwood() {
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::BundleProtocol::IronwoodPostNu6_3,
+            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
             orchard::builder::BundleType::DEFAULT,
             orchard::Anchor::empty_tree(),
         );
@@ -1073,7 +1073,7 @@ fn ironwood_to_ironwood() {
             .actions()
             .get(meta.output_action_index(0).unwrap())
             .unwrap();
-        let domain = orchard::note_encryption::OrchardDomain::for_action(action);
+        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
         let (note, _, _) = try_note_decryption(&domain, &orchard_ivk.prepare(), action).unwrap();
         assert_eq!(note.version(), orchard::note::NoteVersion::V3);
         note

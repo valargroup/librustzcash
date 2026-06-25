@@ -9,7 +9,7 @@ use nonempty::NonEmpty;
 
 use orchard::{
     Action, Anchor,
-    bundle::{Authorization, Authorized, BundleFormat, Flags, ProofSizeEnforcement},
+    bundle::{Authorization, Authorized, BundlePoolRestrictions, Flags, ProofSizeEnforcement},
     note::{ExtractedNoteCommitment, Nullifier, TransmittedNoteCiphertext},
     primitives::redpallas::{self, SigType, Signature, SpendAuth, VerificationKey},
     value::ValueCommitment,
@@ -50,14 +50,14 @@ impl MapAuth<Authorized, Authorized> for () {
 fn read_bundle<R: Read>(
     mut reader: R,
     proof_size_enforcement: ProofSizeEnforcement,
-    bundle_format: BundleFormat,
+    pool_restrictions: BundlePoolRestrictions,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
     #[allow(clippy::redundant_closure)]
     let actions_without_auth = Vector::read(&mut reader, |r| read_action_without_auth(r))?;
     if actions_without_auth.is_empty() {
         Ok(None)
     } else {
-        let flags = read_flags(&mut reader, bundle_format)?;
+        let flags = read_flags(&mut reader, pool_restrictions)?;
         let value_balance = Transaction::read_amount(&mut reader)?;
         let anchor = read_anchor(&mut reader)?;
         let proof_bytes = Vector::read(&mut reader, |r| r.read_u8())?;
@@ -95,7 +95,11 @@ pub fn read_v5_bundle<R: Read>(
     reader: R,
     proof_size_enforcement: ProofSizeEnforcement,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
-    read_bundle(reader, proof_size_enforcement, BundleFormat::PreNu6_3)
+    read_bundle(
+        reader,
+        proof_size_enforcement,
+        BundlePoolRestrictions::OrchardNu6_2Only,
+    )
 }
 
 #[cfg(any(
@@ -106,7 +110,11 @@ pub fn read_v5_bundle<R: Read>(
 pub fn read_v6_bundle<R: Read>(
     reader: R,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
-    read_bundle(reader, ProofSizeEnforcement::Strict, BundleFormat::Nu6_3)
+    read_bundle(
+        reader,
+        ProofSizeEnforcement::Strict,
+        BundlePoolRestrictions::OrchardNu6_3Onward,
+    )
 }
 
 pub fn read_value_commitment<R: Read>(mut reader: R) -> io::Result<ValueCommitment> {
@@ -182,10 +190,13 @@ pub fn read_action_without_auth<R: Read>(mut reader: R) -> io::Result<Action<()>
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-pub fn read_flags<R: Read>(mut reader: R, bundle_format: BundleFormat) -> io::Result<Flags> {
+pub fn read_flags<R: Read>(
+    mut reader: R,
+    pool_restrictions: BundlePoolRestrictions,
+) -> io::Result<Flags> {
     let mut byte = [0u8; 1];
     reader.read_exact(&mut byte)?;
-    Flags::from_byte(byte[0], bundle_format)
+    Flags::from_byte(byte[0], pool_restrictions)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid Orchard flags"))
 }
 
@@ -205,14 +216,14 @@ pub fn read_signature<R: Read, T: SigType>(mut reader: R) -> io::Result<Signatur
 fn write_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     mut writer: W,
-    bundle_format: BundleFormat,
+    pool_restrictions: BundlePoolRestrictions,
 ) -> io::Result<()> {
     if let Some(bundle) = &bundle {
         Vector::write_nonempty(&mut writer, bundle.actions(), |w, a| {
             write_action_without_auth(w, a)
         })?;
 
-        let flags = bundle.flags().to_byte(bundle_format).ok_or_else(|| {
+        let flags = bundle.flags().to_byte(pool_restrictions).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Orchard flags cannot be encoded in this transaction format",
@@ -246,7 +257,7 @@ pub fn write_v5_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     writer: W,
 ) -> io::Result<()> {
-    write_bundle(bundle, writer, BundleFormat::PreNu6_3)
+    write_bundle(bundle, writer, BundlePoolRestrictions::OrchardNu6_2Only)
 }
 
 #[cfg(any(
@@ -258,7 +269,32 @@ pub fn write_v6_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     writer: W,
 ) -> io::Result<()> {
-    write_bundle(bundle, writer, BundleFormat::Nu6_3)
+    write_bundle(bundle, writer, BundlePoolRestrictions::OrchardNu6_3Onward)
+}
+
+/// Reads an Ironwood-pool [`orchard::Bundle`] from a v6 transaction.
+///
+/// Same wire format as [`read_v6_bundle`], but parses flags under the Ironwood
+/// pool restriction, which (unlike the Orchard pool) permits the v6
+/// cross-address flag bit.
+#[cfg(zcash_unstable = "nu6.3")]
+pub fn read_ironwood_v6_bundle<R: Read>(
+    reader: R,
+) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
+    read_bundle(
+        reader,
+        ProofSizeEnforcement::Strict,
+        BundlePoolRestrictions::IronwoodNu6_3Onward,
+    )
+}
+
+/// Writes an Ironwood-pool [`orchard::Bundle`] in the v6 transaction format.
+#[cfg(zcash_unstable = "nu6.3")]
+pub fn write_ironwood_v6_bundle<W: Write>(
+    bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
+    writer: W,
+) -> io::Result<()> {
+    write_bundle(bundle, writer, BundlePoolRestrictions::IronwoodNu6_3Onward)
 }
 
 pub fn write_value_commitment<W: Write>(mut writer: W, cv: &ValueCommitment) -> io::Result<()> {
@@ -328,9 +364,67 @@ pub mod testing {
         v: TxVersion,
     ) -> impl Strategy<Value = Option<Bundle<Authorized, ZatBalance>>> {
         if v.has_orchard() {
-            Strategy::boxed((1usize..100).prop_flat_map(|n| prop::option::of(arb_bundle(n))))
+            // In a v6 transaction the Orchard pool is encoded as
+            // `OrchardNu6_3Onward`, which forbids cross-address transfers, so a
+            // valid Orchard bundle must have the cross-address flag disabled.
+            // (Ironwood bundles permit either value; disabling is still valid for
+            // them, so applying it to both bundle slots keeps roundtrips valid.)
+            let force_cross_address_disabled = orchard_pool_forbids_cross_address(v);
+            (1usize..100)
+                .prop_flat_map(move |n| {
+                    prop::option::of(arb_bundle(n).prop_map(move |bundle| {
+                        if force_cross_address_disabled && bundle.flags().cross_address_enabled() {
+                            with_cross_address_disabled(bundle)
+                        } else {
+                            bundle
+                        }
+                    }))
+                })
+                .boxed()
         } else {
-            Strategy::boxed(Just(None))
+            Just(None).boxed()
         }
+    }
+
+    /// Mirrors `txid::orchard_commitment_domain`: v6 (and zfuture) Orchard bundles
+    /// use `OrchardNu6_3Onward`, which forbids cross-address transfers; v5 uses
+    /// `OrchardNu6_2Only`, which requires them enabled.
+    fn orchard_pool_forbids_cross_address(v: TxVersion) -> bool {
+        #[cfg(zcash_unstable = "nu6.3")]
+        if matches!(v, TxVersion::V6) {
+            return true;
+        }
+        #[cfg(all(zcash_unstable = "nu7", not(zcash_unstable = "nu6.3")))]
+        if matches!(v, TxVersion::V6) {
+            return true;
+        }
+        #[cfg(zcash_unstable = "zfuture")]
+        if matches!(v, TxVersion::ZFuture) {
+            return true;
+        }
+        let _ = v;
+        false
+    }
+
+    /// Rebuilds an Orchard bundle with the cross-address flag cleared (preserving
+    /// its spends/outputs flags) so it is valid under the Orchard v6 pool
+    /// restriction `OrchardNu6_3Onward`.
+    fn with_cross_address_disabled(
+        bundle: Bundle<Authorized, ZatBalance>,
+    ) -> Bundle<Authorized, ZatBalance> {
+        use orchard::bundle::{BundlePoolRestrictions, Flags, ProofSizeEnforcement};
+        let byte = u8::from(bundle.flags().spends_enabled())
+            | (u8::from(bundle.flags().outputs_enabled()) << 1);
+        let flags = Flags::from_byte(byte, BundlePoolRestrictions::OrchardNu6_3Onward)
+            .expect("spends/outputs-only flags encode under OrchardNu6_3Onward");
+        orchard::Bundle::try_from_parts(
+            bundle.actions().clone(),
+            flags,
+            *bundle.value_balance(),
+            *bundle.anchor(),
+            bundle.authorization().clone(),
+            ProofSizeEnforcement::Strict,
+        )
+        .expect("clearing cross-address yields a representable Orchard bundle")
     }
 }

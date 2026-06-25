@@ -6,7 +6,7 @@ use corez::io::Write;
 use blake2b_simd::{Hash as Blake2bHash, Params};
 use ff::PrimeField;
 
-use ::orchard::bundle::{self as orchard, commitments::BundleCommitmentDomain};
+use ::orchard::bundle::{self as orchard, BundlePoolRestrictions, TxVersion as OrchardTxVersion};
 use ::sapling::bundle::{OutputDescription, SpendDescription};
 use ::transparent::bundle::{self as transparent, TxIn, TxOut};
 use zcash_protocol::{
@@ -101,29 +101,44 @@ fn sapling_auth_includes_anchor(version: TxVersion) -> bool {
     false
 }
 
-fn orchard_commitment_domain(version: TxVersion) -> BundleCommitmentDomain {
+fn orchard_commitment_domain(version: TxVersion) -> (BundlePoolRestrictions, OrchardTxVersion) {
     #[cfg(zcash_unstable = "nu6.3")]
     if matches!(version, TxVersion::V6) {
-        return BundleCommitmentDomain::ORCHARD_V6;
+        return (
+            BundlePoolRestrictions::OrchardNu6_3Onward,
+            OrchardTxVersion::V6,
+        );
     }
 
     #[cfg(all(zcash_unstable = "nu7", not(zcash_unstable = "nu6.3")))]
     if matches!(version, TxVersion::V6) {
-        return BundleCommitmentDomain::ORCHARD_V5_NU6_3;
+        return (
+            BundlePoolRestrictions::OrchardNu6_3Onward,
+            OrchardTxVersion::V5,
+        );
     }
 
     #[cfg(zcash_unstable = "zfuture")]
     if matches!(version, TxVersion::ZFuture) {
-        return BundleCommitmentDomain::ORCHARD_V5_NU6_3;
+        return (
+            BundlePoolRestrictions::OrchardNu6_3Onward,
+            OrchardTxVersion::V5,
+        );
     }
 
     let _ = version;
-    BundleCommitmentDomain::ORCHARD_V5_PRE_NU6_3
+    (
+        BundlePoolRestrictions::OrchardNu6_2Only,
+        OrchardTxVersion::V5,
+    )
 }
 
 #[cfg(zcash_unstable = "nu6.3")]
-fn ironwood_v6_domain() -> BundleCommitmentDomain {
-    BundleCommitmentDomain::IRONWOOD_V6
+fn ironwood_v6_domain() -> (BundlePoolRestrictions, OrchardTxVersion) {
+    (
+        BundlePoolRestrictions::IronwoodNu6_3Onward,
+        OrchardTxVersion::V6,
+    )
 }
 
 fn hasher(personal: &[u8; 16]) -> StateWrite {
@@ -439,7 +454,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest {
         orchard_bundle.map(|b| {
-            b.commitment(orchard_commitment_domain(version))
+            let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
+            b.commitment(pool_restrictions, tx_version)
                 .expect("Orchard bundle flags must be representable in their transaction format")
                 .0
         })
@@ -452,7 +468,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::IronwoodDigest {
         ironwood_bundle.map(|b| {
-            b.commitment(ironwood_v6_domain())
+            let (pool_restrictions, tx_version) = ironwood_v6_domain();
+            b.commitment(pool_restrictions, tx_version)
                 .expect("Ironwood bundle flags must be representable")
                 .0
         })
@@ -512,7 +529,8 @@ pub(crate) fn to_hash(
     h.write_all(
         orchard_digest
             .unwrap_or_else(|| {
-                orchard::commitments::hash_bundle_txid_empty(orchard_commitment_domain(_txversion))
+                let (pool_restrictions, tx_version) = orchard_commitment_domain(_txversion);
+                orchard::commitments::hash_bundle_txid_empty(pool_restrictions, tx_version)
             })
             .as_bytes(),
     )
@@ -554,16 +572,18 @@ pub(crate) fn to_hash_v6(
     h.write_all(
         orchard_digest
             .unwrap_or_else(|| {
-                orchard::commitments::hash_bundle_txid_empty(orchard_commitment_domain(
-                    TxVersion::V6,
-                ))
+                let (pool_restrictions, tx_version) = orchard_commitment_domain(TxVersion::V6);
+                orchard::commitments::hash_bundle_txid_empty(pool_restrictions, tx_version)
             })
             .as_bytes(),
     )
     .unwrap();
     h.write_all(
         ironwood_digest
-            .unwrap_or_else(|| orchard::commitments::hash_bundle_txid_empty(ironwood_v6_domain()))
+            .unwrap_or_else(|| {
+                let (pool_restrictions, tx_version) = ironwood_v6_domain();
+                orchard::commitments::hash_bundle_txid_empty(pool_restrictions, tx_version)
+            })
             .as_bytes(),
     )
     .unwrap();
@@ -705,10 +725,13 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         orchard_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::OrchardDigest {
         orchard_bundle.map_or_else(
-            || orchard::commitments::hash_bundle_auth_empty(orchard_commitment_domain(version)),
+            || {
+                let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
+                orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version)
+            },
             |b| {
-                b.authorizing_commitment(orchard_commitment_domain(version))
-                    .0
+                let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
+                b.authorizing_commitment(pool_restrictions, tx_version).0
             },
         )
     }
@@ -720,8 +743,14 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         ironwood_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::IronwoodDigest {
         ironwood_bundle.map_or_else(
-            || orchard::commitments::hash_bundle_auth_empty(ironwood_v6_domain()),
-            |b| b.authorizing_commitment(ironwood_v6_domain()).0,
+            || {
+                let (pool_restrictions, tx_version) = ironwood_v6_domain();
+                orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version)
+            },
+            |b| {
+                let (pool_restrictions, tx_version) = ironwood_v6_domain();
+                b.authorizing_commitment(pool_restrictions, tx_version).0
+            },
         )
     }
 

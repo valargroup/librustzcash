@@ -122,7 +122,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     ironwood_outputs: usize,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
     let orchard_actions = orchard_fees::transactional_action_count(
-        orchard::BundleProtocol::OrchardPreNu6_3,
+        orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
         orchard_inputs,
         orchard_outputs,
     )
@@ -131,7 +131,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     #[cfg(zcash_unstable = "nu6.3")]
     {
         let ironwood_actions = orchard_fees::transactional_action_count(
-            orchard::BundleProtocol::IronwoodPostNu6_3,
+            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
             ironwood_inputs,
             ironwood_outputs,
         )

@@ -633,7 +633,7 @@ impl Bundle {
 impl Bundle {
     pub(crate) fn into_parsed_orchard(
         self,
-        bundle_format: orchard::bundle::BundleFormat,
+        bundle_format: orchard::bundle::BundlePoolRestrictions,
     ) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_orchard_note_plaintext_versions()?;
         self.into_parsed(bundle_format)
@@ -643,13 +643,13 @@ impl Bundle {
     #[cfg(zcash_unstable = "nu6.3")]
     pub(crate) fn into_parsed_ironwood(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_ironwood_note_plaintext_versions()?;
-        self.into_parsed(orchard::bundle::BundleFormat::Nu6_3)
+        self.into_parsed(orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward)
             .map_err(BundleParseError::Parse)
     }
 
     pub(crate) fn into_parsed(
         self,
-        bundle_format: orchard::bundle::BundleFormat,
+        bundle_format: orchard::bundle::BundlePoolRestrictions,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
         let actions = self
             .actions
@@ -663,7 +663,6 @@ impl Bundle {
                     action.spend.value,
                     action.spend.rho,
                     action.spend.rseed,
-                    action.spend.note_version.into(),
                     action.spend.fvk,
                     action.spend.witness,
                     action.spend.alpha,
@@ -678,6 +677,7 @@ impl Bundle {
                         })
                         .transpose()?,
                     action.spend.dummy_sk,
+                    action.spend.note_version.into(),
                     action.spend.proprietary,
                 )?;
 
@@ -690,7 +690,6 @@ impl Bundle {
                     action.output.recipient,
                     action.output.value,
                     action.output.rseed,
-                    action.output.note_version.into(),
                     action.output.ock,
                     action
                         .output
@@ -703,6 +702,7 @@ impl Bundle {
                         })
                         .transpose()?,
                     action.output.user_address,
+                    action.output.note_version.into(),
                     action.output.proprietary,
                 )?;
 
@@ -723,7 +723,7 @@ impl Bundle {
 
     pub(crate) fn serialize_from(
         bundle: orchard::pczt::Bundle,
-        bundle_format: orchard::bundle::BundleFormat,
+        bundle_format: orchard::bundle::BundlePoolRestrictions,
     ) -> Self {
         let actions = bundle
             .actions()

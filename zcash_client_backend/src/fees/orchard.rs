@@ -1,12 +1,12 @@
 //! Types related to computation of fees and change related to the Orchard components
 //! of a transaction.
 
-use orchard::{BundleProtocol, builder::BundleType};
+use orchard::{builder::BundleType, bundle::BundlePoolRestrictions};
 use std::convert::Infallible;
 use zcash_protocol::value::Zatoshis;
 
 pub(crate) fn transactional_action_count(
-    protocol: BundleProtocol,
+    protocol: BundlePoolRestrictions,
     num_spends: usize,
     num_outputs: usize,
 ) -> Result<usize, &'static str> {
