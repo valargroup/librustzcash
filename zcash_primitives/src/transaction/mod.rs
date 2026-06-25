@@ -25,7 +25,6 @@ use core::ops::Deref;
 use corez::io::{self, Read, Write};
 
 use ::transparent::bundle::{self as transparent, OutPoint, TxIn, TxOut};
-use orchard::bundle::ProofSizeEnforcement;
 use zcash_encoding::{CompactSize, Vector};
 use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
@@ -1067,28 +1066,8 @@ impl Transaction {
 
         let transparent_bundle = Self::read_transparent(&mut reader)?;
         let sapling_bundle = sapling_serialization::read_v5_bundle(&mut reader)?;
-        let orchard_bundle = orchard_serialization::read_v5_bundle(
-            &mut reader,
-            match consensus_branch_id {
-                BranchId::Sprout
-                | BranchId::Overwinter
-                | BranchId::Sapling
-                | BranchId::Blossom
-                | BranchId::Heartwood
-                | BranchId::Canopy
-                | BranchId::Nu5
-                | BranchId::Nu6
-                | BranchId::Nu6_1 => ProofSizeEnforcement::Unenforced,
-                BranchId::Nu6_2 => ProofSizeEnforcement::Strict,
-                #[cfg(zcash_unstable = "nu6.3")]
-                BranchId::Nu6_3 => ProofSizeEnforcement::Strict,
-                #[cfg(zcash_unstable = "nu7")]
-                BranchId::Nu7 => ProofSizeEnforcement::Strict,
-                #[cfg(zcash_unstable = "zfuture")]
-                BranchId::ZFuture => ProofSizeEnforcement::Strict,
-            },
-            crate::transaction::builder::orchard_protocol_for_branch(consensus_branch_id),
-        )?;
+        let orchard_bundle =
+            orchard_serialization::read_v5_bundle(&mut reader, consensus_branch_id)?;
 
         let data = TransactionData {
             version,
@@ -1307,7 +1286,7 @@ impl Transaction {
         orchard_serialization::write_v5_bundle(
             self.orchard_bundle.as_ref(),
             &mut writer,
-            crate::transaction::builder::orchard_protocol_for_branch(self.consensus_branch_id),
+            self.consensus_branch_id,
         )?;
 
         Ok(())

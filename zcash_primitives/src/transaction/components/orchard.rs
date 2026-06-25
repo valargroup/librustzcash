@@ -15,7 +15,7 @@ use orchard::{
     value::ValueCommitment,
 };
 use zcash_encoding::{Array, CompactSize, Vector};
-use zcash_protocol::value::ZatBalance;
+use zcash_protocol::{consensus::BranchId, value::ZatBalance};
 
 use crate::transaction::Transaction;
 
@@ -90,13 +90,45 @@ fn read_bundle<R: Read>(
     }
 }
 
+/// The Orchard proof-size enforcement implied by a consensus branch. The strict
+/// proof-size check applies from NU6.2 onward, when the fixed Orchard circuit
+/// activated.
+fn proof_size_enforcement_for_branch(consensus_branch_id: BranchId) -> ProofSizeEnforcement {
+    match consensus_branch_id {
+        BranchId::Sprout
+        | BranchId::Overwinter
+        | BranchId::Sapling
+        | BranchId::Blossom
+        | BranchId::Heartwood
+        | BranchId::Canopy
+        | BranchId::Nu5
+        | BranchId::Nu6
+        | BranchId::Nu6_1 => ProofSizeEnforcement::Unenforced,
+        BranchId::Nu6_2 => ProofSizeEnforcement::Strict,
+        #[cfg(zcash_unstable = "nu6.3")]
+        BranchId::Nu6_3 => ProofSizeEnforcement::Strict,
+        #[cfg(zcash_unstable = "nu7")]
+        BranchId::Nu7 => ProofSizeEnforcement::Strict,
+        #[cfg(zcash_unstable = "zfuture")]
+        BranchId::ZFuture => ProofSizeEnforcement::Strict,
+    }
+}
+
 /// Reads an [`orchard::Bundle`] from a v5 transaction format.
+///
+/// Both the Orchard flag decoding (pool restriction) and the proof-size
+/// enforcement are selected from the transaction's consensus branch: per ZIP 229
+/// the pool restriction is keyed on the branch rather than the transaction
+/// version, and the two values must agree with how the bundle was committed.
 pub fn read_v5_bundle<R: Read>(
     reader: R,
-    proof_size_enforcement: ProofSizeEnforcement,
-    pool_restrictions: BundlePoolRestrictions,
+    consensus_branch_id: BranchId,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
-    read_bundle(reader, proof_size_enforcement, pool_restrictions)
+    read_bundle(
+        reader,
+        proof_size_enforcement_for_branch(consensus_branch_id),
+        crate::transaction::builder::orchard_protocol_for_branch(consensus_branch_id),
+    )
 }
 
 #[cfg(any(
@@ -253,9 +285,13 @@ fn write_bundle<W: Write>(
 pub fn write_v5_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     writer: W,
-    pool_restrictions: BundlePoolRestrictions,
+    consensus_branch_id: BranchId,
 ) -> io::Result<()> {
-    write_bundle(bundle, writer, pool_restrictions)
+    write_bundle(
+        bundle,
+        writer,
+        crate::transaction::builder::orchard_protocol_for_branch(consensus_branch_id),
+    )
 }
 
 #[cfg(any(
