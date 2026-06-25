@@ -273,6 +273,9 @@ pub fn decode_extfvk_with_network(
     let network = match parsed.hrp().as_str() {
         mainnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY => Ok(NetworkType::Main),
         testnet::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY => Ok(NetworkType::Test),
+        // Under the mainnet-masquerade cfg this HRP equals mainnet's (matched as Main
+        // above), so this arm is unreachable; gate it out to avoid the warning.
+        #[cfg(not(zcash_regtest_mainnet_keys))]
         regtest::HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY => Ok(NetworkType::Regtest),
         other => Err(Bech32DecodeError::HrpMismatch {
             expected: format!(
@@ -495,11 +498,18 @@ pub fn decode_transparent_address(
 #[cfg(feature = "sapling")]
 mod tests_sapling {
     use super::{
-        Bech32DecodeError, decode_extended_full_viewing_key, decode_extended_spending_key,
-        decode_payment_address, encode_extended_full_viewing_key, encode_extended_spending_key,
-        encode_payment_address,
+        Bech32DecodeError, decode_extended_spending_key, decode_payment_address,
+        encode_extended_spending_key,
     };
-    use sapling::{PaymentAddress, zip32::ExtendedSpendingKey};
+    // Only used by the regtest-vector tests below, which are gated out under the
+    // mainnet-masquerade cfg (regtest HRP then equals mainnet's).
+    #[cfg(not(zcash_regtest_mainnet_keys))]
+    use super::{
+        decode_extended_full_viewing_key, encode_extended_full_viewing_key, encode_payment_address,
+    };
+    use sapling::zip32::ExtendedSpendingKey;
+    #[cfg(not(zcash_regtest_mainnet_keys))]
+    use sapling::PaymentAddress;
     use zcash_protocol::constants;
 
     #[test]
@@ -542,6 +552,10 @@ mod tests_sapling {
         );
     }
 
+    // Hardcodes regtest sapling vectors that are invalid under the mainnet-masquerade cfg
+    // (regtest HRP then equals mainnet's); the masquerade is covered by
+    // zcash_keys::keys::tests::regtest_masquerades_as_mainnet instead.
+    #[cfg(not(zcash_regtest_mainnet_keys))]
     #[test]
     #[allow(deprecated)]
     fn extended_full_viewing_key() {
@@ -592,6 +606,9 @@ mod tests_sapling {
         );
     }
 
+    // Hardcodes regtest sapling vectors that are invalid under the mainnet-masquerade cfg
+    // (regtest HRP then equals mainnet's); see regtest_masquerades_as_mainnet.
+    #[cfg(not(zcash_regtest_mainnet_keys))]
     #[test]
     fn payment_address() {
         let addr = PaymentAddress::from_bytes(&[

@@ -255,7 +255,16 @@ impl ZcashAddress {
         self,
         net: NetworkType,
     ) -> Result<T, ConversionError<T::Error>> {
-        let network_matches = self.net == net;
+        // Mainnet-masquerade (`--cfg zcash_regtest_mainnet_keys`, OFF by default): a regtest chain
+        // built with mainnet HRPs (see zcash_protocol::constants::regtest) encodes its own
+        // addresses as `NetworkType::Main`, so a Regtest-network wallet must accept Main-encoded
+        // addresses of every kind. When the cfg is absent `masquerade` is always `false`, leaving
+        // behaviour byte-for-byte unchanged.
+        #[cfg(zcash_regtest_mainnet_keys)]
+        let masquerade = self.net == NetworkType::Main && net == NetworkType::Regtest;
+        #[cfg(not(zcash_regtest_mainnet_keys))]
+        let masquerade = false;
+        let network_matches = self.net == net || masquerade;
         // The Sprout and transparent address encodings use the same prefix for testnet
         // and regtest, so we need to allow parsing testnet addresses as regtest.
         let regtest_exception =

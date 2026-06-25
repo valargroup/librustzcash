@@ -1951,6 +1951,74 @@ mod tests {
         assert_eq!(taddr, "t1PKtYdJJHhc3Pxowmznkg7vdTwnhEsCvR4".to_string());
     }
 
+    /// Mainnet-masquerade (`--cfg zcash_regtest_mainnet_keys`): a regtest `LocalNetwork`
+    /// derives at the mainnet coin type (`133'`) and encodes mainnet HRPs (`uview1`/`u1`),
+    /// and the resulting mainnet-looking addresses still round-trip back through the Regtest
+    /// network without `IncorrectNetwork`. This proves the `zcash_protocol` constant gate
+    /// (constants/regtest.rs) and the `zcash_address::convert_if_network` widening move in
+    /// lock-step. Only compiled/run with the opt-in cfg set; see constants/regtest.rs.
+    #[test]
+    #[cfg(all(
+        zcash_regtest_mainnet_keys,
+        feature = "sapling",
+        feature = "orchard",
+        feature = "transparent-inputs"
+    ))]
+    fn regtest_masquerades_as_mainnet() {
+        use crate::address::Address;
+        use crate::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+        use zcash_address::ZcashAddress;
+        use zcash_protocol::consensus::{
+            BlockHeight, NetworkConstants, NetworkType, NetworkUpgrade, Parameters,
+        };
+
+        // A minimal regtest `Parameters` (every upgrade active) — avoids pulling in the
+        // `local-consensus` feature just to exercise the masquerade.
+        #[derive(Clone)]
+        struct Regtest;
+        impl Parameters for Regtest {
+            fn network_type(&self) -> NetworkType {
+                NetworkType::Regtest
+            }
+            fn activation_height(&self, _nu: NetworkUpgrade) -> Option<BlockHeight> {
+                Some(BlockHeight::from_u32(1))
+            }
+        }
+        let regtest = Regtest;
+
+        // (1) Coin type masquerades as mainnet (133'), so BIP-44/ZIP-32 paths match a
+        // normal-mode wallet's.
+        assert_eq!(
+            regtest.coin_type(),
+            zcash_protocol::constants::mainnet::COIN_TYPE
+        );
+        assert_eq!(regtest.coin_type(), 133);
+
+        // (2) HRP getters masquerade as mainnet.
+        assert_eq!(regtest.hrp_unified_address(), "u");
+        assert_eq!(regtest.hrp_unified_fvk(), "uview");
+
+        // (3) A USK derived against the regtest params yields mainnet-looking encodings.
+        let usk = UnifiedSpendingKey::from_seed(&regtest, &seed(), AccountId::ZERO).unwrap();
+        let ufvk = usk.to_unified_full_viewing_key();
+        let ufvk_str = ufvk.encode(&regtest);
+        assert!(ufvk_str.starts_with("uview1"), "UFVK = {ufvk_str}");
+
+        let (ua, _) = ufvk
+            .default_address(UnifiedAddressRequest::AllAvailableKeys)
+            .unwrap();
+        let ua_str = ua.encode(&regtest);
+        assert!(ua_str.starts_with("u1"), "UA = {ua_str}");
+
+        // (4) The mainnet-looking UA round-trips back through the Regtest network without
+        // `IncorrectNetwork` — the convert_if_network widening fired in lock-step.
+        let parsed: Address = ZcashAddress::try_from_encoded(&ua_str)
+            .unwrap()
+            .convert_if_network(regtest.network_type())
+            .unwrap();
+        assert_eq!(parsed.encode(&regtest), ua_str);
+    }
+
     #[test]
     #[cfg(any(feature = "orchard", feature = "sapling"))]
     fn ufvk_round_trip() {

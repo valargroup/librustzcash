@@ -247,7 +247,14 @@ mod tests {
     proptest! {
         #[test]
         fn ufvk_roundtrip(
-            network in select(vec![NetworkType::Main, NetworkType::Test, NetworkType::Regtest]),
+            network in select({
+                // Regtest encodes/decodes as Main under the masquerade cfg, so drop it then.
+                #[cfg(not(zcash_regtest_mainnet_keys))]
+                let nets = vec![NetworkType::Main, NetworkType::Test, NetworkType::Regtest];
+                #[cfg(zcash_regtest_mainnet_keys)]
+                let nets = vec![NetworkType::Main, NetworkType::Test];
+                nets
+            }),
             ufvk in arb_unified_fvk(),
         ) {
             let encoded = ufvk.encode(&network);

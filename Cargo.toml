@@ -228,4 +228,8 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(tokio_unstable)',
   'cfg(zcash_unstable, values("zfuture", "nu6.3", "nu7"))',
   'cfg(live_network_tests)',
+  # Opt-in (TEST-ONLY) mainnet-masquerade for the Ironwood regtest network: makes Regtest derive
+  # coin type 133' and encode mainnet HRPs so a normal-mode hardware wallet works without a testnet
+  # toggle. OFF by default; set via RUSTFLAGS, never a cargo feature (so a dependency can't enable it).
+  'cfg(zcash_regtest_mainnet_keys)',
 ] }

@@ -9,7 +9,11 @@ use std::error::Error;
 
 use bech32::{Bech32, Bech32m, Checksum, Hrp, primitives::decode::CheckedHrpstring};
 use zcash_protocol::consensus::{NetworkConstants, NetworkType};
-use zcash_protocol::constants::{mainnet, regtest, testnet};
+use zcash_protocol::constants::{mainnet, testnet};
+// `regtest` is only referenced by the regtest decode arms below, which are gated out under
+// the mainnet-masquerade cfg (their HRPs then equal mainnet's).
+#[cfg(not(zcash_regtest_mainnet_keys))]
+use zcash_protocol::constants::regtest;
 
 use crate::kind::unified::Encoding;
 use crate::{AddressKind, ZcashAddress, kind::*};
@@ -78,6 +82,9 @@ impl FromStr for ZcashAddress {
             let net = match parsed.hrp().as_str() {
                 mainnet::HRP_SAPLING_PAYMENT_ADDRESS => NetworkType::Main,
                 testnet::HRP_SAPLING_PAYMENT_ADDRESS => NetworkType::Test,
+                // Under the mainnet-masquerade cfg this HRP equals mainnet's (decoded as
+                // Main above), so this arm is unreachable; gate it out to avoid the warning.
+                #[cfg(not(zcash_regtest_mainnet_keys))]
                 regtest::HRP_SAPLING_PAYMENT_ADDRESS => NetworkType::Regtest,
                 // We will not define new Bech32 address encodings.
                 _ => {
@@ -100,6 +107,9 @@ impl FromStr for ZcashAddress {
             let net = match parsed.hrp().as_str() {
                 mainnet::HRP_TEX_ADDRESS => NetworkType::Main,
                 testnet::HRP_TEX_ADDRESS => NetworkType::Test,
+                // Under the mainnet-masquerade cfg this HRP equals mainnet's (decoded as
+                // Main above), so this arm is unreachable; gate it out to avoid the warning.
+                #[cfg(not(zcash_regtest_mainnet_keys))]
                 regtest::HRP_TEX_ADDRESS => NetworkType::Regtest,
                 // Not recognized as a Zcash address type
                 _ => {
@@ -228,6 +238,9 @@ mod tests {
                 kind: AddressKind::Sapling([0; 43]),
             },
         );
+        // Regtest sapling HRP equals mainnet's under the masquerade cfg, so this regtest
+        // vector no longer decodes as Regtest; skip it then.
+        #[cfg(not(zcash_regtest_mainnet_keys))]
         encoding(
             "zregtestsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqknpr3m",
             ZcashAddress {
@@ -257,6 +270,9 @@ mod tests {
                 ])),
             },
         );
+        // Regtest unified HRP equals mainnet's under the masquerade cfg, so this regtest
+        // vector no longer decodes as Regtest; skip it then.
+        #[cfg(not(zcash_regtest_mainnet_keys))]
         encoding(
             "uregtest15xk7vj4grjkay6mnfl93dhsflc2yeunhxwdh38rul0rq3dfhzzxgm5szjuvtqdha4t4p2q02ks0jgzrhjkrav70z9xlvq0plpcjkd5z3",
             ZcashAddress {
