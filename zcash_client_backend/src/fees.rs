@@ -74,6 +74,11 @@ enum ChangeValueInner {
         protocol: ShieldedProtocol,
         value: Zatoshis,
         memo: Option<MemoBytes>,
+        /// After NU6.3, an Orchard-protocol change output may be created in the
+        /// Ironwood bundle instead of the Orchard bundle. This is set only for
+        /// such Ironwood change; ordinary Sapling/Orchard change leaves it false.
+        #[cfg(zcash_unstable = "nu6.3")]
+        is_ironwood: bool,
     },
     #[cfg(feature = "transparent-inputs")]
     EphemeralTransparent { value: Zatoshis },
@@ -92,6 +97,8 @@ impl ChangeValue {
             protocol,
             value,
             memo,
+            #[cfg(zcash_unstable = "nu6.3")]
+            is_ironwood: false,
         })
     }
 
@@ -104,6 +111,24 @@ impl ChangeValue {
     #[cfg(feature = "orchard")]
     pub fn orchard(value: Zatoshis, memo: Option<MemoBytes>) -> Self {
         Self::shielded(ShieldedProtocol::Orchard, value, memo)
+    }
+
+    /// Constructs a new change value that will be created as an Ironwood output
+    /// after NU6.3.
+    ///
+    /// Ironwood reuses the Orchard protocol and addresses; this change is placed
+    /// in the transaction's Ironwood bundle rather than its Orchard bundle. It is
+    /// used for change returned to self when the spent notes are Ironwood notes,
+    /// so that Ironwood spends produce Ironwood change (and Orchard spends produce
+    /// Orchard change) without crossing the Orchard/Ironwood boundary.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    pub fn ironwood(value: Zatoshis, memo: Option<MemoBytes>) -> Self {
+        Self(ChangeValueInner::Shielded {
+            protocol: ShieldedProtocol::Orchard,
+            value,
+            memo,
+            is_ironwood: true,
+        })
     }
 
     /// Returns the pool to which the change or ephemeral output should be sent.
@@ -130,6 +155,20 @@ impl ChangeValue {
             ChangeValueInner::Shielded { memo, .. } => memo.as_ref(),
             #[cfg(feature = "transparent-inputs")]
             ChangeValueInner::EphemeralTransparent { .. } => None,
+        }
+    }
+
+    /// Returns whether this change output should be created in the Ironwood
+    /// bundle rather than the Orchard bundle.
+    ///
+    /// This is only ever true for Orchard-protocol change after NU6.3; Sapling
+    /// change and pre-NU6.3 Orchard change always return false.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn is_ironwood(&self) -> bool {
+        match &self.0 {
+            ChangeValueInner::Shielded { is_ironwood, .. } => *is_ironwood,
+            #[cfg(feature = "transparent-inputs")]
+            ChangeValueInner::EphemeralTransparent { .. } => false,
         }
     }
 

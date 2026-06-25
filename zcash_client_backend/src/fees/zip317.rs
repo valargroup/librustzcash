@@ -1059,6 +1059,397 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn orchard_self_change_stays_orchard_after_nu6_3() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+
+        // Unshield: a single Orchard note in, a transparent payment out, and
+        // change back to self. After NU6.3, self-change must stay in the Orchard
+        // bundle, so the transaction is a single Orchard bundle (1 spend + 1
+        // change = 2 actions) with no Ironwood bundle. If the self-change fix is
+        // reverted, the change is placed in a separate Ironwood bundle, adding 2
+        // actions and raising the fee; this test pins the corrected behavior.
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[TxOut::new(
+                Zatoshis::const_from_u64(40000),
+                Script::default(),
+            )],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[TestOrchardInput {
+                    note_id: 0,
+                    value: Zatoshis::const_from_u64(100_000),
+                    is_ironwood: false,
+                }][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change()
+                    == [ChangeValue::orchard(Zatoshis::const_from_u64(45000), None)]
+                && balance.fee_required() == Zatoshis::const_from_u64(15000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn multi_orchard_spend_change_uses_post_nu6_3_action_count() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+
+        // Spend TWO legacy Orchard notes to a transparent address with Orchard
+        // self-change. After NU6.3 the Orchard bundle is `OrchardPostNu6_3`, where a
+        // spend and an output never share an action, so the bundle has
+        // 2 spends + 1 change = 3 actions (not `max(2, 1) = 2`). The fee must reflect
+        // 3 Orchard actions; counting the bundle as `OrchardPreNu6_3` would
+        // underprice the fee and make change too large.
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[TxOut::new(
+                Zatoshis::const_from_u64(40000),
+                Script::default(),
+            )],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[
+                    TestOrchardInput {
+                        note_id: 0,
+                        value: Zatoshis::const_from_u64(60000),
+                        is_ironwood: false,
+                    },
+                    TestOrchardInput {
+                        note_id: 1,
+                        value: Zatoshis::const_from_u64(60000),
+                        is_ironwood: false,
+                    },
+                ][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change()
+                    == [ChangeValue::orchard(Zatoshis::const_from_u64(60000), None)]
+                && balance.fee_required() == Zatoshis::const_from_u64(20000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn ironwood_spend_produces_ironwood_change_after_nu6_3() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+
+        // Spend a single Ironwood note to a transparent address. The change must
+        // come back as Ironwood: an Ironwood spend produces Ironwood change, never
+        // Orchard (Ironwood -> Orchard would cross the turnstile backwards).
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[TxOut::new(
+                Zatoshis::const_from_u64(40000),
+                Script::default(),
+            )],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[TestOrchardInput {
+                    note_id: 0,
+                    value: Zatoshis::const_from_u64(100_000),
+                    is_ironwood: true,
+                }][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change()
+                    == [ChangeValue::ironwood(Zatoshis::const_from_u64(45000), None)]
+                && balance.fee_required() == Zatoshis::const_from_u64(15000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn mixed_spend_splits_change_without_crossing_after_nu6_3() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+
+        // Spend a small Orchard (V2) note plus a large Ironwood (V3) note to a
+        // transparent address. The total change exceeds the Orchard input value,
+        // so the change splits: the Orchard surplus (== the Orchard input) stays
+        // Orchard, and the remainder becomes Ironwood change. No value crosses the
+        // Orchard/Ironwood boundary.
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[TxOut::new(
+                Zatoshis::const_from_u64(40000),
+                Script::default(),
+            )],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[
+                    TestOrchardInput {
+                        note_id: 0,
+                        value: Zatoshis::const_from_u64(20000),
+                        is_ironwood: false,
+                    },
+                    TestOrchardInput {
+                        note_id: 1,
+                        value: Zatoshis::const_from_u64(100_000),
+                        is_ironwood: true,
+                    },
+                ][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change() == [
+                    ChangeValue::orchard(Zatoshis::const_from_u64(20000), None),
+                    ChangeValue::ironwood(Zatoshis::const_from_u64(35000), None),
+                ]
+                && balance.fee_required() == Zatoshis::const_from_u64(25000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn ironwood_spend_splits_change_into_multiple_ironwood_notes_after_nu6_3() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = MultiOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+            SplitPolicy::with_min_output_value(
+                NonZeroUsize::new(3).unwrap(),
+                Zatoshis::const_from_u64(100_0000),
+            ),
+        );
+
+        // Spend a large Ironwood note to a transparent address with a split
+        // policy of 3. The change must be split into multiple *Ironwood* notes
+        // (never Orchard): per-pool splitting still applies, and an Ironwood spend
+        // produces Ironwood change.
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[TxOut::new(
+                Zatoshis::const_from_u64(1000_0000),
+                Script::default(),
+            )],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[TestOrchardInput {
+                    note_id: 0,
+                    value: Zatoshis::const_from_u64(1_0000_0000),
+                    is_ironwood: true,
+                }][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &AccountMeta::new(None, Some(PoolMeta::new(0, Zatoshis::ZERO))),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change().len() == 3
+                && balance.proposed_change().iter().all(|c| c.is_ironwood())
+                && balance.fee_required() == Zatoshis::const_from_u64(20000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn ironwood_spend_near_fee_boundary_keeps_ironwood_change() {
+        use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
+
+        use crate::fees::sapling as sapling_fees;
+
+        let nu6_3_activation = BlockHeight::from_u32(10);
+        let network = LocalNetwork {
+            overwinter: Some(BlockHeight::from_u32(1)),
+            sapling: Some(BlockHeight::from_u32(2)),
+            blossom: Some(BlockHeight::from_u32(3)),
+            heartwood: Some(BlockHeight::from_u32(4)),
+            canopy: Some(BlockHeight::from_u32(5)),
+            nu5: Some(BlockHeight::from_u32(6)),
+            nu6: Some(BlockHeight::from_u32(7)),
+            nu6_1: Some(BlockHeight::from_u32(8)),
+            nu6_2: Some(BlockHeight::from_u32(9)),
+            nu6_3: Some(nu6_3_activation),
+        };
+        let change_strategy = SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+            Zip317FeeRule::standard(),
+            None,
+            ShieldedProtocol::Orchard,
+            DustOutputPolicy::default(),
+        );
+
+        // Near the fee boundary, the provisional Orchard-change layout prices the
+        // Ironwood spend up to zero change (65000 in - 40000 out - 25000 fee = 0).
+        // The re-pool step must still run and find the cheaper Ironwood-change
+        // layout (15000 fee, 10000 Ironwood change) instead of overpaying and
+        // dropping the change.
+        let result = change_strategy.compute_balance::<_, u32>(
+            &network,
+            nu6_3_activation.into(),
+            &[] as &[TestTransparentInput],
+            &[TxOut::new(
+                Zatoshis::const_from_u64(40000),
+                Script::default(),
+            )],
+            &sapling_fees::EmptyBundleView,
+            &(
+                &[TestOrchardInput {
+                    note_id: 0,
+                    value: Zatoshis::const_from_u64(65000),
+                    is_ironwood: true,
+                }][..],
+                &[] as &[OrchardPayment],
+            ),
+            None,
+            &(),
+        );
+
+        assert_matches!(
+            result,
+            Ok(balance) if
+                balance.proposed_change()
+                    == [ChangeValue::ironwood(Zatoshis::const_from_u64(10000), None)]
+                && balance.fee_required() == Zatoshis::const_from_u64(15000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     fn legacy_orchard_change_disallows_ironwood_dust_after_nu6_3() {
         use zcash_protocol::{consensus::BlockHeight, local_consensus::LocalNetwork};
 

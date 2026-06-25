@@ -120,13 +120,26 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     ironwood_inputs: usize,
     orchard_outputs: usize,
     ironwood_outputs: usize,
+    // After NU6.3 the legacy Orchard bundle is built as `OrchardPostNu6_3`
+    // (cross-address disabled), where a spend and an output never share an action
+    // (each is paired with a fabricated counterpart), so its action count is
+    // `spends + outputs`. Before NU6.3 (and for legacy v5 bundles) it is
+    // `OrchardPreNu6_3`, where spends and outputs share actions (`max`). This must
+    // match the protocol the transaction builder selects, or the fee is miscounted.
+    #[cfg(zcash_unstable = "nu6.3")] orchard_post_nu6_3: bool,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
-    let orchard_actions = orchard_fees::transactional_action_count(
-        orchard::BundleProtocol::OrchardPreNu6_3,
-        orchard_inputs,
-        orchard_outputs,
-    )
-    .map_err(ChangeError::BundleError)?;
+    #[cfg(zcash_unstable = "nu6.3")]
+    let orchard_protocol = if orchard_post_nu6_3 {
+        orchard::BundleProtocol::OrchardPostNu6_3
+    } else {
+        orchard::BundleProtocol::OrchardPreNu6_3
+    };
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let orchard_protocol = orchard::BundleProtocol::OrchardPreNu6_3;
+
+    let orchard_actions =
+        orchard_fees::transactional_action_count(orchard_protocol, orchard_inputs, orchard_outputs)
+            .map_err(ChangeError::BundleError)?;
 
     #[cfg(zcash_unstable = "nu6.3")]
     {
@@ -155,6 +168,7 @@ fn orchard_action_count<NoteRefT: Clone, E>(
     orchard: &impl orchard_fees::BundleView<NoteRefT>,
     orchard_output_count: usize,
     ironwood_output_count: usize,
+    #[cfg(zcash_unstable = "nu6.3")] orchard_post_nu6_3: bool,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
     #[cfg(zcash_unstable = "nu6.3")]
     let ironwood_inputs = orchard
@@ -170,6 +184,8 @@ fn orchard_action_count<NoteRefT: Clone, E>(
         ironwood_inputs,
         orchard_output_count,
         ironwood_output_count,
+        #[cfg(zcash_unstable = "nu6.3")]
+        orchard_post_nu6_3,
     )
 }
 
@@ -214,11 +230,7 @@ impl OutputManifest {
         ironwood: 0,
     };
 
-    fn shielded_change(
-        change_pool: ShieldedProtocol,
-        count: usize,
-        #[cfg(zcash_unstable = "nu6.3")] orchard_outputs_are_ironwood: bool,
-    ) -> Self {
+    fn shielded_change(change_pool: ShieldedProtocol, count: usize) -> Self {
         Self {
             transparent: 0,
             sapling: if change_pool == ShieldedProtocol::Sapling {
@@ -226,26 +238,17 @@ impl OutputManifest {
             } else {
                 0
             },
-            orchard: if change_pool == ShieldedProtocol::Orchard && {
-                #[cfg(zcash_unstable = "nu6.3")]
-                {
-                    !orchard_outputs_are_ironwood
-                }
-                #[cfg(not(zcash_unstable = "nu6.3"))]
-                {
-                    true
-                }
-            } {
+            // Change is a self output. After NU6.3, self outputs stay in the
+            // Orchard bundle; only non-self (cross-address) recipient outputs are
+            // restricted to Ironwood. So change is always counted as Orchard,
+            // regardless of `orchard_outputs_are_ironwood`.
+            orchard: if change_pool == ShieldedProtocol::Orchard {
                 count
             } else {
                 0
             },
             #[cfg(zcash_unstable = "nu6.3")]
-            ironwood: if change_pool == ShieldedProtocol::Orchard && orchard_outputs_are_ironwood {
-                count
-            } else {
-                0
-            },
+            ironwood: 0,
         }
     }
 
@@ -362,12 +365,7 @@ where
             .saturating_sub(m.total_note_count().unwrap_or(usize::MAX))
             .max(1)
     });
-    let target_change_counts = OutputManifest::shielded_change(
-        change_pool,
-        target_change_count,
-        #[cfg(zcash_unstable = "nu6.3")]
-        orchard_outputs_are_ironwood,
-    );
+    let target_change_counts = OutputManifest::shielded_change(change_pool, target_change_count);
     assert!(target_change_counts.total_shielded() == target_change_count);
 
     // We don't create a fully-transparent transaction if a change memo is used.
@@ -454,7 +452,13 @@ where
         #[cfg(not(zcash_unstable = "nu6.3"))]
         let ironwood_output_count = 0;
 
-        orchard_action_count::<NoteRefT, E>(orchard, orchard_output_count, ironwood_output_count)
+        orchard_action_count::<NoteRefT, E>(
+            orchard,
+            orchard_output_count,
+            ironwood_output_count,
+            #[cfg(zcash_unstable = "nu6.3")]
+            orchard_outputs_are_ironwood,
+        )
     };
     #[cfg(not(feature = "orchard"))]
     let orchard_action_count =
@@ -531,7 +535,7 @@ where
     let total_out_with_min_fee = (subtotal_out + min_fee).ok_or_else(overflow)?;
 
     #[allow(unused_mut)]
-    let (mut change, fee) = match total_in.cmp(&total_out_with_min_fee) {
+    let (mut change, mut fee) = match total_in.cmp(&total_out_with_min_fee) {
         Ordering::Less => {
             // Case 1. Insufficient input value exists to pay the minimum fee; there's no way
             // we can construct the transaction.
@@ -579,18 +583,13 @@ where
 
             // If we don't have as many change outputs as we expected, recompute the fee.
             let total_fee = if split_count < target_change_count {
-                let split_change_counts = OutputManifest::shielded_change(
-                    change_pool,
-                    split_count,
-                    #[cfg(zcash_unstable = "nu6.3")]
-                    orchard_outputs_are_ironwood,
-                );
+                let split_change_counts = OutputManifest::shielded_change(change_pool, split_count);
                 cfg.fee_rule
                     .fee_required(
                         cfg.params,
                         BlockHeight::from(target_height),
-                        transparent_input_sizes,
-                        transparent_output_sizes,
+                        transparent_input_sizes.clone(),
+                        transparent_output_sizes.clone(),
                         sapling_input_count,
                         sapling_output_count(if change_pool == ShieldedProtocol::Sapling {
                             split_count
@@ -695,6 +694,154 @@ where
             }
         }
     };
+
+    // After NU6.3, re-pool Orchard-family change so that it stays in the pool it
+    // was funded from: Orchard spends produce Orchard change, and Ironwood spends
+    // produce Ironwood change. A mixed spend whose change exceeds the Orchard input
+    // value splits the change — the Orchard surplus stays Orchard and the remainder
+    // becomes Ironwood change — so no value crosses the Orchard/Ironwood boundary.
+    // Orchard-only spends already produced Orchard change above, so this only
+    // re-pools (and re-prices) spends that include Ironwood notes.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    if change_pool == ShieldedProtocol::Orchard {
+        let sum_inputs = |want_ironwood: bool| -> Result<Zatoshis, ChangeError<E, NoteRefT>> {
+            orchard
+                .inputs()
+                .iter()
+                .filter(|i| orchard_fees::InputView::<NoteRefT>::is_ironwood(*i) == want_ironwood)
+                .try_fold(Zatoshis::ZERO, |acc, i| {
+                    (acc + orchard_fees::InputView::<NoteRefT>::value(i)).ok_or_else(overflow)
+                })
+        };
+
+        let ironwood_in = sum_inputs(true)?;
+        if ironwood_in > Zatoshis::ZERO {
+            let orchard_v2_in = sum_inputs(false)?;
+            let split_for = |v: Zatoshis| -> usize {
+                if v > Zatoshis::ZERO {
+                    wallet_meta.map_or(1usize, |wm| {
+                        usize::from(cfg.split_policy.split_count(
+                            wm.total_note_count(),
+                            wm.total_value(),
+                            v,
+                        ))
+                    })
+                } else {
+                    0
+                }
+            };
+
+            // The fee depends on the per-pool output counts, which depend on the
+            // change value, which depends on the fee; iterate to a fixed point.
+            // `split_at` computes the no-cross per-pool split for a candidate fee
+            // and the fee that split actually requires. The split is no-cross at
+            // ANY fee (Orchard change is capped at the Orchard input value), so
+            // every value of `f` yields a turnstile-valid layout.
+            let split_at = |f: Zatoshis| -> Result<
+                (Zatoshis, Zatoshis, usize, usize, Zatoshis),
+                ChangeError<E, NoteRefT>,
+            > {
+                let total_change =
+                    (total_in - (subtotal_out + f).ok_or_else(overflow)?).ok_or_else(underflow)?;
+                let orchard_change = orchard_v2_in.min(total_change);
+                let ironwood_change = (total_change - orchard_change).ok_or_else(underflow)?;
+                let orchard_count = split_for(orchard_change);
+                let ironwood_count = split_for(ironwood_change);
+                let manifest = OutputManifest {
+                    transparent: 0,
+                    sapling: 0,
+                    orchard: orchard_count,
+                    ironwood: ironwood_count,
+                };
+                let required = cfg
+                    .fee_rule
+                    .fee_required(
+                        cfg.params,
+                        BlockHeight::from(target_height),
+                        transparent_input_sizes.clone(),
+                        transparent_output_sizes.clone(),
+                        sapling_input_count,
+                        sapling_output_count(0)?,
+                        orchard_action_count(manifest)?,
+                    )
+                    .map_err(|fee_error| ChangeError::StrategyError(E::from(fee_error)))?;
+                Ok((
+                    orchard_change,
+                    ironwood_change,
+                    orchard_count,
+                    ironwood_count,
+                    required,
+                ))
+            };
+
+            // The per-pool counts depend on the change value, which depends on the
+            // fee, which depends on the counts; iterate to a fixed point.
+            let mut current_fee = fee;
+            let mut max_fee = fee;
+            let mut converged = None;
+            for _ in 0..6 {
+                let (oc_v, ic_v, oc, ic, required) = split_at(current_fee)?;
+                if required == current_fee {
+                    converged = Some((oc_v, ic_v, oc, ic, current_fee));
+                    break;
+                }
+                if required > max_fee {
+                    max_fee = required;
+                }
+                current_fee = required;
+            }
+
+            // If the counts oscillate at a note-size boundary and never settle,
+            // fall back to the highest fee observed: it always covers the split it
+            // produces (slightly over-funding), and the split is no-cross at any
+            // fee. Critically, we never leave the resolution's Orchard change in
+            // place for an Ironwood-involving spend, which would be a backward
+            // Ironwood -> Orchard turnstile crossing.
+            let (orchard_change, ironwood_change, orchard_count, ironwood_count, new_fee) =
+                match converged {
+                    Some(resolved) => resolved,
+                    None => {
+                        let (oc_v, ic_v, oc, ic, _required) = split_at(max_fee)?;
+                        (oc_v, ic_v, oc, ic, max_fee)
+                    }
+                };
+
+            let memo = change_memo.cloned();
+            let build = |count: usize, total: Zatoshis, ironwood: bool| -> Vec<ChangeValue> {
+                if count == 0 {
+                    return vec![];
+                }
+                let per = total.div_with_remainder(
+                    NonZeroU64::new(u64::try_from(count).expect("usize fits into u64")).unwrap(),
+                );
+                (0..count)
+                    .map(|i| {
+                        let v = if i == 0 {
+                            (*per.quotient() + *per.remainder()).unwrap()
+                        } else {
+                            *per.quotient()
+                        };
+                        if ironwood {
+                            ChangeValue::ironwood(v, memo.clone())
+                        } else {
+                            ChangeValue::orchard(v, memo.clone())
+                        }
+                    })
+                    .collect()
+            };
+
+            let mut repooled = build(orchard_count, orchard_change, false);
+            repooled.extend(build(ironwood_count, ironwood_change, true));
+            // If the resolution emitted a (zero-value) change output for the change
+            // memo / output indistinguishability, preserve one rather than dropping
+            // it; place it in the Ironwood pool since an Ironwood note is spent.
+            if repooled.is_empty() && !change.is_empty() {
+                repooled.push(ChangeValue::ironwood(Zatoshis::ZERO, change_memo.cloned()));
+            }
+            change = repooled;
+            fee = new_fee;
+        }
+    }
 
     #[cfg(feature = "transparent-inputs")]
     change.extend(
@@ -942,6 +1089,8 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
                         0
                     }
                 },
+                #[cfg(zcash_unstable = "nu6.3")]
+                orchard_outputs_are_ironwood,
             )?;
             #[cfg(not(feature = "orchard"))]
             let o_action_count = 0;

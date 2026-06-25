@@ -53,8 +53,18 @@ workspace.
 - `zcash_client_backend::sync`:
   - `decryptor` module, behind the `sync-decryptor` feature flag, providing a
     Tokio-based batch decryption engine for full blocks and transactions.
+- `zcash_client_backend::fees::ChangeValue::ironwood` and
+  `zcash_client_backend::fees::ChangeValue::is_ironwood` (NU6.3): construct and
+  identify change created in the Ironwood bundle rather than the Orchard bundle.
 
 ### Changed
+- After NU6.3, shielded change now follows the pool of the notes being spent:
+  Orchard spends produce Orchard change and Ironwood spends produce Ironwood
+  change. A mixed spend whose change exceeds the Orchard input value splits the
+  change, so the Orchard surplus stays Orchard and the remainder is Ironwood; no
+  value crosses the Orchard/Ironwood boundary. (Previously all Orchard-family
+  change after NU6.3 was created in the Ironwood bundle, which moved a partial
+  Orchard spend's remaining balance into Ironwood.)
 - `zcash_client_backend::fees::orchard::BundleView` no longer exposes a
   bundle protocol, because fee and change calculation derives Orchard and
   Ironwood action counts from the bundle inputs and outputs.

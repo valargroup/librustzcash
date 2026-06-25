@@ -2997,4 +2997,56 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    fn builder_supports_orchard_and_ironwood_cospend() {
+        // A single transaction can spend from both the legacy Orchard pool and the
+        // Ironwood pool, exactly as Sapling and Orchard can be co-spent today: each
+        // note goes into its own bundle (V2 -> Orchard, V3 -> Ironwood), gated only
+        // on that bundle's anchor.
+        let (orchard_fvk, orchard_note, orchard_path) =
+            orchard_note_with_version(orchard::note::NoteVersion::V2);
+        let (ironwood_fvk, ironwood_note, ironwood_path) =
+            orchard_note_with_version(orchard::note::NoteVersion::V3);
+
+        // Derive each bundle's anchor from its note's commitment and path so the
+        // spends validate against their respective anchors.
+        let orchard_anchor = orchard_path.root(orchard::note::ExtractedNoteCommitment::from(
+            orchard_note.commitment(),
+        ));
+        let ironwood_anchor = ironwood_path.root(orchard::note::ExtractedNoteCommitment::from(
+            ironwood_note.commitment(),
+        ));
+
+        let mut builder = Builder::new(
+            nu6_3_test_network(),
+            10u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: Some(orchard_anchor),
+                ironwood_anchor: Some(ironwood_anchor),
+            },
+        );
+
+        builder
+            .add_orchard_spend::<Infallible>(orchard_fvk, orchard_note, orchard_path)
+            .expect("a V2 note is accepted into the Orchard bundle");
+        builder
+            .add_ironwood_spend::<Infallible>(ironwood_fvk, ironwood_note, ironwood_path)
+            .expect("a V3 note is accepted into the Ironwood bundle");
+
+        // Both bundles are present and each carries its spend: the transaction
+        // spends from Orchard and Ironwood simultaneously.
+        assert_eq!(
+            builder.orchard_builder.as_ref().map(|b| b.spends().len()),
+            Some(1),
+            "the Orchard bundle should hold the V2 spend"
+        );
+        assert_eq!(
+            builder.ironwood_builder.as_ref().map(|b| b.spends().len()),
+            Some(1),
+            "the Ironwood bundle should hold the V3 spend"
+        );
+    }
 }

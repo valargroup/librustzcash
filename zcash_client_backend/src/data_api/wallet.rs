@@ -2326,8 +2326,14 @@ where
                     let change_address =
                         orchard_fvk.address_at(0u32, orchard::keys::Scope::Internal);
 
+                    // Change is a self output: it stays in the bundle matching the
+                    // pool it was funded from. The change strategy marks Ironwood
+                    // change (from Ironwood spends) via `ChangeValue::is_ironwood`,
+                    // so Ironwood spends produce Ironwood change and Orchard spends
+                    // produce Orchard change, without crossing the boundary.
+                    // Recipient (non-change) dispatch above is unaffected.
                     #[cfg(zcash_unstable = "nu6.3")]
-                    if orchard_outputs_are_ironwood {
+                    if change_value.is_ironwood() {
                         builder.add_ironwood_change_output(
                             orchard_fvk.clone(),
                             internal_ovk.map(|k| k.into()),
