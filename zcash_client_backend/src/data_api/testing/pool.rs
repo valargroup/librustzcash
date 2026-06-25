@@ -6225,6 +6225,12 @@ fn pczt_legacy_v5_orchard_unshield_after_nu6_3<Dsf>(
 
     let pczt_updated =
         OrchardPoolTester::add_proof_generation_keys(pczt_created, account.usk()).unwrap();
+    // The v5 Orchard bundle built after NU6.3 uses the NU6.3 pool restriction
+    // (OrchardNu6_3Onward) per ZIP 229, so it must be proven with the NU6.3 circuit.
+    #[cfg(zcash_unstable = "nu6.3")]
+    let orchard_pk =
+        ::orchard::circuit::ProvingKey::build(::orchard::circuit::OrchardCircuitVersion::PostNu6_3);
+    #[cfg(not(zcash_unstable = "nu6.3"))]
     let orchard_pk = ::orchard::circuit::ProvingKey::build(
         ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
     );
@@ -6362,13 +6368,22 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
 
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
+    // Per ZIP 229 the Orchard circuit is selected by consensus branch, not tx
+    // version. This must mirror `orchard_protocol_for_branch` so the proving key
+    // matches both the bundle the Creator built and the verifying key the extractor
+    // uses (otherwise extraction fails with `InvalidProof`).
     #[cfg(zcash_unstable = "nu6.3")]
-    let orchard_circuit_version =
-        if *pczt_updated.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION {
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward.circuit_version()
-        } else {
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version()
+    let orchard_circuit_version = {
+        use zcash_protocol::consensus::BranchId;
+        let restrictions = match BranchId::try_from(*pczt_updated.global().consensus_branch_id()) {
+            Ok(BranchId::Nu6_3) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
+            #[cfg(zcash_unstable = "nu7")]
+            Ok(BranchId::Nu7) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
+            Ok(BranchId::Nu6_2) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
+            _ => ::orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2,
         };
+        restrictions.circuit_version()
+    };
     #[cfg(not(zcash_unstable = "nu6.3"))]
     let orchard_circuit_version =
         ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version();

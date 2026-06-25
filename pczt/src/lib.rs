@@ -70,24 +70,30 @@ const PCZT_VERSION_1: u32 = 1;
 const PCZT_VERSION_2: u32 = 2;
 
 #[cfg(feature = "orchard")]
-pub(crate) fn orchard_bundle_format(
-    _global: &common::Global,
+/// The Orchard pool restriction implied by a consensus branch, per ZIP 229: the
+/// restriction (and therefore the cross-address rule and circuit) is selected by
+/// `(pool, consensus branch)`, not by the transaction version. Mirrors
+/// `zcash_primitives::transaction::builder::orchard_protocol_for_branch`.
+pub(crate) fn orchard_pool_restrictions_for_branch(
+    consensus_branch_id: BranchId,
 ) -> ::orchard::bundle::BundlePoolRestrictions {
-    #[cfg(zcash_unstable = "nu6.3")]
-    {
-        if _global.tx_version == zcash_protocol::constants::V6_TX_VERSION
-            && _global.version_group_id == zcash_protocol::constants::V6_VERSION_GROUP_ID
-        {
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward
-        } else {
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
-        }
+    use ::orchard::bundle::BundlePoolRestrictions;
+    match consensus_branch_id {
+        #[cfg(zcash_unstable = "nu6.3")]
+        BranchId::Nu6_3 => BundlePoolRestrictions::OrchardNu6_3Onward,
+        #[cfg(zcash_unstable = "nu7")]
+        BranchId::Nu7 => BundlePoolRestrictions::OrchardNu6_3Onward,
+        BranchId::Nu6_2 => BundlePoolRestrictions::OrchardNu6_2Only,
+        _ => BundlePoolRestrictions::OrchardPreNu6_2,
     }
+}
 
-    #[cfg(not(zcash_unstable = "nu6.3"))]
-    {
-        ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
-    }
+pub(crate) fn orchard_bundle_format(
+    global: &common::Global,
+) -> ::orchard::bundle::BundlePoolRestrictions {
+    BranchId::try_from(global.consensus_branch_id)
+        .map(orchard_pool_restrictions_for_branch)
+        .unwrap_or(::orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2)
 }
 
 fn postcard_from_exact<'de, T>(bytes: &'de [u8]) -> Result<T, postcard::Error>
@@ -1225,7 +1231,7 @@ mod tests {
         let bundle_format = orchard_bundle_format(&pczt.global);
         assert_eq!(
             bundle_format,
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
+            ::orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2
         );
 
         let parsed = pczt

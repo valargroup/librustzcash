@@ -94,12 +94,9 @@ fn read_bundle<R: Read>(
 pub fn read_v5_bundle<R: Read>(
     reader: R,
     proof_size_enforcement: ProofSizeEnforcement,
+    pool_restrictions: BundlePoolRestrictions,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
-    read_bundle(
-        reader,
-        proof_size_enforcement,
-        BundlePoolRestrictions::OrchardNu6_2Only,
-    )
+    read_bundle(reader, proof_size_enforcement, pool_restrictions)
 }
 
 #[cfg(any(
@@ -256,8 +253,9 @@ fn write_bundle<W: Write>(
 pub fn write_v5_bundle<W: Write>(
     bundle: Option<&orchard::Bundle<Authorized, ZatBalance>>,
     writer: W,
+    pool_restrictions: BundlePoolRestrictions,
 ) -> io::Result<()> {
-    write_bundle(bundle, writer, BundlePoolRestrictions::OrchardNu6_2Only)
+    write_bundle(bundle, writer, pool_restrictions)
 }
 
 #[cfg(any(

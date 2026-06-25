@@ -388,7 +388,7 @@ fn orchard_action_count(
     bundle_type.num_actions(num_spends, num_outputs, pool_restrictions)
 }
 
-fn orchard_protocol_for_branch(
+pub(crate) fn orchard_protocol_for_branch(
     consensus_branch_id: BranchId,
 ) -> orchard::bundle::BundlePoolRestrictions {
     match consensus_branch_id {
@@ -398,24 +398,6 @@ fn orchard_protocol_for_branch(
         BranchId::Nu7 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
         BranchId::Nu6_2 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
         _ => orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2,
-    }
-}
-
-fn orchard_protocol_for_version(
-    consensus_branch_id: BranchId,
-    tx_version: TxVersion,
-) -> orchard::bundle::BundlePoolRestrictions {
-    match tx_version {
-        TxVersion::V5 => match consensus_branch_id {
-            #[cfg(zcash_unstable = "nu6.3")]
-            BranchId::Nu6_3 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
-            #[cfg(zcash_unstable = "nu7")]
-            BranchId::Nu7 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
-            #[cfg(zcash_unstable = "zfuture")]
-            BranchId::ZFuture => orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
-            _ => orchard_protocol_for_branch(consensus_branch_id),
-        },
-        _ => orchard_protocol_for_branch(consensus_branch_id),
     }
 }
 
@@ -595,11 +577,6 @@ impl<P, U> Builder<'_, P, U> {
         })
     }
 
-    fn orchard_protocol_matches_version(&self, version: TxVersion) -> bool {
-        self.orchard_pool_restrictions
-            .is_none_or(|r| r == orchard_protocol_for_version(self.consensus_branch_id, version))
-    }
-
     #[cfg(zcash_unstable = "nu6.3")]
     fn orchard_post_nu6_3_in_use(&self) -> bool {
         self.orchard_pool_restrictions
@@ -643,14 +620,6 @@ impl<P, U> Builder<'_, P, U> {
             ));
         }
 
-        if self.orchard_in_use() && !self.orchard_protocol_matches_version(version) {
-            return Err(Error::TargetIncompatible(
-                self.consensus_branch_id,
-                version,
-                Some(PoolType::ORCHARD),
-            ));
-        }
-
         #[cfg(zcash_unstable = "nu6.3")]
         {
             let ironwood_available =
@@ -677,24 +646,6 @@ impl<P, U> Builder<'_, P, U> {
     /// added after this call.
     pub fn propose_version<FE>(&mut self, version: TxVersion) -> Result<(), Error<FE>> {
         self.check_version_compatibility(version)?;
-        let orchard_protocol = orchard_protocol_for_version(self.consensus_branch_id, version);
-        if !self.orchard_protocol_matches_version(version) {
-            if self.orchard_in_use() {
-                return Err(Error::TargetIncompatible(
-                    self.consensus_branch_id,
-                    version,
-                    Some(PoolType::ORCHARD),
-                ));
-            }
-
-            self.orchard_builder = if self.orchard_builder.is_some() {
-                self.build_config.orchard_builder(orchard_protocol)
-            } else {
-                None
-            };
-            self.orchard_pool_restrictions =
-                self.orchard_builder.as_ref().map(|_| orchard_protocol);
-        }
         self.tx_version = version;
         self.tx_version_proposed = true;
         Ok(())
@@ -1695,10 +1646,11 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
         self.check_coinbase_expiry_height::<FR::Error>()?;
         #[cfg(zcash_unstable = "nu6.3")]
         debug_assert!(!self.ironwood_in_use() || pczt_tx_version.has_ironwood());
-        #[cfg(zcash_unstable = "nu6.3")]
-        debug_assert!(
-            !self.orchard_post_nu6_3_in_use() || matches!(pczt_tx_version, TxVersion::V6)
-        );
+        // Per ZIP 229, the NU6.3 Orchard cross-address restriction is keyed on the
+        // consensus branch, not the transaction version, so a v5 transaction can
+        // legitimately carry a post-NU6.3 Orchard bundle (with the cross-address flag
+        // bit reserved/clear). There is therefore no Orchard-specific tx-version
+        // invariant to assert here.
 
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
 
@@ -2027,7 +1979,7 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
-    fn nu6_3_standard_builder_uses_legacy_orchard_protocol_for_explicit_v5() {
+    fn nu6_3_standard_builder_uses_nu6_3_orchard_protocol_for_explicit_v5() {
         let mut builder = Builder::new(
             nu6_3_test_network(),
             zcash_protocol::consensus::BlockHeight::from_u32(10),
@@ -2042,9 +1994,12 @@ mod tests {
             .propose_version::<Infallible>(TxVersion::V5)
             .unwrap();
 
+        // Per ZIP 229 the NU6.3 Orchard cross-address restriction cannot be
+        // bypassed with a v5 transaction: the pool restriction is selected by
+        // consensus branch, not transaction version.
         assert_eq!(
             builder.orchard_pool_restrictions,
-            Some(orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only)
+            Some(orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward)
         );
     }
 

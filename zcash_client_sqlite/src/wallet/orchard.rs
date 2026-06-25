@@ -1061,7 +1061,7 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(all(zcash_unstable = "nu6.3", feature = "unstable", feature = "pczt-tests"))]
-    fn send_max_from_orchard_note_after_nu6_3_can_create_legacy_v5_pczt() {
+    fn send_max_orchard_payment_after_nu6_3_v5_rejected_by_cross_address() {
         let network = network_with_nu6_3();
         let mut st = TestBuilder::new()
             .with_network(network)
@@ -1099,22 +1099,24 @@ pub(crate) mod tests {
             Some(Zatoshis::const_from_u64(90000))
         );
 
-        let pczt = st
-            .create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
-                account.id(),
-                OvkPolicy::Sender,
-                &proposal,
-                TxVersion::V5,
-            )
-            .unwrap();
-
-        assert_eq!(
-            *pczt.global().tx_version(),
-            zcash_protocol::constants::V5_TX_VERSION
+        // Per ZIP 229, the NU6.3 Orchard cross-address restriction applies regardless of
+        // transaction version, so a v5 transaction cannot be used to escape it. An
+        // Orchard-to-Orchard payment is an ordinary output (not wallet-controlled change),
+        // so building it into a v5 PCZT after NU6.3 is rejected.
+        let result = st.create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
+            account.id(),
+            OvkPolicy::Sender,
+            &proposal,
+            TxVersion::V5,
         );
-        assert!(!pczt.orchard().actions().is_empty());
-        assert!(pczt.ironwood().actions().is_empty());
-        pczt.serialize_legacy_v1().unwrap();
+        assert_matches!(
+            result,
+            Err(::zcash_client_backend::data_api::error::Error::Builder(
+                ::zcash_primitives::transaction::builder::Error::OrchardRecipient(
+                    ::orchard::builder::OutputError::CrossAddressDisabled
+                )
+            ))
+        );
     }
 
     #[test]

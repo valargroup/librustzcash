@@ -1087,6 +1087,7 @@ impl Transaction {
                 #[cfg(zcash_unstable = "zfuture")]
                 BranchId::ZFuture => ProofSizeEnforcement::Strict,
             },
+            crate::transaction::builder::orchard_protocol_for_branch(consensus_branch_id),
         )?;
 
         let data = TransactionData {
@@ -1303,7 +1304,11 @@ impl Transaction {
         self.write_v5_header(&mut writer)?;
         self.write_transparent(&mut writer)?;
         self.write_v5_sapling(&mut writer)?;
-        orchard_serialization::write_v5_bundle(self.orchard_bundle.as_ref(), &mut writer)?;
+        orchard_serialization::write_v5_bundle(
+            self.orchard_bundle.as_ref(),
+            &mut writer,
+            crate::transaction::builder::orchard_protocol_for_branch(self.consensus_branch_id),
+        )?;
 
         Ok(())
     }

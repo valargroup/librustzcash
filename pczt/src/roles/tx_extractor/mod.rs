@@ -139,15 +139,11 @@ impl<'a> TransactionExtractor<'a> {
         )?;
 
         let tx = tx_data.freeze().expect("v5 tx can't fail here");
-        #[cfg(zcash_unstable = "nu6.3")]
-        let orchard_circuit_version = if tx.version().has_ironwood() {
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward.circuit_version()
-        } else {
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version()
-        };
-        #[cfg(not(zcash_unstable = "nu6.3"))]
+        // Per ZIP 229 the Orchard circuit (and pool restriction) is selected by the
+        // consensus branch, not the transaction version: a v5 Orchard bundle at
+        // NU6.3 must be verified with the NU6.3 circuit.
         let orchard_circuit_version =
-            ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version();
+            crate::orchard_pool_restrictions_for_branch(tx.consensus_branch_id()).circuit_version();
 
         // Now that we have a supposedly fully-authorized transaction, verify it.
         if let Some(bundle) = tx.sapling_bundle() {

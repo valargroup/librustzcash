@@ -92,9 +92,13 @@ impl Creator {
 
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
+        let pool_restrictions = crate::orchard_pool_restrictions_for_branch(
+            zcash_protocol::consensus::BranchId::try_from(self.consensus_branch_id)
+                .expect("Creator was constructed with a valid consensus branch id"),
+        );
         self.orchard_flags = orchard_flags
-            .to_byte(orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only)
-            .expect("Orchard flags must be encodable in the pre-NU6.3 format");
+            .to_byte(pool_restrictions)
+            .expect("Orchard flags must be encodable for the transaction's consensus branch");
         self
     }
 
@@ -270,24 +274,12 @@ impl Creator {
             tx_modifiable |= FLAG_HAS_SIGHASH_SINGLE;
         }
 
-        let orchard_bundle_format = {
-            #[cfg(zcash_unstable = "nu6.3")]
-            {
-                if parts.version == zcash_primitives::transaction::TxVersion::V6 {
-                    orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward
-                } else {
-                    orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
-                }
-            }
-
-            #[cfg(not(zcash_unstable = "nu6.3"))]
-            {
-                orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only
-            }
-        };
+        let orchard_bundle_format =
+            crate::orchard_pool_restrictions_for_branch(parts.consensus_branch_id);
         #[cfg(zcash_unstable = "nu6.3")]
         let default_orchard_flags = match orchard_bundle_format {
-            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only => {
+            orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2
+            | orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only => {
                 LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED
             }
             _ => NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED,
@@ -418,8 +410,10 @@ mod tests {
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     #[test]
     fn explicit_orchard_flags_use_selected_format() {
+        // Per ZIP 229 the NU6.3 Orchard cross-address restriction applies to v5
+        // transactions too, so a v5 PCZT at NU6.3 must disable cross-address.
         let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .with_orchard_flags(orchard::bundle::Flags::ENABLED)
+            .with_orchard_flags(orchard::bundle::Flags::CROSS_ADDRESS_DISABLED)
             .build();
 
         assert_eq!(pczt.global.tx_version, V5_TX_VERSION);

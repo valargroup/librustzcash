@@ -133,6 +133,24 @@ fn orchard_commitment_domain(version: TxVersion) -> (BundlePoolRestrictions, Orc
     )
 }
 
+/// Selects the Orchard pool restriction used to compute a bundle's commitments
+/// from the bundle's own cross-address flag.
+///
+/// The bundle's flags are set under the `(pool, consensus branch)` restriction at
+/// build/parse time (see `builder::orchard_protocol_for_branch`), so they already
+/// reflect the branch. For the txid and authorizing commitments the only Orchard
+/// restriction that matters is whether cross-address transfers are enabled (the
+/// commitment *format* is chosen by `tx_version`); deriving it from the bundle keeps
+/// the commitment encodable and agrees with the restriction the bundle was built or
+/// parsed under, regardless of transaction version.
+fn orchard_pool_restrictions_for_flags(flags: &orchard::Flags) -> BundlePoolRestrictions {
+    if flags.cross_address_enabled() {
+        BundlePoolRestrictions::OrchardNu6_2Only
+    } else {
+        BundlePoolRestrictions::OrchardNu6_3Onward
+    }
+}
+
 #[cfg(zcash_unstable = "nu6.3")]
 fn ironwood_v6_domain() -> (BundlePoolRestrictions, OrchardTxVersion) {
     (
@@ -454,7 +472,8 @@ impl<A: Authorization> TransactionDigest<A> for TxIdDigester {
         orchard_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::OrchardDigest {
         orchard_bundle.map(|b| {
-            let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
+            let (_, tx_version) = orchard_commitment_domain(version);
+            let pool_restrictions = orchard_pool_restrictions_for_flags(b.flags());
             b.commitment(pool_restrictions, tx_version)
                 .expect("Orchard bundle flags must be representable in their transaction format")
                 .0
@@ -730,7 +749,8 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
                 orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version)
             },
             |b| {
-                let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
+                let (_, tx_version) = orchard_commitment_domain(version);
+                let pool_restrictions = orchard_pool_restrictions_for_flags(b.flags());
                 b.authorizing_commitment(pool_restrictions, tx_version).0
             },
         )

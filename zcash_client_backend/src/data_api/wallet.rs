@@ -924,8 +924,10 @@ where
 /// be authorized and made ready for submission to the network with [`create_proposed_transactions`].
 ///
 /// Under the `unstable` feature, `proposed_version` can be used to request a
-/// particular transaction version. A legacy version 5 request after NU6.3 keeps
-/// Orchard outputs in the legacy Orchard bundle and rejects Ironwood notes.
+/// particular transaction version. A version 5 request after NU6.3 keeps Orchard
+/// outputs in the Orchard (not Ironwood) bundle and rejects Ironwood notes; per
+/// ZIP 229 that bundle still uses the NU6.3 Orchard pool restriction, so the
+/// cross-address restriction is enforced regardless of transaction version.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(

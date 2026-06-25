@@ -60,7 +60,7 @@ workspace.
   Ironwood action counts from the bundle inputs and outputs.
 - `zcash_client_backend::data_api::wallet::propose_send_max_transfer` now
   accepts an explicit transaction version under the `unstable` feature, so
-  callers can request legacy version 5 Orchard send-max proposals after NU6.3.
+  callers can request version 5 Orchard send-max proposals after NU6.3.
   Its `ProposeSendMaxErrT` selection-error parameter is now
   `GreedyInputSelectorError` instead of `BalanceError`.
 - `zcash_client_backend::data_api`:
@@ -101,11 +101,20 @@ workspace.
 - `zcash_client_backend::scanning::ScanError` variants for invalid encodings
   and tree-size failures now report a `NoteCommitmentTree`, so Ironwood scan
   failures are labeled separately from Orchard failures.
-- `data_api::wallet::propose_standard_transfer_to_address` and
-  `create_pczt_from_proposal_with_tx_version` keep Orchard change in legacy
-  Orchard form when transaction version 5 is explicitly requested after NU6.3.
+- The Orchard pool restriction (and therefore the cross-address rule and circuit)
+  for a transaction's Orchard bundle is now selected by the consensus branch
+  rather than the transaction version, so an explicit version 5 request after
+  NU6.3 still uses the NU6.3 Orchard pool restriction.
 
 ### Fixed
+- Per ZIP 229, the NU6.3 Orchard cross-address restriction is now enforced for
+  version 5 transactions as well as version 6. The Orchard bundle read, build,
+  PCZT construction and verification, and transaction-commitment paths now select
+  the pool restriction (and the proving/verifying circuit) from the consensus
+  branch rather than the transaction version, so the restriction cannot be
+  bypassed by using a version 5 transaction. In particular, a cross-address
+  Orchard output (an ordinary, non-change recipient) can no longer be built into a
+  version 5 transaction after NU6.3.
 - `data_api::wallet::extract_and_store_transaction_from_pczt` now persists
   Ironwood sent output metadata added by `create_pczt_from_proposal`.
 
