@@ -571,6 +571,7 @@ impl<P, U> Builder<'_, P, U> {
         })
     }
 
+    #[cfg(zcash_unstable = "nu6.3")]
     fn orchard_in_use(&self) -> bool {
         self.orchard_builder.as_ref().is_some_and(|b| {
             !b.spends().is_empty() || !b.outputs().is_empty() || !b.changes().is_empty()

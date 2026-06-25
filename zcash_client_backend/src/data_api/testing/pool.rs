@@ -6369,13 +6369,13 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
     // Per ZIP 229 the Orchard circuit is selected by consensus branch, not tx
-    // version. This must mirror `orchard_protocol_for_branch` so the proving key
-    // matches both the bundle the Creator built and the verifying key the extractor
-    // uses (otherwise extraction fails with `InvalidProof`).
-    #[cfg(zcash_unstable = "nu6.3")]
+    // version. This must mirror `orchard_protocol_for_branch` in every cfg so the
+    // proving key matches both the bundle the Creator built and the verifying key
+    // the extractor uses (otherwise extraction fails with `InvalidProof`).
     let orchard_circuit_version = {
         use zcash_protocol::consensus::BranchId;
         let restrictions = match BranchId::try_from(*pczt_updated.global().consensus_branch_id()) {
+            #[cfg(zcash_unstable = "nu6.3")]
             Ok(BranchId::Nu6_3) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
             #[cfg(zcash_unstable = "nu7")]
             Ok(BranchId::Nu7) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
@@ -6384,9 +6384,6 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
         };
         restrictions.circuit_version()
     };
-    #[cfg(not(zcash_unstable = "nu6.3"))]
-    let orchard_circuit_version =
-        ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version();
     let orchard_pk = ::orchard::circuit::ProvingKey::build(orchard_circuit_version);
     #[cfg(zcash_unstable = "nu6.3")]
     let ironwood_pk = ::orchard::circuit::ProvingKey::build(
