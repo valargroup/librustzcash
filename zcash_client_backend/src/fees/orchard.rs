@@ -6,11 +6,11 @@ use std::convert::Infallible;
 use zcash_protocol::value::Zatoshis;
 
 pub(crate) fn transactional_action_count(
-    protocol: BundlePoolRestrictions,
+    pool_restrictions: BundlePoolRestrictions,
     num_spends: usize,
     num_outputs: usize,
 ) -> Result<usize, &'static str> {
-    BundleType::DEFAULT.num_actions(num_spends, num_outputs, protocol)
+    BundleType::DEFAULT.num_actions(num_spends, num_outputs, pool_restrictions)
 }
 
 /// A trait that provides a minimized view of Orchard bundle configuration
