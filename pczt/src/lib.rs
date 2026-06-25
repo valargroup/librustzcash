@@ -41,9 +41,17 @@ use zcash_protocol::value::Zatoshis;
 use {
     common::{Global, determine_lock_time},
     zcash_primitives::transaction::{Authorization, TransactionData, TxVersion},
-    zcash_protocol::consensus::BranchId,
     zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID},
 };
+// `BranchId` selects the Orchard pool restriction per ZIP 229, which is compiled
+// whenever the `orchard` feature is enabled, independent of the transaction roles.
+#[cfg(any(
+    feature = "orchard",
+    feature = "io-finalizer",
+    feature = "signer",
+    feature = "tx-extractor"
+))]
+use zcash_protocol::consensus::BranchId;
 
 #[cfg(all(
     any(feature = "io-finalizer", feature = "signer"),
@@ -88,6 +96,7 @@ pub(crate) fn orchard_pool_restrictions_for_branch(
     }
 }
 
+#[cfg(feature = "orchard")]
 pub(crate) fn orchard_bundle_format(
     global: &common::Global,
 ) -> ::orchard::bundle::BundlePoolRestrictions {
