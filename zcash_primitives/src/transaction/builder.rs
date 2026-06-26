@@ -1078,18 +1078,20 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .map_err(FeeError::Bundle)?;
 
         #[cfg(zcash_unstable = "nu6.3")]
-        let orchard_actions = orchard_actions
-            + self
-                .ironwood_builder
-                .as_ref()
-                .map_or(Ok(0), |builder| {
-                    orchard_action_count(
-                        builder,
-                        is_coinbase,
-                        orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
-                    )
-                })
-                .map_err(FeeError::Bundle)?;
+        let ironwood_actions = self
+            .ironwood_builder
+            .as_ref()
+            .map_or(Ok(0), |builder| {
+                orchard_action_count(
+                    builder,
+                    is_coinbase,
+                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                )
+            })
+            .map_err(FeeError::Bundle)?;
+
+        #[cfg(zcash_unstable = "nu6.3")]
+        let orchard_actions = orchard_actions + ironwood_actions;
 
         fee_rule
             .fee_required(
@@ -1146,18 +1148,20 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
             .map_err(FeeError::Bundle)?;
 
         #[cfg(zcash_unstable = "nu6.3")]
-        let orchard_actions = orchard_actions
-            + self
-                .ironwood_builder
-                .as_ref()
-                .map_or(Ok(0), |builder| {
-                    orchard_action_count(
-                        builder,
-                        is_coinbase,
-                        orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
-                    )
-                })
-                .map_err(FeeError::Bundle)?;
+        let ironwood_actions = self
+            .ironwood_builder
+            .as_ref()
+            .map_or(Ok(0), |builder| {
+                orchard_action_count(
+                    builder,
+                    is_coinbase,
+                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                )
+            })
+            .map_err(FeeError::Bundle)?;
+
+        #[cfg(zcash_unstable = "nu6.3")]
+        let orchard_actions = orchard_actions + ironwood_actions;
 
         fee_rule
             .fee_required_zfuture(
