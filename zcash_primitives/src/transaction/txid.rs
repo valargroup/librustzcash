@@ -765,15 +765,10 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         _version: TxVersion,
         ironwood_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::IronwoodDigest {
+        let (pool_restrictions, tx_version) = ironwood_v6_domain();
         ironwood_bundle.map_or_else(
-            || {
-                let (pool_restrictions, tx_version) = ironwood_v6_domain();
-                orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version)
-            },
-            |b| {
-                let (pool_restrictions, tx_version) = ironwood_v6_domain();
-                b.authorizing_commitment(pool_restrictions, tx_version).0
-            },
+            || orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version),
+            |b| b.authorizing_commitment(pool_restrictions, tx_version).0,
         )
     }
 
