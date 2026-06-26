@@ -749,13 +749,10 @@ impl TransactionDigest<Authorized> for BlockTxCommitmentDigester {
         version: TxVersion,
         orchard_bundle: Option<&orchard::Bundle<orchard::Authorized, ZatBalance>>,
     ) -> Self::OrchardDigest {
+        let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
         orchard_bundle.map_or_else(
-            || {
-                let (pool_restrictions, tx_version) = orchard_commitment_domain(version);
-                orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version)
-            },
+            || orchard::commitments::hash_bundle_auth_empty(pool_restrictions, tx_version),
             |b| {
-                let (_, tx_version) = orchard_commitment_domain(version);
                 let pool_restrictions = orchard_pool_restrictions_for_flags(b.flags());
                 b.authorizing_commitment(pool_restrictions, tx_version).0
             },
