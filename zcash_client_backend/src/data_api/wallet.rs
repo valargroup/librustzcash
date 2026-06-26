@@ -218,7 +218,10 @@ where
             .output()
             .value()
             .map(orchard::value::NoteValue::from_raw)?;
-        let rho = orchard::note::Rho::from_bytes(act.spend().nullifier()).into_option()?;
+        // `nullifier` is now optional in the PCZT wire format; on this build path it is
+        // populated (a fully-constructed action), but handle `None` gracefully by bailing
+        // out of the note reconstruction (the closure returns `Option`).
+        let rho = orchard::note::Rho::from_bytes(act.spend().nullifier().as_ref()?).into_option()?;
         let rseed =
             act.output().rseed().as_ref().and_then(|rseed| {
                 orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()

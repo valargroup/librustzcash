@@ -81,6 +81,63 @@ impl ActionRedactor<'_> {
         }
     }
 
+    /// Removes the action's `cv_net` value commitment.
+    ///
+    /// The receiver recomputes it from the spend and output values and `rcv` (see
+    /// [`Bundle::into_parsed`](crate::orchard::Bundle::into_parsed)).
+    pub fn clear_cv_net(&mut self) {
+        self.redact(|action| {
+            action.cv_net = None;
+        });
+    }
+
+    /// Removes the spend's `nullifier`.
+    ///
+    /// The receiver recomputes it from the spent note's component fields and `fvk`.
+    pub fn clear_nullifier(&mut self) {
+        self.redact(|action| {
+            action.spend.nullifier = None;
+        });
+    }
+
+    /// Removes the spend's randomized verification key `rk`.
+    ///
+    /// The receiver recomputes it from `fvk` and `alpha`.
+    pub fn clear_rk(&mut self) {
+        self.redact(|action| {
+            action.spend.rk = None;
+        });
+    }
+
+    /// Removes the output's note commitment `cmx`.
+    ///
+    /// The receiver recomputes it from the output note's component fields.
+    pub fn clear_cmx(&mut self) {
+        self.redact(|action| {
+            action.output.cmx = None;
+        });
+    }
+
+    /// Removes the output's `enc_ciphertext`.
+    ///
+    /// The receiver recomputes it from the output note's component fields (it is
+    /// deterministic given the note and the empty memo). `out_ciphertext` cannot be redacted
+    /// this way because it is RNG-derived.
+    pub fn clear_enc_ciphertext(&mut self) {
+        self.redact(|action| {
+            action.output.enc_ciphertext = None;
+        });
+    }
+
+    /// Removes the output's `ephemeral_key`.
+    ///
+    /// The receiver recomputes it from the output note's component fields.
+    pub fn clear_ephemeral_key(&mut self) {
+        self.redact(|action| {
+            action.output.ephemeral_key = None;
+        });
+    }
+
     /// Removes the spend authorizing signature.
     pub fn clear_spend_auth_sig(&mut self) {
         self.redact(|action| {
