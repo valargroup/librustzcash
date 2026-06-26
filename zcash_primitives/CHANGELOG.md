@@ -39,11 +39,26 @@ workspace.
     positions for Ironwood bundles.
   - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
     Ironwood PCZT bundle data and randomized action positions.
+- `zcash_primitives::transaction::components::orchard`:
+  - `read_ironwood_v6_bundle` and `write_ironwood_v6_bundle` (behind the
+    `zcash_unstable = "nu6.3"` cfg flag), for reading and writing the Ironwood
+    bundle in the v6 transaction format under the Ironwood pool restriction.
 
 ### Changed
+- `zcash_primitives::transaction::components::orchard`:
+  - `read_v5_bundle` now takes the transaction's `consensus_branch_id` (a
+    `BranchId`) in place of its `ProofSizeEnforcement` argument; both the Orchard
+    pool restriction and the proof-size enforcement are now derived from the
+    consensus branch per ZIP 229.
+  - `write_v5_bundle` now takes the transaction's `consensus_branch_id` (a
+    `BranchId`), used to select the Orchard pool restriction when encoding the
+    bundle flags.
 - `zcash_primitives::transaction::builder`:
-  - NU6.3 standard builders use the NU6.3 Orchard bundle protocol when
-    constructing V6 transactions.
+  - The Orchard pool restriction for a transaction's Orchard bundle (and
+    therefore its cross-address rule and proving/verifying circuit) is now
+    selected by the consensus branch rather than the transaction version, so an
+    explicit version 5 request after NU6.3 still uses the NU6.3 Orchard pool
+    restriction.
   - NU6.3 coinbase builders use Ironwood, not Orchard, for shielded outputs.
   - `Builder::add_orchard_spend` and `Builder::add_ironwood_spend` now
     explicitly enforce their note-version requirements.

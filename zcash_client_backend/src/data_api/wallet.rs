@@ -2601,10 +2601,10 @@ where
                         .and_then(|bundle| {
                             bundle
                                 .decrypt_output_with_key(
-                                ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
-                                raw_output_index,
-                                &orchard_internal_ivk,
-                            )
+                                    ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                                    raw_output_index,
+                                    &orchard_internal_ivk,
+                                )
                                 .map(|(note, _, _)| Note::Orchard(note))
                         })
                         .expect(

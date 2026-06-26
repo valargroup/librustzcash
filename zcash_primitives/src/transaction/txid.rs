@@ -143,6 +143,12 @@ fn orchard_commitment_domain(version: TxVersion) -> (BundlePoolRestrictions, Orc
 /// commitment *format* is chosen by `tx_version`); deriving it from the bundle keeps
 /// the commitment encodable and agrees with the restriction the bundle was built or
 /// parsed under, regardless of transaction version.
+///
+/// The returned restriction is chosen to match the bundle's own cross-address
+/// flag, so `Flags::to_byte` always returns `Some` for it (and yields the
+/// canonical Orchard flag byte, with the cross-address bit clear). The
+/// `expect(...)` on the resulting `commitment`/`authorizing_commitment` below is
+/// therefore unreachable by construction.
 fn orchard_pool_restrictions_for_flags(flags: &orchard::Flags) -> BundlePoolRestrictions {
     if flags.cross_address_enabled() {
         BundlePoolRestrictions::OrchardNu6_2Only
