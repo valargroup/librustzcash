@@ -101,6 +101,23 @@ fn sapling_auth_includes_anchor(version: TxVersion) -> bool {
     false
 }
 
+/// Selects the `(pool restriction, transaction version)` pair used to compute an
+/// Orchard bundle's txid and authorizing-data commitments.
+///
+/// This is used *only* to compute commitments, never to build or validate a bundle, so
+/// it deliberately takes just the transaction `version` and not a consensus branch id.
+/// The branch id does not affect the commitment: for a given transaction version the
+/// Orchard commitment personalizations are identical across NU6.2 and NU6.3, so there is
+/// nothing to distinguish between those branches here. The only things that affect the
+/// commitment are its *format* (the returned `OrchardTxVersion`) and whether the bundle
+/// is Orchard or Ironwood — Ironwood v6 bundles use `ironwood_v6_domain` instead.
+///
+/// The returned `BundlePoolRestrictions` is therefore only a commitment-domain selector
+/// keyed on the transaction version (`OrchardNu6_3Onward` for v6, the legacy
+/// `OrchardNu6_2Only` for v5); it is not necessarily the consensus pool restriction the
+/// bundle was built under. For a present bundle the non-empty commitment path instead
+/// derives the restriction from the bundle's own flags via
+/// `orchard_pool_restrictions_for_flags`.
 fn orchard_commitment_domain(version: TxVersion) -> (BundlePoolRestrictions, OrchardTxVersion) {
     #[cfg(zcash_unstable = "nu6.3")]
     if matches!(version, TxVersion::V6) {
