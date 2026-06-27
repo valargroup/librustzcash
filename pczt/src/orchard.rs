@@ -795,22 +795,128 @@ impl Bundle {
     /// fields directly, rather than parsing the bundle (which already fills them),
     /// calls this first. Each recomputed value is byte-identical to what a verifier
     /// would check; already-present fields are left unchanged.
+    ///
+    /// This is a strict, lazy per-field fill: a field that is already `Some` is never
+    /// recomputed or overwritten, and the expensive cryptographic work behind each
+    /// field is performed only when that field is actually missing. In particular the
+    /// note-encryption (`recompute::ephemeral_key_and_enc_ciphertext`, one per action)
+    /// is run ONLY when `enc_ciphertext` or `ephemeral_key` is omitted. The wallet
+    /// always keeps `enc_ciphertext` (the recomputed value is built under a `[0u8; 512]`
+    /// memo and does NOT reproduce the real migration output — see the WARNING on
+    /// [`recompute::ephemeral_key_and_enc_ciphertext`]), so on the device's inbound path
+    /// the note-encryption is never run. Consequently a fully-populated PCZT does ZERO
+    /// crypto here.
+    ///
+    /// [`recompute::ephemeral_key_and_enc_ciphertext`]: orchard::pczt::recompute::ephemeral_key_and_enc_ciphertext
     pub fn fill_derived_fields(&mut self) -> Result<(), orchard::pczt::VerifyError> {
+        use orchard::pczt::{recompute, VerifyError};
+
         for action in &mut self.actions {
-            let DerivedFields {
-                cv_net,
-                nullifier,
-                rk,
-                cmx,
-                ephemeral_key,
-                enc_ciphertext,
-            } = recompute_derived_fields(action)?;
-            action.cv_net = Some(cv_net);
-            action.spend.nullifier = Some(nullifier);
-            action.spend.rk = Some(rk);
-            action.output.cmx = Some(cmx);
-            action.output.ephemeral_key = Some(ephemeral_key);
-            action.output.enc_ciphertext = Some(enc_ciphertext);
+            // Resolve the spend nullifier lazily. The output note's `rho` is derived
+            // from it, so `cmx`, `ephemeral_key`, and `enc_ciphertext` all need it —
+            // but only when at least one of those (or the nullifier itself) is missing.
+            // A `None` here means "not yet computed and not yet needed".
+            let mut resolved_nullifier = action.spend.nullifier;
+            let mut nullifier = |spend: &Spend| -> Result<[u8; 32], VerifyError> {
+                if let Some(nf) = resolved_nullifier {
+                    return Ok(nf);
+                }
+                let nf = recompute::nullifier(
+                    spend.recipient.as_ref().ok_or(VerifyError::MissingRecipient)?,
+                    spend.value.ok_or(VerifyError::MissingValue)?,
+                    spend.rho.as_ref().ok_or(VerifyError::MissingRho)?,
+                    spend.rseed.as_ref().ok_or(VerifyError::MissingRandomSeed)?,
+                    spend.fvk.as_ref().ok_or(VerifyError::MissingFullViewingKey)?,
+                    spend.note_version.into(),
+                )?;
+                resolved_nullifier = Some(nf);
+                Ok(nf)
+            };
+
+            // cv_net: cheap (a value commitment), only when omitted.
+            if action.cv_net.is_none() {
+                action.cv_net = Some(recompute::cv_net(
+                    action.spend.value.ok_or(VerifyError::MissingValue)?,
+                    action.output.value.ok_or(VerifyError::MissingValue)?,
+                    action
+                        .rcv
+                        .as_ref()
+                        .ok_or(VerifyError::MissingValueCommitTrapdoor)?,
+                )?);
+            }
+
+            // rk: cheap (a key randomization), only when omitted.
+            if action.spend.rk.is_none() {
+                action.spend.rk = Some(recompute::rk(
+                    action
+                        .spend
+                        .fvk
+                        .as_ref()
+                        .ok_or(VerifyError::MissingFullViewingKey)?,
+                    action
+                        .spend
+                        .alpha
+                        .as_ref()
+                        .ok_or(VerifyError::MissingSpendAuthRandomizer)?,
+                )?);
+            }
+
+            // cmx: cheap (a note commitment), only when omitted. Needs the nullifier.
+            if action.output.cmx.is_none() {
+                let nf = nullifier(&action.spend)?;
+                action.output.cmx = Some(recompute::cmx(
+                    action
+                        .output
+                        .recipient
+                        .as_ref()
+                        .ok_or(VerifyError::MissingRecipient)?,
+                    action.output.value.ok_or(VerifyError::MissingValue)?,
+                    &nf,
+                    action
+                        .output
+                        .rseed
+                        .as_ref()
+                        .ok_or(VerifyError::MissingRandomSeed)?,
+                    action.output.note_version.into(),
+                )?);
+            }
+
+            // ephemeral_key + enc_ciphertext: EXPENSIVE (a full note-encryption). Run
+            // the recompute ONLY if at least one of the two is missing; whichever is
+            // already present is kept verbatim. A fully-populated output (the wallet's
+            // inbound case) skips the note-encryption entirely.
+            if action.output.ephemeral_key.is_none() || action.output.enc_ciphertext.is_none() {
+                let nf = nullifier(&action.spend)?;
+                let (recomputed_epk, recomputed_enc) =
+                    recompute::ephemeral_key_and_enc_ciphertext(
+                        action
+                            .output
+                            .recipient
+                            .as_ref()
+                            .ok_or(VerifyError::MissingRecipient)?,
+                        action.output.value.ok_or(VerifyError::MissingValue)?,
+                        &nf,
+                        action
+                            .output
+                            .rseed
+                            .as_ref()
+                            .ok_or(VerifyError::MissingRandomSeed)?,
+                        action.output.note_version.into(),
+                    )?;
+                if action.output.ephemeral_key.is_none() {
+                    action.output.ephemeral_key = Some(recomputed_epk);
+                }
+                if action.output.enc_ciphertext.is_none() {
+                    action.output.enc_ciphertext = Some(recomputed_enc);
+                }
+            }
+
+            // nullifier: fill last from whatever we resolved above (it may have been
+            // computed for cmx/epk; if nothing needed it and it was omitted, compute
+            // it now so the field is populated per this method's contract).
+            if action.spend.nullifier.is_none() {
+                action.spend.nullifier = Some(nullifier(&action.spend)?);
+            }
         }
         Ok(())
     }
