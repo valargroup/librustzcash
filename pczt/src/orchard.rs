@@ -347,6 +347,11 @@ pub struct Spend {
     ///
     /// This exposes the input value to all participants. For Signers who don't need this
     /// information, or after signatures have been applied, this can be redacted.
+    ///
+    /// Exposed via a getter so a Signer can cheaply tell a real spend (`value > 0`)
+    /// from a value-0 dummy on the un-parsed wire format, without the cost of
+    /// `Bundle::into_parsed` (full point decompression + per-action FVK derivation).
+    #[getset(get = "pub")]
     pub(crate) value: Option<u64>,
 
     /// The rho value for the note being spent.
