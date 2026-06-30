@@ -1683,6 +1683,15 @@ where
         #[cfg(feature = "unstable")]
         proposed_version,
     );
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let ironwood_spends_requested = proposal_step.shielded_inputs().is_some_and(|inputs| {
+        inputs.notes().iter().any(|selected| {
+            matches!(
+                selected.note(),
+                Note::Orchard(note) if note.version() == orchard::note::NoteVersion::V3
+            )
+        })
+    });
 
     // We only support spending transparent payments or transparent ephemeral outputs from a
     // prior step (when "transparent-inputs" is enabled).
@@ -1832,71 +1841,59 @@ where
 
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     let (ironwood_anchor, ironwood_inputs) = if legacy_v5_orchard {
-        if let Some(inputs) = proposal_step.shielded_inputs() {
-            if inputs.notes().iter().any(|selected| {
-                matches!(
-                    selected.note(),
-                    Note::Orchard(note) if note.version() == orchard::note::NoteVersion::V3
-                )
-            }) {
-                return Err(Error::ProposalNotSupported);
-            }
+        if ironwood_spends_requested {
+            return Err(Error::ProposalNotSupported);
         }
 
         (
             None,
             Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
         )
-    } else if proposal_step.involves(PoolType::Shielded(ShieldedProtocol::Orchard)) {
-        proposal_step.shielded_inputs().map_or_else(
-            || {
-                Ok((
-                    Some(orchard::Anchor::empty_tree()),
-                    Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
-                ))
-            },
-            |inputs| {
-                wallet_db.with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
-                    let anchor = ironwood_tree
-                        .root_at_checkpoint_id(&inputs.anchor_height())?
-                        .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
-                        .into();
+    } else if ironwood_spends_requested {
+        let inputs = proposal_step
+            .shielded_inputs()
+            .expect("ironwood_spends_requested implies shielded inputs are present");
 
-                    let mut ironwood_inputs =
-                        Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
+        wallet_db.with_ironwood_tree_mut::<_, _, Error<_, _, _, _, _, _>>(|ironwood_tree| {
+            let anchor = ironwood_tree
+                .root_at_checkpoint_id(&inputs.anchor_height())?
+                .ok_or(ProposalError::AnchorNotFound(inputs.anchor_height()))?
+                .into();
 
-                    for ironwood_input in
-                        inputs
-                            .notes()
-                            .iter()
-                            .filter_map(|selected| match selected.note() {
-                                Note::Orchard(note)
-                                    if note.version() == orchard::note::NoteVersion::V3 =>
-                                {
-                                    ironwood_tree
-                                        .witness_at_checkpoint_id_caching(
-                                            selected.note_commitment_tree_position(),
-                                            &inputs.anchor_height(),
-                                        )
-                                        .and_then(|witness| {
-                                            witness.ok_or(ShardTreeError::Query(
-                                                QueryError::CheckpointPruned,
-                                            ))
-                                        })
-                                        .map(|merkle_path| Some((note, merkle_path.into())))
-                                        .map_err(Error::from)
-                                        .transpose()
-                                }
-                                _ => None,
-                            })
-                    {
-                        ironwood_inputs.push(ironwood_input?);
-                    }
+            let mut ironwood_inputs = Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new();
 
-                    Ok((Some(anchor), ironwood_inputs))
-                })
-            },
-        )?
+            for ironwood_input in
+                inputs
+                    .notes()
+                    .iter()
+                    .filter_map(|selected| match selected.note() {
+                        Note::Orchard(note) if note.version() == orchard::note::NoteVersion::V3 => {
+                            ironwood_tree
+                                .witness_at_checkpoint_id_caching(
+                                    selected.note_commitment_tree_position(),
+                                    &inputs.anchor_height(),
+                                )
+                                .and_then(|witness| {
+                                    witness
+                                        .ok_or(ShardTreeError::Query(QueryError::CheckpointPruned))
+                                })
+                                .map(|merkle_path| Some((note, merkle_path.into())))
+                                .map_err(Error::from)
+                                .transpose()
+                        }
+                        _ => None,
+                    })
+            {
+                ironwood_inputs.push(ironwood_input?);
+            }
+
+            Ok((Some(anchor), ironwood_inputs))
+        })?
+    } else if orchard_outputs_are_ironwood {
+        (
+            Some(orchard::Anchor::empty_tree()),
+            Vec::<(&orchard::Note, orchard::tree::MerklePath)>::new(),
+        )
     } else {
         (
             None,
