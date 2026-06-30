@@ -273,20 +273,16 @@ pub struct Bundle {
 }
 
 /// Information about an Orchard action within a transaction.
-#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
 pub struct Action {
     //
     // Action effecting data.
     //
-    // These fields are part of the final transaction. The Constructor fills them in when
-    // adding an output, but a sender may omit any of the derived ones (here, `cv_net`) and
-    // let the receiver recompute it from the note fields before parsing. See
-    // [`Bundle::into_parsed`].
+    // These are required fields that are part of the final transaction, and are filled in
+    // by the Constructor when adding an output.
     //
-    #[serde_as(as = "Option<[_; 32]>")]
     #[getset(get = "pub")]
-    pub(crate) cv_net: Option<[u8; 32]>,
+    pub(crate) cv_net: [u8; 32],
     #[getset(get = "pub")]
     pub(crate) spend: Spend,
     #[getset(get = "pub")]
@@ -311,17 +307,13 @@ pub struct Spend {
     //
     // Spend-specific Action effecting data.
     //
-    // These fields are part of the final transaction. The Constructor fills them in when
-    // adding a spend, but a sender may omit any of the derived ones (here, `nullifier` and
-    // `rk`) and let the receiver recompute them from the note fields before parsing. See
-    // [`Bundle::into_parsed`].
+    // These are required fields that are part of the final transaction, and are filled in
+    // by the Constructor when adding a spend.
     //
-    #[serde_as(as = "Option<[_; 32]>")]
     #[getset(get = "pub")]
-    pub(crate) nullifier: Option<[u8; 32]>,
-    #[serde_as(as = "Option<[_; 32]>")]
+    pub(crate) nullifier: [u8; 32],
     #[getset(get = "pub")]
-    pub(crate) rk: Option<[u8; 32]>,
+    pub(crate) rk: [u8; 32],
 
     /// The spend authorization signature.
     ///
@@ -347,11 +339,6 @@ pub struct Spend {
     ///
     /// This exposes the input value to all participants. For Signers who don't need this
     /// information, or after signatures have been applied, this can be redacted.
-    ///
-    /// Exposed via a getter so a Signer can cheaply tell a real spend (`value > 0`)
-    /// from a value-0 dummy on the un-parsed wire format, without the cost of
-    /// `Bundle::into_parsed` (full point decompression + per-action FVK derivation).
-    #[getset(get = "pub")]
     pub(crate) value: Option<u64>,
 
     /// The rho value for the note being spent.
@@ -417,35 +404,27 @@ pub struct Output {
     //
     // Output-specific Action effecting data.
     //
-    // These fields are part of the final transaction. The Constructor fills them in when
-    // adding an output, but a sender may omit any of the derived ones (here, `cmx`,
-    // `ephemeral_key`, and `enc_ciphertext`) and let the receiver recompute them from the
-    // note fields before parsing. See [`Bundle::into_parsed`]. `out_ciphertext` is NOT
-    // recomputable (it is derived using RNG), so it remains required.
+    // These are required fields that are part of the final transaction, and are filled in
+    // by the Constructor when adding an output.
     //
-    #[serde_as(as = "Option<[_; 32]>")]
     #[getset(get = "pub")]
-    pub(crate) cmx: Option<[u8; 32]>,
+    pub(crate) cmx: [u8; 32],
     /// The Orchard-style plaintext version of the note being created.
     ///
     /// This is set by the Constructor, and is required by Verifiers and
     /// Provers to reconstruct the note commitment.
     #[getset(get = "pub")]
     pub(crate) note_version: NotePlaintextVersion,
-    #[serde_as(as = "Option<[_; 32]>")]
     #[getset(get = "pub")]
-    pub(crate) ephemeral_key: Option<[u8; 32]>,
+    pub(crate) ephemeral_key: [u8; 32],
     /// The encrypted note plaintext for the output.
     ///
     /// Encoded as a `Vec<u8>` because its length depends on the transaction version.
     ///
     /// Once we have memo bundles, we will be able to set memos independently of Outputs.
     /// For now, the Constructor sets both at the same time.
-    ///
-    /// This may be omitted by a sender and recomputed by the receiver from the note fields
-    /// (it is deterministic given the note and the empty memo).
     #[getset(get = "pub")]
-    pub(crate) enc_ciphertext: Option<Vec<u8>>,
+    pub(crate) enc_ciphertext: Vec<u8>,
     /// The encrypted note plaintext for the output.
     ///
     /// Encoded as a `Vec<u8>` because its length depends on the transaction version.
@@ -609,26 +588,20 @@ impl Bundle {
                 rcv,
             } = rhs;
 
-            // `note_version` and `out_ciphertext` are required fields that cannot be
-            // recomputed, so any divergence is a hard conflict. The six derived fields
-            // (`cv_net`, `nullifier`, `rk`, `cmx`, `ephemeral_key`, `enc_ciphertext`) are
-            // now optional and are merged via `merge_optional` so a participant that
-            // supplies one (e.g. a signatures-only response refilling its clone, or a
-            // device recomputing from a leaner request) can fill in a peer's omission.
-            if lhs.spend.note_version != spend_note_version
+            if lhs.cv_net != cv_net
+                || lhs.spend.nullifier != nullifier
+                || lhs.spend.rk != rk
+                || lhs.spend.note_version != spend_note_version
+                || lhs.output.cmx != cmx
                 || lhs.output.note_version != output_note_version
+                || lhs.output.ephemeral_key != ephemeral_key
+                || lhs.output.enc_ciphertext != enc_ciphertext
                 || lhs.output.out_ciphertext != out_ciphertext
             {
                 return None;
             }
 
-            if !(merge_optional(&mut lhs.cv_net, cv_net)
-                && merge_optional(&mut lhs.spend.nullifier, nullifier)
-                && merge_optional(&mut lhs.spend.rk, rk)
-                && merge_optional(&mut lhs.output.cmx, cmx)
-                && merge_optional(&mut lhs.output.ephemeral_key, ephemeral_key)
-                && merge_optional(&mut lhs.output.enc_ciphertext, enc_ciphertext)
-                && merge_optional(&mut lhs.spend.spend_auth_sig, spend_auth_sig)
+            if !(merge_optional(&mut lhs.spend.spend_auth_sig, spend_auth_sig)
                 && merge_optional(&mut lhs.spend.recipient, recipient)
                 && merge_optional(&mut lhs.spend.value, value)
                 && merge_optional(&mut lhs.spend.rho, rho)
@@ -656,122 +629,6 @@ impl Bundle {
     }
 }
 
-/// The six derived Orchard-shaped fields after recompute-and-fill, as their byte encodings.
-///
-/// Produced by [`recompute_derived_fields`] from an [`Action`]: each field is taken verbatim
-/// when present on the wire, or recomputed from the action's note-component fields when
-/// omitted.
-#[cfg(feature = "orchard")]
-struct DerivedFields {
-    cv_net: [u8; 32],
-    nullifier: [u8; 32],
-    rk: [u8; 32],
-    cmx: [u8; 32],
-    ephemeral_key: [u8; 32],
-    enc_ciphertext: Vec<u8>,
-}
-
-/// Resolves the six derived Orchard-shaped fields of an action, recomputing any that were
-/// omitted on the wire.
-///
-/// The recompute primitives live in the orchard crate (the output `rho` derivation
-/// `Rho::from_nf_old` is crate-private there) and are the same primitives that back the
-/// `verify_*` comparison methods, so a recomputed value is byte-identical to what a verifier
-/// would have checked.
-///
-/// Ordering hazard: the spend `nullifier` is resolved FIRST, because the output note's `rho`
-/// is derived from it, so `cmx`, `ephemeral_key`, and `enc_ciphertext` all depend on the
-/// resolved nullifier. `ephemeral_key` and `enc_ciphertext` are recomputed together (they
-/// share the note encryptor); if either is omitted, both are recomputed and the wire value is
-/// kept for whichever was present.
-#[cfg(feature = "orchard")]
-fn recompute_derived_fields(action: &Action) -> Result<DerivedFields, orchard::pczt::VerifyError> {
-    use orchard::pczt::{recompute, VerifyError};
-
-    let spend = &action.spend;
-    let output = &action.output;
-
-    // Resolve the nullifier first (the output rho depends on it).
-    let nullifier = match spend.nullifier {
-        Some(nullifier) => nullifier,
-        None => recompute::nullifier(
-            spend.recipient.as_ref().ok_or(VerifyError::MissingRecipient)?,
-            spend.value.ok_or(VerifyError::MissingValue)?,
-            spend.rho.as_ref().ok_or(VerifyError::MissingRho)?,
-            spend.rseed.as_ref().ok_or(VerifyError::MissingRandomSeed)?,
-            spend.fvk.as_ref().ok_or(VerifyError::MissingFullViewingKey)?,
-            spend.note_version.into(),
-        )?,
-    };
-
-    let rk = match spend.rk {
-        Some(rk) => rk,
-        None => recompute::rk(
-            spend.fvk.as_ref().ok_or(VerifyError::MissingFullViewingKey)?,
-            spend
-                .alpha
-                .as_ref()
-                .ok_or(VerifyError::MissingSpendAuthRandomizer)?,
-        )?,
-    };
-
-    let cmx = match output.cmx {
-        Some(cmx) => cmx,
-        None => recompute::cmx(
-            output
-                .recipient
-                .as_ref()
-                .ok_or(VerifyError::MissingRecipient)?,
-            output.value.ok_or(VerifyError::MissingValue)?,
-            &nullifier,
-            output.rseed.as_ref().ok_or(VerifyError::MissingRandomSeed)?,
-            output.note_version.into(),
-        )?,
-    };
-
-    let (ephemeral_key, enc_ciphertext) = match (output.ephemeral_key, output.enc_ciphertext.clone())
-    {
-        (Some(ephemeral_key), Some(enc_ciphertext)) => (ephemeral_key, enc_ciphertext),
-        (ephemeral_key, enc_ciphertext) => {
-            let (recomputed_epk, recomputed_enc) = recompute::ephemeral_key_and_enc_ciphertext(
-                output
-                    .recipient
-                    .as_ref()
-                    .ok_or(VerifyError::MissingRecipient)?,
-                output.value.ok_or(VerifyError::MissingValue)?,
-                &nullifier,
-                output.rseed.as_ref().ok_or(VerifyError::MissingRandomSeed)?,
-                output.note_version.into(),
-            )?;
-            (
-                ephemeral_key.unwrap_or(recomputed_epk),
-                enc_ciphertext.unwrap_or(recomputed_enc),
-            )
-        }
-    };
-
-    let cv_net = match action.cv_net {
-        Some(cv_net) => cv_net,
-        None => recompute::cv_net(
-            spend.value.ok_or(VerifyError::MissingValue)?,
-            output.value.ok_or(VerifyError::MissingValue)?,
-            action
-                .rcv
-                .as_ref()
-                .ok_or(VerifyError::MissingValueCommitTrapdoor)?,
-        )?,
-    };
-
-    Ok(DerivedFields {
-        cv_net,
-        nullifier,
-        rk,
-        cmx,
-        ephemeral_key,
-        enc_ciphertext,
-    })
-}
-
 #[cfg(feature = "orchard")]
 impl Bundle {
     pub(crate) fn into_parsed_orchard(
@@ -790,142 +647,6 @@ impl Bundle {
             .map_err(BundleParseError::Parse)
     }
 
-    /// Recompute-and-fill every omitted derived field in place, so that on each
-    /// action `cv_net`, `nullifier`, `rk`, `cmx`, `ephemeral_key`, and
-    /// `enc_ciphertext` are all `Some`.
-    ///
-    /// This is the inverse of the redactor's `clear_*` methods. A producer may omit
-    /// these fields because they are recomputable from the action's other contents
-    /// (the same derivation a verifier runs); a consumer that reads the wire-format
-    /// fields directly, rather than parsing the bundle (which already fills them),
-    /// calls this first. Each recomputed value is byte-identical to what a verifier
-    /// would check; already-present fields are left unchanged.
-    ///
-    /// This is a strict, lazy per-field fill: a field that is already `Some` is never
-    /// recomputed or overwritten, and the expensive cryptographic work behind each
-    /// field is performed only when that field is actually missing. In particular the
-    /// note-encryption (`recompute::ephemeral_key_and_enc_ciphertext`, one per action)
-    /// is run ONLY when `enc_ciphertext` or `ephemeral_key` is omitted. The wallet
-    /// always keeps `enc_ciphertext` (the recomputed value is built under a `[0u8; 512]`
-    /// memo and does NOT reproduce the real migration output — see the WARNING on
-    /// [`recompute::ephemeral_key_and_enc_ciphertext`]), so on the device's inbound path
-    /// the note-encryption is never run. Consequently a fully-populated PCZT does ZERO
-    /// crypto here.
-    ///
-    /// [`recompute::ephemeral_key_and_enc_ciphertext`]: orchard::pczt::recompute::ephemeral_key_and_enc_ciphertext
-    pub fn fill_derived_fields(&mut self) -> Result<(), orchard::pczt::VerifyError> {
-        use orchard::pczt::{recompute, VerifyError};
-
-        for action in &mut self.actions {
-            // Resolve the spend nullifier lazily. The output note's `rho` is derived
-            // from it, so `cmx`, `ephemeral_key`, and `enc_ciphertext` all need it —
-            // but only when at least one of those (or the nullifier itself) is missing.
-            // A `None` here means "not yet computed and not yet needed".
-            let mut resolved_nullifier = action.spend.nullifier;
-            let mut nullifier = |spend: &Spend| -> Result<[u8; 32], VerifyError> {
-                if let Some(nf) = resolved_nullifier {
-                    return Ok(nf);
-                }
-                let nf = recompute::nullifier(
-                    spend.recipient.as_ref().ok_or(VerifyError::MissingRecipient)?,
-                    spend.value.ok_or(VerifyError::MissingValue)?,
-                    spend.rho.as_ref().ok_or(VerifyError::MissingRho)?,
-                    spend.rseed.as_ref().ok_or(VerifyError::MissingRandomSeed)?,
-                    spend.fvk.as_ref().ok_or(VerifyError::MissingFullViewingKey)?,
-                    spend.note_version.into(),
-                )?;
-                resolved_nullifier = Some(nf);
-                Ok(nf)
-            };
-
-            // cv_net: cheap (a value commitment), only when omitted.
-            if action.cv_net.is_none() {
-                action.cv_net = Some(recompute::cv_net(
-                    action.spend.value.ok_or(VerifyError::MissingValue)?,
-                    action.output.value.ok_or(VerifyError::MissingValue)?,
-                    action
-                        .rcv
-                        .as_ref()
-                        .ok_or(VerifyError::MissingValueCommitTrapdoor)?,
-                )?);
-            }
-
-            // rk: cheap (a key randomization), only when omitted.
-            if action.spend.rk.is_none() {
-                action.spend.rk = Some(recompute::rk(
-                    action
-                        .spend
-                        .fvk
-                        .as_ref()
-                        .ok_or(VerifyError::MissingFullViewingKey)?,
-                    action
-                        .spend
-                        .alpha
-                        .as_ref()
-                        .ok_or(VerifyError::MissingSpendAuthRandomizer)?,
-                )?);
-            }
-
-            // cmx: cheap (a note commitment), only when omitted. Needs the nullifier.
-            if action.output.cmx.is_none() {
-                let nf = nullifier(&action.spend)?;
-                action.output.cmx = Some(recompute::cmx(
-                    action
-                        .output
-                        .recipient
-                        .as_ref()
-                        .ok_or(VerifyError::MissingRecipient)?,
-                    action.output.value.ok_or(VerifyError::MissingValue)?,
-                    &nf,
-                    action
-                        .output
-                        .rseed
-                        .as_ref()
-                        .ok_or(VerifyError::MissingRandomSeed)?,
-                    action.output.note_version.into(),
-                )?);
-            }
-
-            // ephemeral_key + enc_ciphertext: EXPENSIVE (a full note-encryption). Run
-            // the recompute ONLY if at least one of the two is missing; whichever is
-            // already present is kept verbatim. A fully-populated output (the wallet's
-            // inbound case) skips the note-encryption entirely.
-            if action.output.ephemeral_key.is_none() || action.output.enc_ciphertext.is_none() {
-                let nf = nullifier(&action.spend)?;
-                let (recomputed_epk, recomputed_enc) =
-                    recompute::ephemeral_key_and_enc_ciphertext(
-                        action
-                            .output
-                            .recipient
-                            .as_ref()
-                            .ok_or(VerifyError::MissingRecipient)?,
-                        action.output.value.ok_or(VerifyError::MissingValue)?,
-                        &nf,
-                        action
-                            .output
-                            .rseed
-                            .as_ref()
-                            .ok_or(VerifyError::MissingRandomSeed)?,
-                        action.output.note_version.into(),
-                    )?;
-                if action.output.ephemeral_key.is_none() {
-                    action.output.ephemeral_key = Some(recomputed_epk);
-                }
-                if action.output.enc_ciphertext.is_none() {
-                    action.output.enc_ciphertext = Some(recomputed_enc);
-                }
-            }
-
-            // nullifier: fill last from whatever we resolved above (it may have been
-            // computed for cmx/epk; if nothing needed it and it was omitted, compute
-            // it now so the field is populated per this method's contract).
-            if action.spend.nullifier.is_none() {
-                action.spend.nullifier = Some(nullifier(&action.spend)?);
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn into_parsed(
         self,
         bundle_format: orchard::bundle::BundlePoolRestrictions,
@@ -934,29 +655,9 @@ impl Bundle {
             .actions
             .into_iter()
             .map(|action| {
-                // Recompute-and-fill any omitted derived field BEFORE parsing, so the
-                // parsed `orchard::pczt` structs are fully populated and every downstream
-                // consumer (verifier, prover, signer, extractor) sees a complete action.
-                // The recomputed value is byte-identical to what a verifier would have
-                // checked (the `recompute` primitives back both paths). A recompute failure
-                // (a required component field is missing or invalid) is surfaced as
-                // `ParseError::Recompute`.
-                let DerivedFields {
-                    cv_net,
-                    nullifier,
-                    rk,
-                    cmx,
-                    ephemeral_key,
-                    enc_ciphertext,
-                } = recompute_derived_fields(&action)
-                    .map_err(orchard::pczt::ParseError::Recompute)?;
-
-                let spend_note_version = action.spend.note_version;
-                let output_note_version = action.output.note_version;
-
                 let spend = orchard::pczt::Spend::parse(
-                    nullifier,
-                    rk,
+                    action.spend.nullifier,
+                    action.spend.rk,
                     action.spend.spend_auth_sig,
                     action.spend.recipient,
                     action.spend.value,
@@ -976,15 +677,15 @@ impl Bundle {
                         })
                         .transpose()?,
                     action.spend.dummy_sk,
-                    spend_note_version.into(),
+                    action.spend.note_version.into(),
                     action.spend.proprietary,
                 )?;
 
                 let output = orchard::pczt::Output::parse(
                     *spend.nullifier(),
-                    cmx,
-                    ephemeral_key,
-                    enc_ciphertext,
+                    action.output.cmx,
+                    action.output.ephemeral_key,
+                    action.output.enc_ciphertext,
                     action.output.out_ciphertext,
                     action.output.recipient,
                     action.output.value,
@@ -1001,11 +702,11 @@ impl Bundle {
                         })
                         .transpose()?,
                     action.output.user_address,
-                    output_note_version.into(),
+                    action.output.note_version.into(),
                     action.output.proprietary,
                 )?;
 
-                orchard::pczt::Action::parse(cv_net, spend, output, action.rcv)
+                orchard::pczt::Action::parse(action.cv_net, spend, output, action.rcv)
             })
             .collect::<Result<_, _>>()?;
 
@@ -1032,12 +733,10 @@ impl Bundle {
                 let output = action.output();
 
                 Action {
-                    // A parsed `orchard::pczt` bundle always has these derived fields
-                    // populated, so serializing back always yields `Some`.
-                    cv_net: Some(action.cv_net().to_bytes()),
+                    cv_net: action.cv_net().to_bytes(),
                     spend: Spend {
-                        nullifier: Some(spend.nullifier().to_bytes()),
-                        rk: Some(spend.rk().into()),
+                        nullifier: spend.nullifier().to_bytes(),
+                        rk: spend.rk().into(),
                         spend_auth_sig: spend.spend_auth_sig().as_ref().map(|s| s.into()),
                         recipient: action
                             .spend()
@@ -1079,10 +778,10 @@ impl Bundle {
                         proprietary: spend.proprietary().clone(),
                     },
                     output: Output {
-                        cmx: Some(output.cmx().to_bytes()),
+                        cmx: output.cmx().to_bytes(),
                         note_version: (*output.note_version()).into(),
-                        ephemeral_key: Some(output.encrypted_note().epk_bytes),
-                        enc_ciphertext: Some(output.encrypted_note().enc_ciphertext.to_vec()),
+                        ephemeral_key: output.encrypted_note().epk_bytes,
+                        enc_ciphertext: output.encrypted_note().enc_ciphertext.to_vec(),
                         out_ciphertext: output.encrypted_note().out_ciphertext.to_vec(),
                         recipient: action
                             .output()

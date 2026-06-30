@@ -76,12 +76,6 @@ pub mod transparent;
 const MAGIC_BYTES: &[u8] = b"PCZT";
 const PCZT_VERSION_1: u32 = 1;
 const PCZT_VERSION_2: u32 = 2;
-/// PCZT encoding version that allows the six derived Orchard-shaped fields (`cv_net`,
-/// `nullifier`, `rk`, `cmx`, `ephemeral_key`, `enc_ciphertext`) to be omitted so a receiver
-/// can recompute them. `serialize` only emits this version when at least one of those fields
-/// is actually absent; a fully-populated PCZT still serializes as [`PCZT_VERSION_2`],
-/// byte-identically to before this version existed.
-const PCZT_VERSION_3: u32 = 3;
 
 #[cfg(feature = "orchard")]
 /// The Orchard pool restriction implied by a consensus branch, per ZIP 229: the
@@ -172,10 +166,6 @@ pub enum LegacyV1SerializeError {
     /// The PCZT contains Ironwood bundle data, which the v1 encoding cannot represent.
     #[cfg(zcash_unstable = "nu6.3")]
     IronwoodBundlePresent,
-    /// The PCZT omits a derived Orchard-shaped field (`cv_net`, `nullifier`, `rk`, `cmx`,
-    /// `ephemeral_key`, or `enc_ciphertext`), which the v1 encoding cannot represent. Such a
-    /// PCZT must be encoded with v3 (see [`Pczt::serialize`]).
-    MissingDerivedField,
 }
 
 impl core::fmt::Display for LegacyV1SerializeError {
@@ -200,10 +190,6 @@ impl core::fmt::Display for LegacyV1SerializeError {
                     "legacy PCZT v1 serialization cannot represent Ironwood bundle data"
                 )
             }
-            LegacyV1SerializeError::MissingDerivedField => write!(
-                f,
-                "legacy PCZT v1 serialization cannot represent an omitted derived Orchard field"
-            ),
         }
     }
 }
@@ -332,9 +318,7 @@ mod v1 {
     impl From<Action> for orchard::Action {
         fn from(action: Action) -> Self {
             Self {
-                // v1 always carried these effecting fields; wrap in `Some` for the live
-                // (now-optional) representation.
-                cv_net: Some(action.cv_net),
+                cv_net: action.cv_net,
                 spend: action.spend.into(),
                 output: action.output.into(),
                 rcv: action.rcv,
@@ -345,8 +329,8 @@ mod v1 {
     impl From<Spend> for orchard::Spend {
         fn from(spend: Spend) -> Self {
             Self {
-                nullifier: Some(spend.nullifier),
-                rk: Some(spend.rk),
+                nullifier: spend.nullifier,
+                rk: spend.rk,
                 spend_auth_sig: spend.spend_auth_sig,
                 recipient: spend.recipient,
                 value: spend.value,
@@ -366,10 +350,10 @@ mod v1 {
     impl From<Output> for orchard::Output {
         fn from(output: Output) -> Self {
             Self {
-                cmx: Some(output.cmx),
+                cmx: output.cmx,
                 note_version: orchard::NotePlaintextVersion::V2,
-                ephemeral_key: Some(output.ephemeral_key),
-                enc_ciphertext: Some(output.enc_ciphertext),
+                ephemeral_key: output.ephemeral_key,
+                enc_ciphertext: output.enc_ciphertext,
                 out_ciphertext: output.out_ciphertext,
                 recipient: output.recipient,
                 value: output.value,
@@ -450,261 +434,6 @@ mod v2 {
         pub(super) note_version: orchard::NotePlaintextVersion,
         pub(super) ephemeral_key: [u8; 32],
         pub(super) enc_ciphertext: Vec<u8>,
-        pub(super) out_ciphertext: Vec<u8>,
-        #[serde_as(as = "Option<[_; 43]>")]
-        pub(super) recipient: Option<[u8; 43]>,
-        pub(super) value: Option<u64>,
-        pub(super) rseed: Option<[u8; 32]>,
-        pub(super) ock: Option<[u8; 32]>,
-        pub(super) zip32_derivation: Option<common::Zip32Derivation>,
-        pub(super) user_address: Option<String>,
-        pub(super) proprietary: BTreeMap<String, Vec<u8>>,
-    }
-
-    impl From<Pczt> for crate::Pczt {
-        fn from(pczt: Pczt) -> Self {
-            Self {
-                global: pczt.global,
-                transparent: pczt.transparent,
-                sapling: pczt.sapling,
-                orchard: pczt.orchard.into(),
-                #[cfg(zcash_unstable = "nu6.3")]
-                ironwood: pczt.ironwood.into(),
-            }
-        }
-    }
-
-    impl From<&crate::Pczt> for Pczt {
-        fn from(pczt: &crate::Pczt) -> Self {
-            Self {
-                global: pczt.global.clone(),
-                transparent: pczt.transparent.clone(),
-                sapling: pczt.sapling.clone(),
-                orchard: (&pczt.orchard).into(),
-                #[cfg(zcash_unstable = "nu6.3")]
-                ironwood: (&pczt.ironwood).into(),
-            }
-        }
-    }
-
-    impl From<Bundle> for orchard::Bundle {
-        fn from(bundle: Bundle) -> Self {
-            Self {
-                actions: bundle.actions.into_iter().map(Into::into).collect(),
-                flags: bundle.flags,
-                value_sum: bundle.value_sum,
-                anchor: bundle.anchor,
-                zkproof: bundle.zkproof,
-                bsk: bundle.bsk,
-            }
-        }
-    }
-
-    impl From<&orchard::Bundle> for Bundle {
-        fn from(bundle: &orchard::Bundle) -> Self {
-            Self {
-                actions: bundle.actions.iter().map(Into::into).collect(),
-                flags: bundle.flags,
-                value_sum: bundle.value_sum,
-                anchor: bundle.anchor,
-                zkproof: bundle.zkproof.clone(),
-                bsk: bundle.bsk,
-            }
-        }
-    }
-
-    impl From<Action> for orchard::Action {
-        fn from(action: Action) -> Self {
-            Self {
-                // The v2 wire format always carries these effecting fields; wrap in `Some`
-                // for the live (now-optional) representation.
-                cv_net: Some(action.cv_net),
-                spend: action.spend.into(),
-                output: action.output.into(),
-                rcv: action.rcv,
-            }
-        }
-    }
-
-    impl From<&orchard::Action> for Action {
-        fn from(action: &orchard::Action) -> Self {
-            Self {
-                // Only reached after `is_v2_representable` proved every derived field is
-                // `Some` across both bundles, so these unwraps cannot panic.
-                cv_net: action.cv_net.expect("v2 requires cv_net"),
-                spend: (&action.spend).into(),
-                output: (&action.output).into(),
-                rcv: action.rcv,
-            }
-        }
-    }
-
-    impl From<Spend> for orchard::Spend {
-        fn from(spend: Spend) -> Self {
-            Self {
-                nullifier: Some(spend.nullifier),
-                rk: Some(spend.rk),
-                spend_auth_sig: spend.spend_auth_sig,
-                recipient: spend.recipient,
-                value: spend.value,
-                rho: spend.rho,
-                rseed: spend.rseed,
-                note_version: spend.note_version,
-                fvk: spend.fvk,
-                witness: spend.witness,
-                alpha: spend.alpha,
-                zip32_derivation: spend.zip32_derivation,
-                dummy_sk: spend.dummy_sk,
-                proprietary: spend.proprietary,
-            }
-        }
-    }
-
-    impl From<&orchard::Spend> for Spend {
-        fn from(spend: &orchard::Spend) -> Self {
-            Self {
-                // Only reached after `is_v2_representable` proved these are `Some`.
-                nullifier: spend.nullifier.expect("v2 requires nullifier"),
-                rk: spend.rk.expect("v2 requires rk"),
-                spend_auth_sig: spend.spend_auth_sig,
-                recipient: spend.recipient,
-                value: spend.value,
-                rho: spend.rho,
-                rseed: spend.rseed,
-                note_version: spend.note_version,
-                fvk: spend.fvk,
-                witness: spend.witness,
-                alpha: spend.alpha,
-                zip32_derivation: spend.zip32_derivation.clone(),
-                dummy_sk: spend.dummy_sk,
-                proprietary: spend.proprietary.clone(),
-            }
-        }
-    }
-
-    impl From<Output> for orchard::Output {
-        fn from(output: Output) -> Self {
-            Self {
-                cmx: Some(output.cmx),
-                note_version: output.note_version,
-                ephemeral_key: Some(output.ephemeral_key),
-                enc_ciphertext: Some(output.enc_ciphertext),
-                out_ciphertext: output.out_ciphertext,
-                recipient: output.recipient,
-                value: output.value,
-                rseed: output.rseed,
-                ock: output.ock,
-                zip32_derivation: output.zip32_derivation,
-                user_address: output.user_address,
-                proprietary: output.proprietary,
-            }
-        }
-    }
-
-    impl From<&orchard::Output> for Output {
-        fn from(output: &orchard::Output) -> Self {
-            Self {
-                // Only reached after `is_v2_representable` proved these are `Some`.
-                cmx: output.cmx.expect("v2 requires cmx"),
-                note_version: output.note_version,
-                ephemeral_key: output.ephemeral_key.expect("v2 requires ephemeral_key"),
-                enc_ciphertext: output
-                    .enc_ciphertext
-                    .clone()
-                    .expect("v2 requires enc_ciphertext"),
-                out_ciphertext: output.out_ciphertext.clone(),
-                recipient: output.recipient,
-                value: output.value,
-                rseed: output.rseed,
-                ock: output.ock,
-                zip32_derivation: output.zip32_derivation.clone(),
-                user_address: output.user_address.clone(),
-                proprietary: output.proprietary.clone(),
-            }
-        }
-    }
-}
-
-mod v3 {
-    //! The v3 wire encoding mirrors [`v2`](super::v2) IDENTICALLY, except the six derived
-    //! Orchard-shaped fields are `Option`: `Action.cv_net`, `Spend.nullifier`, `Spend.rk`,
-    //! `Output.cmx`, `Output.ephemeral_key`, and `Output.enc_ciphertext`. `out_ciphertext`
-    //! stays required because it is RNG-derived and not recomputable.
-    //!
-    //! Because the live domain types are now themselves `Option` for these fields, the
-    //! v3 ⇄ live `From` impls are 1:1 (no `Some`-wrapping or `expect`-unwrapping, unlike
-    //! v2).
-
-    use alloc::{collections::BTreeMap, string::String, vec::Vec};
-
-    use serde::{Deserialize, Serialize};
-    use serde_with::serde_as;
-
-    use crate::{common, orchard, sapling, transparent};
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub(super) struct Pczt {
-        pub(super) global: common::Global,
-        pub(super) transparent: transparent::Bundle,
-        pub(super) sapling: sapling::Bundle,
-        pub(super) orchard: Bundle,
-        #[cfg(zcash_unstable = "nu6.3")]
-        pub(super) ironwood: Bundle,
-    }
-
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub(super) struct Bundle {
-        pub(super) actions: Vec<Action>,
-        pub(super) flags: u8,
-        pub(super) value_sum: (u64, bool),
-        pub(super) anchor: [u8; 32],
-        pub(super) zkproof: Option<Vec<u8>>,
-        pub(super) bsk: Option<[u8; 32]>,
-    }
-
-    #[serde_as]
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub(super) struct Action {
-        #[serde_as(as = "Option<[_; 32]>")]
-        pub(super) cv_net: Option<[u8; 32]>,
-        pub(super) spend: Spend,
-        pub(super) output: Output,
-        pub(super) rcv: Option<[u8; 32]>,
-    }
-
-    #[serde_as]
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub(super) struct Spend {
-        #[serde_as(as = "Option<[_; 32]>")]
-        pub(super) nullifier: Option<[u8; 32]>,
-        #[serde_as(as = "Option<[_; 32]>")]
-        pub(super) rk: Option<[u8; 32]>,
-        #[serde_as(as = "Option<[_; 64]>")]
-        pub(super) spend_auth_sig: Option<[u8; 64]>,
-        #[serde_as(as = "Option<[_; 43]>")]
-        pub(super) recipient: Option<[u8; 43]>,
-        pub(super) value: Option<u64>,
-        pub(super) rho: Option<[u8; 32]>,
-        pub(super) rseed: Option<[u8; 32]>,
-        pub(super) note_version: orchard::NotePlaintextVersion,
-        #[serde_as(as = "Option<[_; 96]>")]
-        pub(super) fvk: Option<[u8; 96]>,
-        pub(super) witness: Option<(u32, [[u8; 32]; 32])>,
-        pub(super) alpha: Option<[u8; 32]>,
-        pub(super) zip32_derivation: Option<common::Zip32Derivation>,
-        pub(super) dummy_sk: Option<[u8; 32]>,
-        pub(super) proprietary: BTreeMap<String, Vec<u8>>,
-    }
-
-    #[serde_as]
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub(super) struct Output {
-        #[serde_as(as = "Option<[_; 32]>")]
-        pub(super) cmx: Option<[u8; 32]>,
-        pub(super) note_version: orchard::NotePlaintextVersion,
-        #[serde_as(as = "Option<[_; 32]>")]
-        pub(super) ephemeral_key: Option<[u8; 32]>,
-        pub(super) enc_ciphertext: Option<Vec<u8>>,
         pub(super) out_ciphertext: Vec<u8>,
         #[serde_as(as = "Option<[_; 43]>")]
         pub(super) recipient: Option<[u8; 43]>,
@@ -888,9 +617,6 @@ impl Pczt {
             PCZT_VERSION_2 => postcard_from_exact::<v2::Pczt>(&bytes[8..])
                 .map(Into::into)
                 .map_err(ParseError::Invalid),
-            PCZT_VERSION_3 => postcard_from_exact::<v3::Pczt>(&bytes[8..])
-                .map(Into::into)
-                .map_err(ParseError::Invalid),
             _ => Err(ParseError::UnknownVersion(version)),
         }?;
 
@@ -905,80 +631,12 @@ impl Pczt {
         Ok(pczt)
     }
 
-    /// Returns `true` if every derived Orchard-shaped field is populated across both the
-    /// `orchard` and `ironwood` bundles, so the PCZT can be encoded with the v2 wire format.
-    ///
-    /// The v2 format has no representation for an omitted `cv_net`, `nullifier`, `rk`, `cmx`,
-    /// `ephemeral_key`, or `enc_ciphertext`; if any action in either bundle is missing one of
-    /// these, the PCZT must be encoded with v3 instead.
-    fn is_v2_representable(&self) -> bool {
-        fn bundle_is_v2_representable(bundle: &orchard::Bundle) -> bool {
-            bundle.actions().iter().all(|action| {
-                action.cv_net().is_some()
-                    && action.spend().nullifier().is_some()
-                    && action.spend().rk().is_some()
-                    && action.output().cmx().is_some()
-                    && action.output().ephemeral_key().is_some()
-                    && action.output().enc_ciphertext().is_some()
-            })
-        }
-
-        let orchard_ok = bundle_is_v2_representable(&self.orchard);
-        #[cfg(zcash_unstable = "nu6.3")]
-        let ironwood_ok = bundle_is_v2_representable(&self.ironwood);
-        #[cfg(not(zcash_unstable = "nu6.3"))]
-        let ironwood_ok = true;
-
-        orchard_ok && ironwood_ok
-    }
-
     /// Serializes this PCZT.
-    ///
-    /// This is infallible and content-gated: when every derived Orchard-shaped field is
-    /// present (the common case), it emits the [`PCZT_VERSION_2`] encoding, byte-identical to
-    /// what `serialize` produced before the v3 format existed. If any of the six derived
-    /// fields (`cv_net`, `nullifier`, `rk`, `cmx`, `ephemeral_key`, `enc_ciphertext`) has been
-    /// omitted in either the `orchard` or `ironwood` bundle, it emits the [`PCZT_VERSION_3`]
-    /// encoding, which can represent the omission.
     pub fn serialize(&self) -> Vec<u8> {
-        if self.is_v2_representable() {
-            let mut bytes = vec![];
-            bytes.extend_from_slice(MAGIC_BYTES);
-            bytes.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
-            postcard::to_extend(&v2::Pczt::from(self), bytes).expect("can serialize into memory")
-        } else {
-            self.serialize_v3()
-        }
-    }
-
-    /// Serializes this PCZT using the v3 encoding unconditionally.
-    ///
-    /// Unlike [`Pczt::serialize`], this always emits the [`PCZT_VERSION_3`] format even when
-    /// every derived field is present. It is intended for tests and for callers that want to
-    /// force the optional-field encoding; normal callers should use [`Pczt::serialize`].
-    pub fn serialize_v3(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(MAGIC_BYTES);
-        bytes.extend_from_slice(&PCZT_VERSION_3.to_le_bytes());
-        postcard::to_extend(&v3::Pczt::from(self), bytes).expect("can serialize into memory")
-    }
-
-    /// Recompute-and-fill any omitted derived Orchard-shaped field in place across the whole
-    /// PCZT, so that on every Orchard and Ironwood action `cv_net`, `nullifier`, `rk`, `cmx`,
-    /// `ephemeral_key`, and `enc_ciphertext` are all present.
-    ///
-    /// This is the inverse of redacting those fields. A producer may omit them because they
-    /// are recomputable from each action's other contents (the same derivation a verifier
-    /// runs); a consumer that reads the wire-format fields directly, rather than parsing the
-    /// bundles (which already fill them), calls this first. Each recomputed value is
-    /// byte-identical to what a verifier would check, and already-present fields are left
-    /// unchanged.
-    #[cfg(feature = "orchard")]
-    pub fn fill_derived_fields(&mut self) -> Result<(), ::orchard::pczt::VerifyError> {
-        self.orchard.fill_derived_fields()?;
-        #[cfg(zcash_unstable = "nu6.3")]
-        self.ironwood.fill_derived_fields()?;
-        Ok(())
+        bytes.extend_from_slice(&PCZT_VERSION_2.to_le_bytes());
+        postcard::to_extend(&v2::Pczt::from(self), bytes).expect("can serialize into memory")
     }
 
     /// Serializes this PCZT using the original version 1 encoding.
@@ -1024,60 +682,39 @@ impl Pczt {
                     .actions
                     .iter()
                     .cloned()
-                    .map(|action| {
-                        // v1 has no representation for an omitted derived field; reject any
-                        // PCZT that has redacted one.
-                        Ok(v1::Action {
-                            cv_net: action
-                                .cv_net
-                                .ok_or(LegacyV1SerializeError::MissingDerivedField)?,
-                            spend: v1::Spend {
-                                nullifier: action
-                                    .spend
-                                    .nullifier
-                                    .ok_or(LegacyV1SerializeError::MissingDerivedField)?,
-                                rk: action
-                                    .spend
-                                    .rk
-                                    .ok_or(LegacyV1SerializeError::MissingDerivedField)?,
-                                spend_auth_sig: action.spend.spend_auth_sig,
-                                recipient: action.spend.recipient,
-                                value: action.spend.value,
-                                rho: action.spend.rho,
-                                rseed: action.spend.rseed,
-                                fvk: action.spend.fvk,
-                                witness: action.spend.witness,
-                                alpha: action.spend.alpha,
-                                zip32_derivation: action.spend.zip32_derivation,
-                                dummy_sk: action.spend.dummy_sk,
-                                proprietary: action.spend.proprietary,
-                            },
-                            output: v1::Output {
-                                cmx: action
-                                    .output
-                                    .cmx
-                                    .ok_or(LegacyV1SerializeError::MissingDerivedField)?,
-                                ephemeral_key: action
-                                    .output
-                                    .ephemeral_key
-                                    .ok_or(LegacyV1SerializeError::MissingDerivedField)?,
-                                enc_ciphertext: action
-                                    .output
-                                    .enc_ciphertext
-                                    .ok_or(LegacyV1SerializeError::MissingDerivedField)?,
-                                out_ciphertext: action.output.out_ciphertext,
-                                recipient: action.output.recipient,
-                                value: action.output.value,
-                                rseed: action.output.rseed,
-                                ock: action.output.ock,
-                                zip32_derivation: action.output.zip32_derivation,
-                                user_address: action.output.user_address,
-                                proprietary: action.output.proprietary,
-                            },
-                            rcv: action.rcv,
-                        })
+                    .map(|action| v1::Action {
+                        cv_net: action.cv_net,
+                        spend: v1::Spend {
+                            nullifier: action.spend.nullifier,
+                            rk: action.spend.rk,
+                            spend_auth_sig: action.spend.spend_auth_sig,
+                            recipient: action.spend.recipient,
+                            value: action.spend.value,
+                            rho: action.spend.rho,
+                            rseed: action.spend.rseed,
+                            fvk: action.spend.fvk,
+                            witness: action.spend.witness,
+                            alpha: action.spend.alpha,
+                            zip32_derivation: action.spend.zip32_derivation,
+                            dummy_sk: action.spend.dummy_sk,
+                            proprietary: action.spend.proprietary,
+                        },
+                        output: v1::Output {
+                            cmx: action.output.cmx,
+                            ephemeral_key: action.output.ephemeral_key,
+                            enc_ciphertext: action.output.enc_ciphertext,
+                            out_ciphertext: action.output.out_ciphertext,
+                            recipient: action.output.recipient,
+                            value: action.output.value,
+                            rseed: action.output.rseed,
+                            ock: action.output.ock,
+                            zip32_derivation: action.output.zip32_derivation,
+                            user_address: action.output.user_address,
+                            proprietary: action.output.proprietary,
+                        },
+                        rcv: action.rcv,
                     })
-                    .collect::<Result<Vec<_>, LegacyV1SerializeError>>()?,
+                    .collect(),
                 flags: self.orchard.flags,
                 value_sum: self.orchard.value_sum,
                 anchor: self.orchard.anchor,
@@ -1414,10 +1051,10 @@ mod tests {
             },
             orchard: orchard::Bundle {
                 actions: vec![orchard::Action {
-                    cv_net: Some([1; 32]),
+                    cv_net: [1; 32],
                     spend: orchard::Spend {
-                        nullifier: Some([2; 32]),
-                        rk: Some([3; 32]),
+                        nullifier: [2; 32],
+                        rk: [3; 32],
                         spend_auth_sig: None,
                         recipient: None,
                         value: Some(1000),
@@ -1432,10 +1069,10 @@ mod tests {
                         proprietary: BTreeMap::new(),
                     },
                     output: orchard::Output {
-                        cmx: Some([6; 32]),
+                        cmx: [6; 32],
                         note_version: orchard::NotePlaintextVersion::V2,
-                        ephemeral_key: Some([7; 32]),
-                        enc_ciphertext: Some(vec![8; 580]),
+                        ephemeral_key: [7; 32],
+                        enc_ciphertext: vec![8; 580],
                         out_ciphertext: vec![9; 80],
                         recipient: None,
                         value: Some(1000),
@@ -1615,66 +1252,6 @@ mod tests {
 
         let serialized = orchard::Bundle::serialize_from(parsed, bundle_format);
         assert_eq!(serialized.flags, 0b0000_0011);
-    }
-
-    /// (a) Frozen-v2 regression: a fully-populated PCZT must still serialize with the v2
-    /// header and round-trip byte-identically through parse, exactly as before the v3 format
-    /// (and optional fields) were introduced.
-    #[cfg(feature = "orchard")]
-    #[test]
-    fn full_pczt_serializes_as_v2_and_round_trips() {
-        let pczt = pczt_with_one_orchard_action();
-        let encoded = pczt.serialize();
-
-        // Header is v2.
-        assert_eq!(&encoded[..4], MAGIC_BYTES);
-        assert_eq!(
-            u32::from_le_bytes(encoded[4..8].try_into().unwrap()),
-            PCZT_VERSION_2
-        );
-
-        // Parsing and re-serializing yields the identical bytes.
-        let reparsed = Pczt::parse(&encoded).unwrap();
-        assert_eq!(reparsed.serialize(), encoded);
-
-        // And `serialize` chose v2 because every derived field is present.
-        assert!(pczt.is_v2_representable());
-    }
-
-    /// (b) Version gating: a full PCZT emits a v2 header, but once a derived field is redacted
-    /// (here, the spend `nullifier`), `serialize` must switch to the v3 header because v2
-    /// cannot represent the omission.
-    #[cfg(feature = "orchard")]
-    #[test]
-    fn redacting_a_derived_field_switches_serialization_to_v3() {
-        use roles::redactor::Redactor;
-
-        let pczt = pczt_with_one_orchard_action();
-        assert_eq!(
-            u32::from_le_bytes(pczt.serialize()[4..8].try_into().unwrap()),
-            PCZT_VERSION_2
-        );
-
-        let redacted = Redactor::new(pczt)
-            .redact_orchard_with(|mut r| {
-                r.redact_actions(|mut a| {
-                    a.clear_nullifier();
-                });
-            })
-            .finish();
-
-        assert!(!redacted.is_v2_representable());
-        let encoded = redacted.serialize();
-        assert_eq!(
-            u32::from_le_bytes(encoded[4..8].try_into().unwrap()),
-            PCZT_VERSION_3,
-            "a PCZT with a redacted derived field must serialize as v3",
-        );
-
-        // The v3 encoding round-trips, and the omission survives parse.
-        let reparsed = Pczt::parse(&encoded).unwrap();
-        assert_eq!(reparsed.orchard().actions()[0].spend().nullifier(), &None);
-        assert_eq!(reparsed.serialize(), encoded);
     }
 
     #[cfg(feature = "orchard")]
