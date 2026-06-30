@@ -640,6 +640,15 @@ impl Bundle {
             .map_err(BundleParseError::Parse)
     }
 
+    pub(crate) fn into_parsed_orchard_for_signing(
+        self,
+        bundle_format: orchard::bundle::BundleVersion,
+    ) -> Result<orchard::pczt::Bundle, BundleParseError> {
+        self.validate_orchard_note_plaintext_versions()?;
+        self.into_parsed_for_signing(bundle_format)
+            .map_err(BundleParseError::Parse)
+    }
+
     #[cfg(zcash_unstable = "nu6.3")]
     pub(crate) fn into_parsed_ironwood(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_ironwood_note_plaintext_versions()?;
@@ -647,39 +656,81 @@ impl Bundle {
             .map_err(BundleParseError::Parse)
     }
 
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub(crate) fn into_parsed_ironwood_for_signing(
+        self,
+    ) -> Result<orchard::pczt::Bundle, BundleParseError> {
+        self.validate_ironwood_note_plaintext_versions()?;
+        self.into_parsed_for_signing(orchard::bundle::BundleVersion::ironwood_v3())
+            .map_err(BundleParseError::Parse)
+    }
+
     pub(crate) fn into_parsed(
         self,
         bundle_format: orchard::bundle::BundleVersion,
+    ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
+        self.into_parsed_inner(bundle_format, false)
+    }
+
+    pub(crate) fn into_parsed_for_signing(
+        self,
+        bundle_format: orchard::bundle::BundleVersion,
+    ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
+        self.into_parsed_inner(bundle_format, true)
+    }
+
+    fn into_parsed_inner(
+        self,
+        bundle_format: orchard::bundle::BundleVersion,
+        for_signing: bool,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
         let actions = self
             .actions
             .into_iter()
             .map(|action| {
-                let spend = orchard::pczt::Spend::parse(
-                    action.spend.nullifier,
-                    action.spend.rk,
-                    action.spend.spend_auth_sig,
-                    action.spend.recipient,
-                    action.spend.value,
-                    action.spend.rho,
-                    action.spend.rseed,
-                    action.spend.fvk,
-                    action.spend.witness,
-                    action.spend.alpha,
-                    action
-                        .spend
-                        .zip32_derivation
-                        .map(|z| {
-                            orchard::pczt::Zip32Derivation::parse(
-                                z.seed_fingerprint,
-                                z.derivation_path,
-                            )
-                        })
-                        .transpose()?,
-                    action.spend.dummy_sk,
-                    action.spend.note_version.into(),
-                    action.spend.proprietary,
-                )?;
+                let spend_zip32_derivation = action
+                    .spend
+                    .zip32_derivation
+                    .map(|z| {
+                        orchard::pczt::Zip32Derivation::parse(z.seed_fingerprint, z.derivation_path)
+                    })
+                    .transpose()?;
+
+                let spend = if for_signing {
+                    orchard::pczt::Spend::parse_for_signing(
+                        action.spend.nullifier,
+                        action.spend.rk,
+                        action.spend.spend_auth_sig,
+                        action.spend.recipient,
+                        action.spend.value,
+                        action.spend.rho,
+                        action.spend.rseed,
+                        action.spend.fvk,
+                        action.spend.witness,
+                        action.spend.alpha,
+                        spend_zip32_derivation,
+                        action.spend.dummy_sk,
+                        action.spend.note_version.into(),
+                        action.spend.proprietary,
+                    )
+                } else {
+                    orchard::pczt::Spend::parse(
+                        action.spend.nullifier,
+                        action.spend.rk,
+                        action.spend.spend_auth_sig,
+                        action.spend.recipient,
+                        action.spend.value,
+                        action.spend.rho,
+                        action.spend.rseed,
+                        action.spend.fvk,
+                        action.spend.witness,
+                        action.spend.alpha,
+                        spend_zip32_derivation,
+                        action.spend.dummy_sk,
+                        action.spend.note_version.into(),
+                        action.spend.proprietary,
+                    )
+                }?;
 
                 let output = orchard::pczt::Output::parse(
                     *spend.nullifier(),
@@ -706,19 +757,40 @@ impl Bundle {
                     action.output.proprietary,
                 )?;
 
-                orchard::pczt::Action::parse(action.cv_net, spend, output, action.rcv)
+                if for_signing {
+                    orchard::pczt::Action::parse_for_signing(
+                        action.cv_net,
+                        spend,
+                        output,
+                        action.rcv,
+                    )
+                } else {
+                    orchard::pczt::Action::parse(action.cv_net, spend, output, action.rcv)
+                }
             })
             .collect::<Result<_, _>>()?;
 
-        orchard::pczt::Bundle::parse(
-            actions,
-            self.flags,
-            bundle_format,
-            self.value_sum,
-            self.anchor,
-            self.zkproof,
-            self.bsk,
-        )
+        if for_signing {
+            orchard::pczt::Bundle::parse_for_signing(
+                actions,
+                self.flags,
+                bundle_format,
+                self.value_sum,
+                self.anchor,
+                self.zkproof,
+                self.bsk,
+            )
+        } else {
+            orchard::pczt::Bundle::parse(
+                actions,
+                self.flags,
+                bundle_format,
+                self.value_sum,
+                self.anchor,
+                self.zkproof,
+                self.bsk,
+            )
+        }
     }
 
     pub(crate) fn serialize_from(

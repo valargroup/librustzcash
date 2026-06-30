@@ -22,6 +22,9 @@ members = [
 
 resolver = "2"
 
+[patch.crates-io]
+orchard = { git = "https://github.com/valargroup/orchard", branch = "adam/pczt-recompute-helpers" }
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.85.1"
