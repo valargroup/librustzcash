@@ -120,19 +120,27 @@ impl Signer {
 }
 
 #[cfg(feature = "orchard")]
-fn snapshot_spend_fvks(bundle: &crate::orchard::Bundle) -> alloc::vec::Vec<Option<[u8; 96]>> {
+fn snapshot_spend_fvks(
+    bundle: &crate::orchard::Bundle,
+) -> alloc::vec::Vec<([u8; 32], Option<[u8; 96]>)> {
     bundle
         .actions()
         .iter()
-        .map(|action| action.spend.fvk)
+        .map(|action| (action.spend.nullifier, action.spend.fvk))
         .collect()
 }
 
 #[cfg(feature = "orchard")]
-fn restore_spend_fvks(bundle: &mut crate::orchard::Bundle, snapshot: &[Option<[u8; 96]>]) {
-    for (action, fvk) in bundle.actions.iter_mut().zip(snapshot.iter()) {
-        if fvk.is_some() {
-            action.spend.fvk = *fvk;
+fn restore_spend_fvks(
+    bundle: &mut crate::orchard::Bundle,
+    snapshot: &[([u8; 32], Option<[u8; 96]>)],
+) {
+    for action in bundle.actions.iter_mut() {
+        if let Some((_, Some(fvk))) = snapshot
+            .iter()
+            .find(|(nullifier, _)| nullifier == &action.spend.nullifier)
+        {
+            action.spend.fvk = Some(*fvk);
         }
     }
 }
@@ -156,16 +164,21 @@ mod tests {
 
         bundle.actions[0].spend.fvk = None;
         bundle.actions[1].spend.fvk = inserted_fvk;
+        bundle.actions.swap(0, 1);
 
         restore_spend_fvks(&mut bundle, &snapshot);
 
-        assert_eq!(bundle.actions[0].spend.fvk, original_fvk);
-        assert_eq!(bundle.actions[1].spend.fvk, inserted_fvk);
+        assert_eq!(bundle.actions[0].spend.fvk, inserted_fvk);
+        assert_eq!(bundle.actions[1].spend.fvk, original_fvk);
     }
 
     fn bundle_with_fvks(fvks: [Option<[u8; 96]>; 2]) -> Bundle {
         Bundle {
-            actions: fvks.into_iter().map(action_with_fvk).collect(),
+            actions: fvks
+                .into_iter()
+                .enumerate()
+                .map(|(i, fvk)| action_with_fvk([i as u8; 32], fvk))
+                .collect(),
             flags: 0,
             value_sum: (0, false),
             anchor: [0; 32],
@@ -174,11 +187,11 @@ mod tests {
         }
     }
 
-    fn action_with_fvk(fvk: Option<[u8; 96]>) -> Action {
+    fn action_with_fvk(nullifier: [u8; 32], fvk: Option<[u8; 96]>) -> Action {
         Action {
             cv_net: [0; 32],
             spend: Spend {
-                nullifier: [0; 32],
+                nullifier,
                 rk: [1; 32],
                 spend_auth_sig: None,
                 recipient: None,
