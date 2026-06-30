@@ -49,6 +49,9 @@ workspace.
   with an explicit Ironwood bundle field.
 - PCZT v2 serialization now uses private versioned wire types instead of
   deriving the postcard schema from the live `Pczt` struct.
+- The low-level Orchard and Ironwood signer paths now use signer-only parsing;
+  callers that rely on Orchard FVK validity must run the full Verifier/check
+  path over the same PCZT bytes before signing.
 
 ### Fixed
 - PCZT parsing now rejects trailing bytes after v1 and v2 payloads.
