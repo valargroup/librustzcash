@@ -13,6 +13,11 @@ impl Signer {
     }
 
     /// Exposes the capability to sign the Orchard spends.
+    ///
+    /// This signer-only path does not validate or derive Orchard FVK bytes. Callers
+    /// must run the full Verifier/check path over the same PCZT bytes before using
+    /// this method if they rely on FVK validity. The signing closure must not add,
+    /// remove, or reorder Orchard actions.
     #[cfg(feature = "orchard")]
     pub fn sign_orchard_with<E, F>(self, f: F) -> Result<Self, E>
     where
@@ -43,6 +48,11 @@ impl Signer {
     ///
     /// Returns an error without invoking the closure if the PCZT is not version 6 on
     /// NU6.3.
+    ///
+    /// This signer-only path does not validate or derive Orchard FVK bytes. Callers
+    /// must run the full Verifier/check path over the same PCZT bytes before using
+    /// this method if they rely on FVK validity. The signing closure must not add,
+    /// remove, or reorder Ironwood actions.
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     pub fn sign_ironwood_with<E, F>(self, f: F) -> Result<Self, E>
     where
@@ -120,28 +130,18 @@ impl Signer {
 }
 
 #[cfg(feature = "orchard")]
-fn snapshot_spend_fvks(
-    bundle: &crate::orchard::Bundle,
-) -> alloc::vec::Vec<([u8; 32], Option<[u8; 96]>)> {
+fn snapshot_spend_fvks(bundle: &crate::orchard::Bundle) -> alloc::vec::Vec<Option<[u8; 96]>> {
     bundle
         .actions()
         .iter()
-        .map(|action| (action.spend.nullifier, action.spend.fvk))
+        .map(|action| action.spend.fvk)
         .collect()
 }
 
 #[cfg(feature = "orchard")]
-fn restore_spend_fvks(
-    bundle: &mut crate::orchard::Bundle,
-    snapshot: &[([u8; 32], Option<[u8; 96]>)],
-) {
-    for action in bundle.actions.iter_mut() {
-        if let Some((_, Some(fvk))) = snapshot
-            .iter()
-            .find(|(nullifier, _)| nullifier == &action.spend.nullifier)
-        {
-            action.spend.fvk = Some(*fvk);
-        }
+fn restore_spend_fvks(bundle: &mut crate::orchard::Bundle, snapshot: &[Option<[u8; 96]>]) {
+    for (action, fvk) in bundle.actions.iter_mut().zip(snapshot) {
+        action.spend.fvk = *fvk;
     }
 }
 
@@ -156,28 +156,26 @@ mod tests {
     use super::{restore_spend_fvks, snapshot_spend_fvks};
 
     #[test]
-    fn restore_spend_fvks_preserves_original_wire_fields() {
-        let original_fvk = Some([7u8; 96]);
-        let inserted_fvk = Some([9u8; 96]);
-        let mut bundle = bundle_with_fvks([original_fvk, None]);
+    fn restore_spend_fvks_preserves_duplicate_nullifiers_by_position() {
+        let first_fvk = Some([7u8; 96]);
+        let second_fvk = Some([9u8; 96]);
+        let mut bundle = bundle_with_duplicate_nullifier_fvks([first_fvk, second_fvk]);
         let snapshot = snapshot_spend_fvks(&bundle);
 
         bundle.actions[0].spend.fvk = None;
-        bundle.actions[1].spend.fvk = inserted_fvk;
-        bundle.actions.swap(0, 1);
+        bundle.actions[1].spend.fvk = None;
 
         restore_spend_fvks(&mut bundle, &snapshot);
 
-        assert_eq!(bundle.actions[0].spend.fvk, inserted_fvk);
-        assert_eq!(bundle.actions[1].spend.fvk, original_fvk);
+        assert_eq!(bundle.actions[0].spend.fvk, first_fvk);
+        assert_eq!(bundle.actions[1].spend.fvk, second_fvk);
     }
 
-    fn bundle_with_fvks(fvks: [Option<[u8; 96]>; 2]) -> Bundle {
+    fn bundle_with_duplicate_nullifier_fvks(fvks: [Option<[u8; 96]>; 2]) -> Bundle {
         Bundle {
             actions: fvks
                 .into_iter()
-                .enumerate()
-                .map(|(i, fvk)| action_with_fvk([i as u8; 32], fvk))
+                .map(|fvk| action_with_fvk([3u8; 32], fvk))
                 .collect(),
             flags: 0,
             value_sum: (0, false),
