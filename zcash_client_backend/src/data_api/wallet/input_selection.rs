@@ -954,7 +954,7 @@ where
         #[cfg(zcash_unstable = "nu6.3")]
         {
             let ironwood_actions = orchard_fees::transactional_action_count(
-                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                orchard::bundle::BundleVersion::ironwood_v3(),
                 ironwood_input_count,
                 requested_ironwood_actions,
             )

@@ -166,7 +166,7 @@ impl V6Creator {
     #[cfg(feature = "orchard")]
     pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
         self.orchard_flags = orchard_flags
-            .to_byte(orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward)
+            .to_byte(orchard::bundle::BundleVersion::orchard_v3())
             .expect("Orchard flags must be encodable in the NU6.3 format");
         self
     }
@@ -174,7 +174,7 @@ impl V6Creator {
     #[cfg(feature = "orchard")]
     pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
         self.ironwood_flags = ironwood_flags
-            .to_byte(orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward)
+            .to_byte(orchard::bundle::BundleVersion::ironwood_v3())
             .expect("Ironwood flags must be encodable in the NU6.3 format");
         self
     }
@@ -277,12 +277,14 @@ impl Creator {
         let orchard_bundle_format =
             crate::orchard_pool_restrictions_for_branch(parts.consensus_branch_id);
         #[cfg(zcash_unstable = "nu6.3")]
-        let default_orchard_flags = match orchard_bundle_format {
-            orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2
-            | orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only => {
+        let default_orchard_flags = match orchard_bundle_format.protocol_version() {
+            // Pre-NU6.2 (`orchard_insecure_v1`) and NU6.2 (`orchard_v2`) Orchard bundles
+            // permit cross-address transfers; from NU6.3 (`orchard_v3`) onward the Orchard
+            // pool mandates the cross-address restriction.
+            orchard::ProtocolVersion::InsecureV1 | orchard::ProtocolVersion::V2 => {
                 LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED
             }
-            _ => NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED,
+            orchard::ProtocolVersion::V3 => NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED,
         };
         #[cfg(not(zcash_unstable = "nu6.3"))]
         let default_orchard_flags = LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED;
@@ -313,7 +315,7 @@ impl Creator {
                 .map(|bundle| {
                     crate::orchard::Bundle::serialize_from(
                         bundle,
-                        orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                        orchard::bundle::BundleVersion::ironwood_v3(),
                     )
                 })
                 .unwrap_or_else(crate::empty_ironwood_bundle)

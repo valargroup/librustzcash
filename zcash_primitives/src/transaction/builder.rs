@@ -318,46 +318,62 @@ impl BuildConfig {
     /// Returns the Orchard builder for this configuration.
     fn orchard_builder(
         &self,
-        protocol: orchard::bundle::BundlePoolRestrictions,
+        bundle_version: orchard::bundle::BundleVersion,
     ) -> Option<orchard::builder::Builder> {
         match self {
             BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor.as_ref().map(|a| {
-                orchard::builder::Builder::new(protocol, orchard::builder::BundleType::DEFAULT, *a)
+                orchard::builder::Builder::new(
+                    orchard::builder::BundleType::DEFAULT,
+                    bundle_version,
+                    orchard_builder_flags(bundle_version, false),
+                    *a,
+                )
+                .expect("default flags are representable under the bundle version")
             }),
             BuildConfig::Coinbase { .. }
-                if matches!(
-                    protocol,
-                    orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward
-                ) =>
+                if bundle_version == orchard::bundle::BundleVersion::orchard_v3() =>
             {
                 None
             }
-            BuildConfig::Coinbase { .. } => Some(orchard::builder::Builder::new(
-                protocol,
-                orchard::builder::BundleType::Coinbase,
-                orchard::Anchor::empty_tree(),
-            )),
+            BuildConfig::Coinbase { .. } => Some(
+                orchard::builder::Builder::new(
+                    orchard::builder::BundleType::Coinbase,
+                    bundle_version,
+                    orchard_builder_flags(bundle_version, true),
+                    orchard::Anchor::empty_tree(),
+                )
+                .expect("coinbase flags (spends disabled) are valid for the bundle version"),
+            ),
         }
     }
 
     /// Returns the Ironwood builder for this configuration.
     #[cfg(zcash_unstable = "nu6.3")]
     fn ironwood_builder(&self) -> Option<orchard::builder::Builder> {
+        let bundle_version = orchard::bundle::BundleVersion::ironwood_v3();
         match self {
             BuildConfig::Standard {
                 ironwood_anchor, ..
             } => ironwood_anchor.as_ref().map(|a| {
                 orchard::builder::Builder::new(
-                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
                     orchard::builder::BundleType::DEFAULT,
+                    bundle_version,
+                    orchard_builder_flags(bundle_version, false),
                     *a,
                 )
+                .expect("default flags are representable under the Ironwood bundle version")
             }),
-            BuildConfig::Coinbase { .. } => Some(orchard::builder::Builder::new(
-                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
-                orchard::builder::BundleType::Coinbase,
-                orchard::Anchor::empty_tree(),
-            )),
+            BuildConfig::Coinbase { .. } => Some(
+                orchard::builder::Builder::new(
+                    orchard::builder::BundleType::Coinbase,
+                    bundle_version,
+                    orchard_builder_flags(bundle_version, true),
+                    orchard::Anchor::empty_tree(),
+                )
+                .expect(
+                    "coinbase flags (spends disabled) are valid for the Ironwood bundle version",
+                ),
+            ),
         }
     }
 
@@ -367,10 +383,35 @@ impl BuildConfig {
     }
 }
 
+/// Returns the [`Flags`](orchard::bundle::Flags) that the builder for the given bundle
+/// version and coinbase-ness is constructed with.
+///
+/// This mirrors exactly the flags supplied to `orchard::builder::Builder::new` in
+/// `orchard_builder` / `ironwood_builder`, so that the action-count estimate computed by
+/// `orchard_action_count` agrees with the bundle the builder actually produces:
+/// * non-coinbase bundles use [`BundleVersion::default_flags`](orchard::bundle::BundleVersion::default_flags),
+///   the least-restrictive flags consensus permits (spends and outputs enabled, with the
+///   cross-address bit set unless the version mandates the restriction);
+/// * coinbase bundles use [`Flags::SPENDS_DISABLED`](orchard::bundle::Flags::SPENDS_DISABLED)
+///   (spends disabled, outputs enabled, cross-address enabled), the flag set coinbase
+///   transactions require. The only coinbase bundles ever constructed here are pre-NU6.3
+///   Orchard and Ironwood bundles, both of which permit cross-address transfers, so this
+///   matches the cross-address bit those versions' `default_flags` would choose.
+fn orchard_builder_flags(
+    bundle_version: orchard::bundle::BundleVersion,
+    is_coinbase: bool,
+) -> orchard::bundle::Flags {
+    if is_coinbase {
+        orchard::bundle::Flags::SPENDS_DISABLED
+    } else {
+        bundle_version.default_flags()
+    }
+}
+
 fn orchard_action_count(
     builder: &orchard::builder::Builder,
     is_coinbase: bool,
-    pool_restrictions: orchard::bundle::BundlePoolRestrictions,
+    bundle_version: orchard::bundle::BundleVersion,
 ) -> Result<usize, &'static str> {
     let num_spends = builder.spends().len();
     let num_outputs = builder
@@ -385,19 +426,20 @@ fn orchard_action_count(
         orchard::builder::BundleType::DEFAULT
     };
 
-    bundle_type.num_actions(num_spends, num_outputs, pool_restrictions)
+    let flags = orchard_builder_flags(bundle_version, is_coinbase);
+    bundle_type.num_actions(flags, num_spends, num_outputs)
 }
 
 pub(crate) fn orchard_protocol_for_branch(
     consensus_branch_id: BranchId,
-) -> orchard::bundle::BundlePoolRestrictions {
+) -> orchard::bundle::BundleVersion {
     match consensus_branch_id {
         #[cfg(zcash_unstable = "nu6.3")]
-        BranchId::Nu6_3 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
+        BranchId::Nu6_3 => orchard::bundle::BundleVersion::orchard_v3(),
         #[cfg(zcash_unstable = "nu7")]
-        BranchId::Nu7 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
-        BranchId::Nu6_2 => orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
-        _ => orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2,
+        BranchId::Nu7 => orchard::bundle::BundleVersion::orchard_v3(),
+        BranchId::Nu6_2 => orchard::bundle::BundleVersion::orchard_v2(),
+        _ => orchard::bundle::BundleVersion::orchard_insecure_v1(),
     }
 }
 
@@ -493,7 +535,7 @@ pub struct Builder<'a, P, U> {
     transparent_builder: TransparentBuilder,
     sapling_builder: Option<sapling::builder::Builder>,
     orchard_builder: Option<orchard::builder::Builder>,
-    orchard_pool_restrictions: Option<orchard::bundle::BundlePoolRestrictions>,
+    orchard_pool_restrictions: Option<orchard::bundle::BundleVersion>,
     #[cfg(zcash_unstable = "nu6.3")]
     ironwood_builder: Option<orchard::builder::Builder>,
     #[cfg(zcash_unstable = "zfuture")]
@@ -580,8 +622,7 @@ impl<P, U> Builder<'_, P, U> {
 
     #[cfg(zcash_unstable = "nu6.3")]
     fn orchard_post_nu6_3_in_use(&self) -> bool {
-        self.orchard_pool_restrictions
-            == Some(orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward)
+        self.orchard_pool_restrictions == Some(orchard::bundle::BundleVersion::orchard_v3())
             && self.orchard_in_use()
     }
 
@@ -1085,7 +1126,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 orchard_action_count(
                     builder,
                     is_coinbase,
-                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                    orchard::bundle::BundleVersion::ironwood_v3(),
                 )
             })
             .map_err(FeeError::Bundle)?;
@@ -1155,7 +1196,7 @@ impl<P: consensus::Parameters, U> Builder<'_, P, U> {
                 orchard_action_count(
                     builder,
                     is_coinbase,
-                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                    orchard::bundle::BundleVersion::ironwood_v3(),
                 )
             })
             .map_err(FeeError::Bundle)?;
@@ -1978,7 +2019,7 @@ mod tests {
         assert_eq!(builder.tx_version, TxVersion::V6);
         assert_eq!(
             builder.orchard_pool_restrictions,
-            Some(orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward)
+            Some(orchard::bundle::BundleVersion::orchard_v3())
         );
     }
 
@@ -2004,7 +2045,7 @@ mod tests {
         // consensus branch, not transaction version.
         assert_eq!(
             builder.orchard_pool_restrictions,
-            Some(orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward)
+            Some(orchard::bundle::BundleVersion::orchard_v3())
         );
     }
 
@@ -2022,8 +2063,8 @@ mod tests {
             builder
                 .ironwood_builder
                 .as_ref()
-                .map(|_| orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward),
-            Some(orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward)
+                .map(|_| orchard::bundle::BundleVersion::ironwood_v3()),
+            Some(orchard::bundle::BundleVersion::ironwood_v3())
         );
     }
 
@@ -2046,11 +2087,14 @@ mod tests {
             &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
         );
         let recipient = fvk.address_at(0u32, orchard::keys::Scope::Internal);
+        let bundle_version = orchard::bundle::BundleVersion::orchard_v3();
         let mut builder = orchard::builder::Builder::new(
-            orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
             orchard::builder::BundleType::DEFAULT,
+            bundle_version,
+            bundle_version.default_flags(),
             orchard::Anchor::empty_tree(),
-        );
+        )
+        .unwrap();
 
         builder
             .add_change_output(
@@ -2063,12 +2107,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            super::orchard_action_count(
-                &builder,
-                false,
-                orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward
-            )
-            .unwrap(),
+            super::orchard_action_count(&builder, false, bundle_version).unwrap(),
             2
         );
     }
@@ -2317,7 +2356,7 @@ mod tests {
             orchard_action_count(
                 builder.ironwood_builder.as_ref().unwrap(),
                 true,
-                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward
+                orchard::bundle::BundleVersion::ironwood_v3()
             )
             .unwrap(),
             1

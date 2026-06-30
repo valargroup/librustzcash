@@ -176,10 +176,24 @@ fn v6_branch_reconstruction_preserves_ironwood_bundle() {
     use proptest::{strategy::ValueTree, test_runner::TestRunner};
 
     let mut runner = TestRunner::default();
-    let ironwood_bundle = crate::transaction::components::orchard::testing::arb_bundle(1)
+    let arb = crate::transaction::components::orchard::testing::arb_bundle(1)
         .new_tree(&mut runner)
         .unwrap()
         .current();
+    // `arb_bundle` produces a bundle of an arbitrary `BundleVersion`. The Ironwood slot
+    // is serialized and committed as `ironwood_v3()`, so coerce the bundle to that version
+    // (preserving its flags — the Ironwood pool can represent any cross-address setting)
+    // so the bundle's own version matches the slot and the write/read round-trip preserves
+    // the txid.
+    let ironwood_bundle = orchard::Bundle::try_from_parts(
+        arb.actions().clone(),
+        *arb.flags(),
+        *arb.value_balance(),
+        *arb.anchor(),
+        arb.authorization().clone(),
+        orchard::bundle::BundleVersion::ironwood_v3(),
+    )
+    .unwrap();
     let tx = TransactionData::from_parts_v6(
         BranchId::Nu6_3,
         0,
@@ -261,32 +275,30 @@ fn bundle_with_anchor(
         *bundle.value_balance(),
         anchor,
         bundle.authorization().clone(),
-        orchard::bundle::ProofSizeEnforcement::Strict,
+        bundle.bundle_version(),
     )
     .unwrap()
 }
 
 /// Clears the cross-address flag on an Orchard bundle (preserving spends/outputs)
-/// so it is representable in a v6 Orchard slot (`OrchardNu6_3Onward`, which
-/// forbids cross-address transfers).
+/// so it is representable in a v6 Orchard slot (`orchard_v3()`, which forbids
+/// cross-address transfers).
 #[cfg(all(test, zcash_unstable = "nu6.3"))]
 fn disable_cross_address(
     bundle: orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
 ) -> orchard::Bundle<orchard::bundle::Authorized, ZatBalance> {
     let byte = u8::from(bundle.flags().spends_enabled())
         | (u8::from(bundle.flags().outputs_enabled()) << 1);
-    let flags = orchard::bundle::Flags::from_byte(
-        byte,
-        orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
-    )
-    .unwrap();
+    let flags =
+        orchard::bundle::Flags::from_byte(byte, orchard::bundle::BundleVersion::orchard_v3())
+            .unwrap();
     orchard::Bundle::try_from_parts(
         bundle.actions().clone(),
         flags,
         *bundle.value_balance(),
         *bundle.anchor(),
         bundle.authorization().clone(),
-        orchard::bundle::ProofSizeEnforcement::Strict,
+        orchard::bundle::BundleVersion::orchard_v3(),
     )
     .unwrap()
 }

@@ -116,7 +116,7 @@ where
 
 #[cfg(feature = "orchard")]
 fn orchard_action_count_from_parts<E, NoteRefT>(
-    orchard_pool_restrictions: orchard::bundle::BundlePoolRestrictions,
+    orchard_pool_restrictions: orchard::bundle::BundleVersion,
     orchard_inputs: usize,
     ironwood_inputs: usize,
     orchard_outputs: usize,
@@ -132,7 +132,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     #[cfg(zcash_unstable = "nu6.3")]
     {
         let ironwood_actions = orchard_fees::transactional_action_count(
-            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+            orchard::bundle::BundleVersion::ironwood_v3(),
             ironwood_inputs,
             ironwood_outputs,
         )
@@ -153,7 +153,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
 
 #[cfg(feature = "orchard")]
 fn orchard_action_count<NoteRefT: Clone, E>(
-    orchard_pool_restrictions: orchard::bundle::BundlePoolRestrictions,
+    orchard_pool_restrictions: orchard::bundle::BundleVersion,
     orchard: &impl orchard_fees::BundleView<NoteRefT>,
     orchard_output_count: usize,
     ironwood_output_count: usize,
@@ -738,7 +738,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     transparent_outputs: &[impl transparent::OutputView],
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
-    #[cfg(feature = "orchard")] orchard_pool_restrictions: orchard::bundle::BundlePoolRestrictions,
+    #[cfg(feature = "orchard")] orchard_pool_restrictions: orchard::bundle::BundleVersion,
     #[cfg(zcash_unstable = "nu6.3")] orchard_outputs_are_ironwood: bool,
     marginal_fee: Zatoshis,
     grace_actions: usize,

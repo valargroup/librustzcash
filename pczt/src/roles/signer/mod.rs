@@ -413,7 +413,7 @@ impl Signer {
         let ironwood = if self.tx_data.version().has_ironwood() {
             crate::orchard::Bundle::serialize_from(
                 self.ironwood,
-                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                orchard::bundle::BundleVersion::ironwood_v3(),
             )
         } else {
             crate::empty_ironwood_bundle()

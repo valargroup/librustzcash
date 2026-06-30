@@ -166,7 +166,7 @@ impl<'a> TransactionExtractor<'a> {
             orchard::verify_bundle(
                 bundle,
                 ironwood_vk,
-                ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward.circuit_version(),
+                ::orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
                 *shielded_sighash.as_ref(),
             )
             .map_err(Error::Ironwood)?;

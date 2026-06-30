@@ -58,7 +58,7 @@ impl Signer {
         pczt.global.tx_modifiable = tx_modifiable;
         pczt.ironwood = crate::orchard::Bundle::serialize_from(
             bundle,
-            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+            orchard::bundle::BundleVersion::ironwood_v3(),
         );
 
         Ok(Self { pczt })

@@ -68,7 +68,7 @@ impl super::Prover {
                 orchard,
                 ironwood: crate::orchard::Bundle::serialize_from(
                     bundle,
-                    orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                    orchard::bundle::BundleVersion::ironwood_v3(),
                 ),
             },
         })

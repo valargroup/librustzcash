@@ -45,7 +45,7 @@ static IRONWOOD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::
 fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
     ORCHARD_PROVING_KEY.get_or_init(|| {
         orchard::circuit::ProvingKey::build(
-            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only.circuit_version(),
+            orchard::bundle::BundleVersion::orchard_v2().circuit_version(),
         )
     })
 }
@@ -54,7 +54,7 @@ fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
 fn ironwood_proving_key() -> &'static orchard::circuit::ProvingKey {
     IRONWOOD_PROVING_KEY.get_or_init(|| {
         orchard::circuit::ProvingKey::build(
-            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward.circuit_version(),
+            orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
         )
     })
 }
@@ -782,11 +782,14 @@ fn orchard_to_orchard() {
     // Pretend we already received a note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
+        let orchard_bundle_version = orchard::bundle::BundleVersion::orchard_v2();
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
             orchard::builder::BundleType::DEFAULT,
+            orchard_bundle_version,
+            orchard_bundle_version.default_flags(),
             orchard::Anchor::empty_tree(),
-        );
+        )
+        .unwrap();
         orchard_builder
             .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
             .unwrap();
@@ -902,11 +905,14 @@ fn v6_orchard_anchor_can_be_updated_after_signing() {
     // Pretend we already received an Orchard note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
+        let orchard_bundle_version = orchard::bundle::BundleVersion::orchard_v2();
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
             orchard::builder::BundleType::DEFAULT,
+            orchard_bundle_version,
+            orchard_bundle_version.default_flags(),
             orchard::Anchor::empty_tree(),
-        );
+        )
+        .unwrap();
         orchard_builder
             .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
             .unwrap();
@@ -1060,11 +1066,14 @@ fn ironwood_to_ironwood() {
     // Pretend we already received an Ironwood note.
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
+        let ironwood_bundle_version = orchard::bundle::BundleVersion::ironwood_v3();
         let mut orchard_builder = orchard::builder::Builder::new(
-            orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
             orchard::builder::BundleType::DEFAULT,
+            ironwood_bundle_version,
+            ironwood_bundle_version.default_flags(),
             orchard::Anchor::empty_tree(),
-        );
+        )
+        .unwrap();
         orchard_builder
             .add_output(None, recipient, value, Memo::Empty.encode().into_bytes())
             .unwrap();
