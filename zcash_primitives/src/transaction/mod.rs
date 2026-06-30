@@ -490,9 +490,9 @@ impl<A: Authorization> TransactionData<A> {
     /// Both the Orchard and Ironwood bundle fields use [`orchard::Bundle`], but
     /// they are distinct V6 transaction fields with distinct bundle protocols.
     /// The `orchard_bundle` argument must contain a bundle constructed for
-    /// [`orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward`], while `ironwood_bundle`
+    /// [`orchard::bundle::BundleVersion::orchard_v3`], while `ironwood_bundle`
     /// must contain a bundle constructed for
-    /// [`orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward`]. Supplying a bundle for
+    /// [`orchard::bundle::BundleVersion::ironwood_v3`]. Supplying a bundle for
     /// the wrong field is invalid and can be rejected by later serialization or
     /// commitment construction because the bundle flags and domains are protocol
     /// specific.

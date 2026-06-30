@@ -633,7 +633,7 @@ impl Bundle {
 impl Bundle {
     pub(crate) fn into_parsed_orchard(
         self,
-        bundle_format: orchard::bundle::BundlePoolRestrictions,
+        bundle_format: orchard::bundle::BundleVersion,
     ) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_orchard_note_plaintext_versions()?;
         self.into_parsed(bundle_format)
@@ -643,13 +643,13 @@ impl Bundle {
     #[cfg(zcash_unstable = "nu6.3")]
     pub(crate) fn into_parsed_ironwood(self) -> Result<orchard::pczt::Bundle, BundleParseError> {
         self.validate_ironwood_note_plaintext_versions()?;
-        self.into_parsed(orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward)
+        self.into_parsed(orchard::bundle::BundleVersion::ironwood_v3())
             .map_err(BundleParseError::Parse)
     }
 
     pub(crate) fn into_parsed(
         self,
-        bundle_format: orchard::bundle::BundlePoolRestrictions,
+        bundle_format: orchard::bundle::BundleVersion,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
         let actions = self
             .actions
@@ -723,7 +723,7 @@ impl Bundle {
 
     pub(crate) fn serialize_from(
         bundle: orchard::pczt::Bundle,
-        bundle_format: orchard::bundle::BundlePoolRestrictions,
+        bundle_format: orchard::bundle::BundleVersion,
     ) -> Self {
         let actions = bundle
             .actions()

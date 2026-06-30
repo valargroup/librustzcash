@@ -92,7 +92,7 @@ impl IoFinalizer {
                 .map_err(Error::IronwoodFinalize)?;
             crate::orchard::Bundle::serialize_from(
                 ironwood,
-                orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward,
+                orchard::bundle::BundleVersion::ironwood_v3(),
             )
         } else {
             crate::empty_ironwood_bundle()

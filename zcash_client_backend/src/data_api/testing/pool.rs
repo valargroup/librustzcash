@@ -6376,18 +6376,18 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
         use zcash_protocol::consensus::BranchId;
         let restrictions = match BranchId::try_from(*pczt_updated.global().consensus_branch_id()) {
             #[cfg(zcash_unstable = "nu6.3")]
-            Ok(BranchId::Nu6_3) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
+            Ok(BranchId::Nu6_3) => ::orchard::bundle::BundleVersion::orchard_v3(),
             #[cfg(zcash_unstable = "nu7")]
-            Ok(BranchId::Nu7) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_3Onward,
-            Ok(BranchId::Nu6_2) => ::orchard::bundle::BundlePoolRestrictions::OrchardNu6_2Only,
-            _ => ::orchard::bundle::BundlePoolRestrictions::OrchardPreNu6_2,
+            Ok(BranchId::Nu7) => ::orchard::bundle::BundleVersion::orchard_v3(),
+            Ok(BranchId::Nu6_2) => ::orchard::bundle::BundleVersion::orchard_v2(),
+            _ => ::orchard::bundle::BundleVersion::orchard_insecure_v1(),
         };
         restrictions.circuit_version()
     };
     let orchard_pk = ::orchard::circuit::ProvingKey::build(orchard_circuit_version);
     #[cfg(zcash_unstable = "nu6.3")]
     let ironwood_pk = ::orchard::circuit::ProvingKey::build(
-        ::orchard::bundle::BundlePoolRestrictions::IronwoodNu6_3Onward.circuit_version(),
+        ::orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
     );
     let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)

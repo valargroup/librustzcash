@@ -3,7 +3,7 @@
 
 use std::convert::Infallible;
 
-use orchard::{builder::BundleType, bundle::BundlePoolRestrictions};
+use orchard::{builder::BundleType, bundle::BundleVersion};
 use zcash_protocol::{
     consensus::{self, BlockHeight},
     value::Zatoshis,
@@ -12,25 +12,28 @@ use zcash_protocol::{
 pub(crate) fn bundle_pool_restrictions_for_target_height<P: consensus::Parameters>(
     params: &P,
     target_height: BlockHeight,
-) -> BundlePoolRestrictions {
+) -> BundleVersion {
     #[cfg(zcash_unstable = "nu6.3")]
     if params.is_nu_active(consensus::NetworkUpgrade::Nu6_3, target_height) {
-        return BundlePoolRestrictions::OrchardNu6_3Onward;
+        return BundleVersion::orchard_v3();
     }
 
     if params.is_nu_active(consensus::NetworkUpgrade::Nu6_2, target_height) {
-        BundlePoolRestrictions::OrchardNu6_2Only
+        BundleVersion::orchard_v2()
     } else {
-        BundlePoolRestrictions::OrchardPreNu6_2
+        BundleVersion::orchard_insecure_v1()
     }
 }
 
 pub(crate) fn transactional_action_count(
-    pool_restrictions: BundlePoolRestrictions,
+    bundle_version: BundleVersion,
     num_spends: usize,
     num_outputs: usize,
 ) -> Result<usize, &'static str> {
-    BundleType::DEFAULT.num_actions(num_spends, num_outputs, pool_restrictions)
+    // These bundles are always built with `BundleType::DEFAULT` (non-coinbase), so the
+    // action count uses the bundle version's default flags, matching how the orchard
+    // builder is constructed in `zcash_primitives`.
+    BundleType::DEFAULT.num_actions(bundle_version.default_flags(), num_spends, num_outputs)
 }
 
 /// A trait that provides a minimized view of Orchard bundle configuration
