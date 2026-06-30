@@ -416,8 +416,8 @@ pub mod testing {
         false
     }
 
-    /// Rebuilds an Orchard bundle under the Orchard-pool [`BundleVersion`] required by an
-    /// Orchard transaction slot (preserving its spends/outputs flags).
+    /// Rebuilds an Orchard bundle under the Orchard-pool [`BundleVersion`](orchard::bundle::BundleVersion)
+    /// required by an Orchard transaction slot (preserving its spends/outputs flags).
     ///
     /// `cross_address_enabled` selects the slot's version: `false` rebuilds under
     /// `orchard_v3()` (the NU6.3-onward Orchard pool, which forbids cross-address
