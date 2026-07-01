@@ -28,6 +28,8 @@ workspace.
   `pczt::orchard::Output::note_version` getters. These fields are used to
   reconstruct Orchard note commitments with the intended note plaintext
   version.
+- `pczt::orchard::Spend::value`, for callers that need to inspect parsed
+  Orchard spend values.
 - `pczt::roles::creator::Creator::new_v6`, for explicitly creating version 6
   PCZTs under the NU6.3 unstable cfg.
 
