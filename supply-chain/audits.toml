@@ -522,7 +522,7 @@ delta = "11.1.3 -> 11.1.4"
 [[audits.orchard]]
 who = "Adam Tucker <adamleetucker@outlook.com>"
 criteria = "safe-to-deploy"
-delta = "0.15.0-pre.1 -> 0.15.0-pre.1@git:34c9c5047f3ef31777453413716d91b6ceda561f"
+delta = "0.15.0-pre.1 -> 0.15.0-pre.1@git:c8e98aa8a2bcdd365df6915c4056882bea1904d1"
 importable = false
 notes = """
 Reviewed the delta from the registry 0.15.0-pre.1 release to the pinned git commit.
