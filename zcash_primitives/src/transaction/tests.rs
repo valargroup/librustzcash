@@ -396,7 +396,7 @@ fn v5_tx_with_orchard_bundle(
         None,
         None,
         None,
-        Some(orchard_bundle),
+        Some(disable_cross_address(orchard_bundle)),
     )
     .freeze()
     .unwrap()
@@ -414,7 +414,7 @@ fn v5_tx_data_with_orchard_bundle(
         None,
         None,
         None,
-        Some(orchard_bundle),
+        Some(disable_cross_address(orchard_bundle)),
     )
 }
 
