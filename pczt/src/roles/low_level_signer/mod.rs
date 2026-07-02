@@ -140,6 +140,14 @@ fn snapshot_spend_fvks(bundle: &crate::orchard::Bundle) -> alloc::vec::Vec<Optio
 
 #[cfg(feature = "orchard")]
 fn restore_spend_fvks(bundle: &mut crate::orchard::Bundle, snapshot: &[Option<[u8; 96]>]) {
+    // The signing closure must not add, remove, or reorder actions (documented
+    // on `sign_orchard_with` / `sign_ironwood_with`); a length mismatch would
+    // otherwise restore FVKs to the wrong spends via `zip`'s silent truncation.
+    debug_assert_eq!(
+        bundle.actions.len(),
+        snapshot.len(),
+        "signing closure changed the action count"
+    );
     for (action, fvk) in bundle.actions.iter_mut().zip(snapshot) {
         action.spend.fvk = *fvk;
     }

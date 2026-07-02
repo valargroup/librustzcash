@@ -983,6 +983,19 @@ fn v6_orchard_anchor_can_be_updated_after_signing() {
     let pczt = IoFinalizer::new(base_pczt).finalize_io().unwrap();
     check_round_trip(&pczt);
 
+    // The low-level Signer parses with the signer-only lean path (which drops
+    // spend FVKs) and restores the original FVK bytes after serialization: a
+    // no-op signing pass must therefore be byte-lossless.
+    let low_level_round_trip = pczt::roles::low_level_signer::Signer::new(pczt.clone())
+        .sign_orchard_with::<pczt::orchard::BundleParseError, _>(|_, _, _| Ok(()))
+        .unwrap()
+        .finish();
+    assert_eq!(
+        low_level_round_trip.serialize(),
+        pczt.serialize(),
+        "no-op low-level Orchard signing pass must preserve every wire byte",
+    );
+
     let index = orchard_meta.spend_action_index(0).unwrap();
     let mut signer = Signer::new(pczt.clone()).unwrap();
     let shielded_sighash_before = signer.shielded_sighash();
@@ -1149,6 +1162,19 @@ fn ironwood_to_ironwood() {
         .unwrap()
         .finish();
     check_round_trip(&pczt);
+
+    // The low-level Signer parses with the signer-only lean path (which drops
+    // spend FVKs) and restores the original FVK bytes after serialization: a
+    // no-op signing pass must therefore be byte-lossless.
+    let low_level_round_trip = pczt::roles::low_level_signer::Signer::new(pczt.clone())
+        .sign_ironwood_with::<pczt::orchard::BundleParseError, _>(|_, _, _| Ok(()))
+        .unwrap()
+        .finish();
+    assert_eq!(
+        low_level_round_trip.serialize(),
+        pczt.serialize(),
+        "no-op low-level Ironwood signing pass must preserve every wire byte",
+    );
 
     // Apply signatures.
     let index = ironwood_meta.spend_action_index(0).unwrap();
