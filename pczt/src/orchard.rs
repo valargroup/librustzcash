@@ -685,91 +685,95 @@ impl Bundle {
         bundle_format: orchard::bundle::BundleVersion,
         for_signing: bool,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
-        let actions = self
-            .actions
-            .into_iter()
-            .map(|action| {
-                let spend_zip32_derivation = action
-                    .spend
+        // Parse each action through an `#[inline(never)]` helper driven by a plain
+        // loop rather than `.map(..).collect()`. The map/collect form compiles to
+        // `in_place_collect` -> `IntoIter::try_fold` with the entire per-action
+        // parse closure inlined into one combined stack frame tens of kilobytes
+        // deep, which overflows the fixed task stacks of embedded signers that
+        // parse PCZTs. The loop keeps a single bounded helper frame live at a
+        // time and is behaviorally identical (same order, same first-error).
+        #[inline(never)]
+        fn parse_action_inner(
+            action: Action,
+            for_signing: bool,
+        ) -> Result<orchard::pczt::Action, orchard::pczt::ParseError> {
+            let spend_zip32_derivation = action
+                .spend
+                .zip32_derivation
+                .map(|z| {
+                    orchard::pczt::Zip32Derivation::parse(z.seed_fingerprint, z.derivation_path)
+                })
+                .transpose()?;
+
+            let spend = if for_signing {
+                orchard::pczt::Spend::parse_for_signing(
+                    action.spend.nullifier,
+                    action.spend.rk,
+                    action.spend.spend_auth_sig,
+                    action.spend.recipient,
+                    action.spend.value,
+                    action.spend.rho,
+                    action.spend.rseed,
+                    action.spend.fvk,
+                    action.spend.witness,
+                    action.spend.alpha,
+                    spend_zip32_derivation,
+                    action.spend.dummy_sk,
+                    action.spend.note_version.into(),
+                    action.spend.proprietary,
+                )
+            } else {
+                orchard::pczt::Spend::parse(
+                    action.spend.nullifier,
+                    action.spend.rk,
+                    action.spend.spend_auth_sig,
+                    action.spend.recipient,
+                    action.spend.value,
+                    action.spend.rho,
+                    action.spend.rseed,
+                    action.spend.fvk,
+                    action.spend.witness,
+                    action.spend.alpha,
+                    spend_zip32_derivation,
+                    action.spend.dummy_sk,
+                    action.spend.note_version.into(),
+                    action.spend.proprietary,
+                )
+            }?;
+
+            let output = orchard::pczt::Output::parse(
+                *spend.nullifier(),
+                action.output.cmx,
+                action.output.ephemeral_key,
+                action.output.enc_ciphertext,
+                action.output.out_ciphertext,
+                action.output.recipient,
+                action.output.value,
+                action.output.rseed,
+                action.output.ock,
+                action
+                    .output
                     .zip32_derivation
                     .map(|z| {
                         orchard::pczt::Zip32Derivation::parse(z.seed_fingerprint, z.derivation_path)
                     })
-                    .transpose()?;
+                    .transpose()?,
+                action.output.user_address,
+                action.output.note_version.into(),
+                action.output.proprietary,
+            )?;
 
-                let spend = if for_signing {
-                    orchard::pczt::Spend::parse_for_signing(
-                        action.spend.nullifier,
-                        action.spend.rk,
-                        action.spend.spend_auth_sig,
-                        action.spend.recipient,
-                        action.spend.value,
-                        action.spend.rho,
-                        action.spend.rseed,
-                        action.spend.fvk,
-                        action.spend.witness,
-                        action.spend.alpha,
-                        spend_zip32_derivation,
-                        action.spend.dummy_sk,
-                        action.spend.note_version.into(),
-                        action.spend.proprietary,
-                    )
-                } else {
-                    orchard::pczt::Spend::parse(
-                        action.spend.nullifier,
-                        action.spend.rk,
-                        action.spend.spend_auth_sig,
-                        action.spend.recipient,
-                        action.spend.value,
-                        action.spend.rho,
-                        action.spend.rseed,
-                        action.spend.fvk,
-                        action.spend.witness,
-                        action.spend.alpha,
-                        spend_zip32_derivation,
-                        action.spend.dummy_sk,
-                        action.spend.note_version.into(),
-                        action.spend.proprietary,
-                    )
-                }?;
+            if for_signing {
+                orchard::pczt::Action::parse_for_signing(action.cv_net, spend, output, action.rcv)
+            } else {
+                orchard::pczt::Action::parse(action.cv_net, spend, output, action.rcv)
+            }
+        }
 
-                let output = orchard::pczt::Output::parse(
-                    *spend.nullifier(),
-                    action.output.cmx,
-                    action.output.ephemeral_key,
-                    action.output.enc_ciphertext,
-                    action.output.out_ciphertext,
-                    action.output.recipient,
-                    action.output.value,
-                    action.output.rseed,
-                    action.output.ock,
-                    action
-                        .output
-                        .zip32_derivation
-                        .map(|z| {
-                            orchard::pczt::Zip32Derivation::parse(
-                                z.seed_fingerprint,
-                                z.derivation_path,
-                            )
-                        })
-                        .transpose()?,
-                    action.output.user_address,
-                    action.output.note_version.into(),
-                    action.output.proprietary,
-                )?;
-
-                if for_signing {
-                    orchard::pczt::Action::parse_for_signing(
-                        action.cv_net,
-                        spend,
-                        output,
-                        action.rcv,
-                    )
-                } else {
-                    orchard::pczt::Action::parse(action.cv_net, spend, output, action.rcv)
-                }
-            })
-            .collect::<Result<_, _>>()?;
+        let mut actions = alloc::vec::Vec::with_capacity(self.actions.len());
+        for action in self.actions {
+            actions.push(parse_action_inner(action, for_signing)?);
+        }
 
         if for_signing {
             orchard::pczt::Bundle::parse_for_signing(
