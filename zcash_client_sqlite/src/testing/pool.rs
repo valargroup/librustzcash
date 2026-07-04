@@ -205,13 +205,6 @@ pub(crate) fn account_deletion<T: ShieldedPoolTester>() {
     )
 }
 
-pub(crate) fn account_deletion_with_internal_transfer<T: ShieldedPoolTester>() {
-    zcash_client_backend::data_api::testing::pool::account_deletion_with_internal_transfer::<T, _>(
-        TestDbFactory::default(),
-        BlockCache::new(),
-    )
-}
-
 pub(crate) fn external_address_change_spends_detected_in_restore_from_seed<
     T: ShieldedPoolTester,
 >() {
@@ -678,6 +671,38 @@ pub(crate) fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester>()
         TestDbFactory::default(),
         BlockCache::new(),
     )
+}
+
+#[cfg(all(feature = "pczt-tests", feature = "orchard", zcash_unstable = "nu7"))]
+pub(crate) fn pczt_single_step_orchard_to_ironwood() {
+    zcash_client_backend::data_api::testing::pool::pczt_single_step_orchard_to_ironwood::<_>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(all(
+    feature = "pczt-tests",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu7"
+))]
+pub(crate) fn pczt_legacy_v5_orchard_partial_unshield_after_nu6_3() {
+    zcash_client_backend::data_api::testing::pool::pczt_legacy_v5_orchard_partial_unshield_after_nu6_3::<
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
+}
+
+#[cfg(all(
+    feature = "pczt-tests",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu7"
+))]
+pub(crate) fn pczt_legacy_v5_orchard_full_unshield_after_nu6_3() {
+    zcash_client_backend::data_api::testing::pool::pczt_legacy_v5_orchard_full_unshield_after_nu6_3::<
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
 }
 
 #[cfg(feature = "transparent-inputs")]

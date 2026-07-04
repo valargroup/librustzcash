@@ -152,6 +152,18 @@ pub(super) fn all_migrations<
     //                                               /                    \     ironwood_pool_code_views
     //                                          ivk_item_cache    add_transparent_receiver_address_index
     //
+    // The current post-0.19 tail is:
+    //
+    // account_delete_cascade
+    //   |-- v_tx_outputs_key_scopes ---------------------.
+    //   |                                                |
+    //   |-- witness_stabilized_notes                     |
+    //   |     `-- orchard_note_version_uniqueness        |
+    //   |           `-- ironwood_shardtree               |
+    //   |                 `-- ironwood_pool_code_views <-'
+    //   |
+    //   `-- standalone_p2sh
+    //         `-- ivk_item_cache
     let rng = Rc::new(Mutex::new(rng));
     vec![
         Box::new(initial_setup::Migration {}),

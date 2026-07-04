@@ -31,6 +31,11 @@ use zcash_keys::keys::zcashd;
 /// The sentinel value representing an unset `zcashd_legacy_address_index` column.
 pub(crate) const LEGACY_ADDRESS_INDEX_NULL: i64 = -1;
 
+pub(crate) const TRANSPARENT_POOL_CODE: i64 = 0;
+pub(crate) const SAPLING_POOL_CODE: i64 = 2;
+pub(crate) const ORCHARD_POOL_CODE: i64 = 3;
+pub(crate) const IRONWOOD_POOL_CODE: i64 = 4;
+
 pub(crate) fn pool_code(pool_type: PoolType) -> i64 {
     // These constants are *incidentally* shared with the typecodes
     // for unified addresses, but this is exclusively an internal

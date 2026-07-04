@@ -29,6 +29,8 @@ use zcash_keys::{
     keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey},
 };
 use zcash_note_encryption::Domain;
+#[cfg(feature = "unstable")]
+use zcash_primitives::transaction::TxVersion;
 use zcash_primitives::{
     block::BlockHash,
     transaction::{Transaction, TxId, components::sapling::zip212_enforcement, fees::FeeRule},
@@ -267,6 +269,8 @@ pub struct CachedBlock {
     chain_state: ChainState,
     sapling_end_size: u32,
     orchard_end_size: u32,
+    #[cfg(feature = "orchard")]
+    ironwood_end_size: u32,
 }
 
 impl CachedBlock {
@@ -280,6 +284,8 @@ impl CachedBlock {
             chain_state: ChainState::empty(block_height, BlockHash([0; 32])),
             sapling_end_size: 0,
             orchard_end_size: 0,
+            #[cfg(feature = "orchard")]
+            ironwood_end_size: 0,
         }
     }
 
@@ -294,11 +300,15 @@ impl CachedBlock {
             chain_state.final_orchard_tree().tree_size() as u32,
             orchard_end_size
         );
+        #[cfg(feature = "orchard")]
+        let ironwood_end_size = chain_state.final_ironwood_tree().tree_size() as u32;
 
         Self {
             chain_state,
             sapling_end_size,
             orchard_end_size,
+            #[cfg(feature = "orchard")]
+            ironwood_end_size,
         }
     }
 
@@ -324,6 +334,20 @@ impl CachedBlock {
         );
         #[cfg(feature = "orchard")]
         let orchard_end_size = orchard_final_tree.tree_size() as u32;
+        #[cfg(feature = "orchard")]
+        let ironwood_final_tree = cb
+            .vtx
+            .iter()
+            .flat_map(|tx| tx.ironwood_actions.iter())
+            .fold(
+                self.chain_state.final_ironwood_tree().clone(),
+                |mut acc, c_act| {
+                    acc.append(MerkleHashOrchard::from_cmx(&c_act.cmx().unwrap()));
+                    acc
+                },
+            );
+        #[cfg(feature = "orchard")]
+        let ironwood_end_size = ironwood_final_tree.tree_size() as u32;
         #[cfg(not(feature = "orchard"))]
         let orchard_end_size = cb.vtx.iter().fold(self.orchard_end_size, |sz, tx| {
             sz + (tx.actions.len() as u32)
@@ -336,9 +360,13 @@ impl CachedBlock {
                 sapling_final_tree,
                 #[cfg(feature = "orchard")]
                 orchard_final_tree,
+                #[cfg(feature = "orchard")]
+                ironwood_final_tree,
             ),
             sapling_end_size,
             orchard_end_size,
+            #[cfg(feature = "orchard")]
+            ironwood_end_size,
         }
     }
 
@@ -690,6 +718,8 @@ where
                     final_sapling_tree,
                     #[cfg(feature = "orchard")]
                     final_orchard_tree,
+                    #[cfg(feature = "orchard")]
+                    prior_cached_block.chain_state.final_ironwood_tree().clone(),
                 ),
                 initial_sapling_tree_size,
                 initial_orchard_tree_size,
@@ -707,6 +737,8 @@ where
             outputs,
             initial_sapling_tree_size,
             initial_orchard_tree_size,
+            #[cfg(feature = "orchard")]
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -742,6 +774,8 @@ where
             value,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            #[cfg(feature = "orchard")]
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -796,6 +830,8 @@ where
             tx,
             prior_cached_block.sapling_end_size,
             prior_cached_block.orchard_end_size,
+            #[cfg(feature = "orchard")]
+            prior_cached_block.ironwood_end_size,
             &mut self.rng,
         );
         assert_eq!(cb.height(), height);
@@ -864,34 +900,6 @@ where
             &mut self.wallet_data,
             from_height,
             &prior_cached_block.chain_state,
-            limit,
-        )
-    }
-
-    /// Invokes [`scan_cached_blocks`] with a caller-supplied `from_state` instead of deriving it
-    /// from the block cache.
-    ///
-    /// This is primarily useful for tests that need to drive [`WalletWrite::put_blocks`] with a
-    /// `from_state` that is deliberately inconsistent with the wallet's stored note commitment
-    /// tree state, in order to exercise the resulting error paths.
-    pub fn try_scan_cached_blocks_with_state(
-        &mut self,
-        from_height: BlockHeight,
-        from_state: &ChainState,
-        limit: usize,
-    ) -> Result<
-        ScanSummary,
-        super::chain::error::Error<
-            <DbT as WalletRead>::Error,
-            <Cache::BlockSource as BlockSource>::Error,
-        >,
-    > {
-        scan_cached_blocks(
-            &self.network,
-            self.cache.block_source(),
-            &mut self.wallet_data,
-            from_height,
-            from_state,
             limit,
         )
     }
@@ -1120,6 +1128,43 @@ where
             memo,
             mode,
             confirmations_policy,
+            #[cfg(feature = "unstable")]
+            None,
+        )
+    }
+
+    /// Invokes [`propose_send_max_transfer`] with an explicit transaction version.
+    #[cfg(feature = "unstable")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_send_max_transfer_with_tx_version<FeeRuleT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        fee_rule: &FeeRuleT,
+        to: ZcashAddress,
+        memo: Option<MemoBytes>,
+        mode: MaxSpendMode,
+        confirmations_policy: ConfirmationsPolicy,
+        proposed_version: TxVersion,
+    ) -> Result<
+        Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
+        super::wallet::ProposeSendMaxErrT<DbT, Infallible, FeeRuleT>,
+    >
+    where
+        FeeRuleT: FeeRule + Clone,
+    {
+        let network = self.network().clone();
+        propose_send_max_transfer::<_, _, _, Infallible>(
+            self.wallet_mut(),
+            &network,
+            spend_from_account,
+            &[ShieldedPool::Sapling, ShieldedPool::Orchard],
+            fee_rule,
+            to,
+            memo,
+            mode,
+            confirmations_policy,
+            Some(proposed_version),
         )
     }
 
@@ -1159,6 +1204,53 @@ where
             fallback_change_pool,
             #[cfg(feature = "unstable")]
             None,
+        );
+
+        if let Ok(proposal) = &result {
+            check_proposal_serialization_roundtrip(self.wallet(), proposal);
+        }
+
+        result
+    }
+
+    /// Invokes [`propose_standard_transfer_to_address`] with an explicitly requested
+    /// transaction version.
+    #[cfg(feature = "unstable")]
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_standard_transfer_with_tx_version<CommitmentTreeErrT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        fee_rule: StandardFeeRule,
+        confirmations_policy: ConfirmationsPolicy,
+        to: &Address,
+        amount: Zatoshis,
+        memo: Option<MemoBytes>,
+        change_memo: Option<MemoBytes>,
+        fallback_change_pool: ShieldedPool,
+        proposed_version: TxVersion,
+    ) -> Result<
+        Proposal<StandardFeeRule, <DbT as InputSource>::NoteRef>,
+        super::wallet::ProposeTransferErrT<
+            DbT,
+            CommitmentTreeErrT,
+            GreedyInputSelector<DbT>,
+            SingleOutputChangeStrategy<DbT>,
+        >,
+    > {
+        let network = self.network().clone();
+        let result = propose_standard_transfer_to_address::<_, _, CommitmentTreeErrT>(
+            self.wallet_mut(),
+            &network,
+            fee_rule,
+            spend_from_account,
+            confirmations_policy,
+            to,
+            amount,
+            memo,
+            change_memo,
+            fallback_change_pool,
+            Some(proposed_version),
         );
 
         if let Ok(proposal) = &result {
@@ -1302,6 +1394,39 @@ where
             spend_from_account,
             ovk_policy,
             proposal,
+        )
+    }
+
+    /// Invokes [`create_pczt_from_proposal_with_tx_version`] with the given arguments.
+    ///
+    /// [`create_pczt_from_proposal_with_tx_version`]: super::wallet::create_pczt_from_proposal_with_tx_version
+    #[cfg(all(feature = "pczt", feature = "unstable"))]
+    #[allow(clippy::type_complexity)]
+    pub fn create_pczt_from_proposal_with_tx_version<InputsErrT, FeeRuleT, ChangeErrT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        ovk_policy: OvkPolicy,
+        proposal: &Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
+        proposed_version: TxVersion,
+    ) -> Result<
+        pczt::Pczt,
+        super::wallet::CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, DbT::NoteRef>,
+    >
+    where
+        <DbT as WalletRead>::AccountId: serde::Serialize,
+        FeeRuleT: FeeRule,
+    {
+        use super::wallet::create_pczt_from_proposal_with_tx_version;
+
+        let network = self.network().clone();
+
+        create_pczt_from_proposal_with_tx_version(
+            self.wallet_mut(),
+            &network,
+            spend_from_account,
+            ovk_policy,
+            proposal,
+            proposed_version,
         )
     }
 
@@ -1589,6 +1714,8 @@ impl TestBuilder<(), ()> {
         nu6_3: None,
         #[cfg(zcash_unstable = "nu7")]
         nu7: None,
+        #[cfg(zcash_unstable = "zfuture")]
+        z_future: None,
     };
 
     /// Constructs a new test environment builder.
@@ -1667,6 +1794,16 @@ impl<A, B> TestBuilder<A, B> {
 }
 
 impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
+    /// Overrides the default local consensus network used by the test.
+    ///
+    /// This must be called before configuring an account birthday or initial chain state.
+    pub fn with_network(mut self, network: LocalNetwork) -> Self {
+        assert!(self.initial_chain_state.is_none());
+        assert!(self.account_birthday.is_none());
+        self.network = network;
+        self
+    }
+
     /// Configures the test to start with the given initial chain state.
     ///
     /// # Panics
@@ -1742,6 +1879,8 @@ impl<Cache, DsFactory> TestBuilder<Cache, DsFactory> {
     ///                 sapling_initial_tree,
     ///                 #[cfg(feature = "orchard")]
     ///                 orchard_initial_tree,
+    ///                 #[cfg(feature = "orchard")]
+    ///                 Frontier::empty(),
     ///             ),
     ///             prior_sapling_roots,
     ///             #[cfg(feature = "orchard")]
@@ -1863,6 +2002,17 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
                         )
                     })
                     .unwrap();
+                wallet_data
+                    .with_ironwood_tree_mut(|t| {
+                        t.insert_frontier(
+                            initial_state.chain_state.final_ironwood_tree().clone(),
+                            Retention::Checkpoint {
+                                id: initial_state.chain_state.block_height(),
+                                marking: Marking::Reference,
+                            },
+                        )
+                    })
+                    .unwrap();
             }
 
             let final_sapling_tree_size =
@@ -1871,6 +2021,9 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
             #[cfg(feature = "orchard")]
             let _final_orchard_tree_size =
                 initial_state.chain_state.final_orchard_tree().tree_size() as u32;
+            #[cfg(feature = "orchard")]
+            let _final_ironwood_tree_size =
+                initial_state.chain_state.final_ironwood_tree().tree_size() as u32;
 
             cached_blocks.insert(
                 initial_state.chain_state.block_height(),
@@ -1878,6 +2031,8 @@ impl<Cache, DsFactory: DataStoreFactory> TestBuilder<Cache, DsFactory> {
                     chain_state: initial_state.chain_state.clone(),
                     sapling_end_size: final_sapling_tree_size,
                     orchard_end_size: _final_orchard_tree_size,
+                    #[cfg(feature = "orchard")]
+                    ironwood_end_size: _final_ironwood_tree_size,
                 },
             );
         };
@@ -2407,6 +2562,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
     outputs: &[FakeCompactOutput<Fvk>],
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     mut rng: impl RngCore + CryptoRng,
 ) -> (CompactBlock, Vec<Fvk::Nullifier>) {
     // Create a fake CompactBlock containing the note
@@ -2432,6 +2588,8 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        #[cfg(feature = "orchard")]
+        initial_ironwood_tree_size,
         rng,
     );
     (cb, nfs)
@@ -2439,6 +2597,7 @@ fn fake_compact_block<P: consensus::Parameters, Fvk: TestFvk>(
 
 /// Create a fake CompactBlock at the given height containing only the given transaction.
 // TODO: `tx` could be a slice and we could add multiple transactions here
+#[allow(clippy::too_many_arguments)]
 fn fake_compact_block_from_tx(
     height: BlockHeight,
     prev_hash: BlockHash,
@@ -2446,6 +2605,7 @@ fn fake_compact_block_from_tx(
     tx: &Transaction,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     rng: impl RngCore,
 ) -> CompactBlock {
     // Create a fake CompactTx containing the transaction.
@@ -2471,12 +2631,21 @@ fn fake_compact_block_from_tx(
         }
     }
 
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    if let Some(bundle) = tx.ironwood_bundle() {
+        for action in bundle.actions() {
+            ctx.ironwood_actions.push(action.into());
+        }
+    }
+
     fake_compact_block_from_compact_tx(
         ctx,
         height,
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        #[cfg(feature = "orchard")]
+        initial_ironwood_tree_size,
         rng,
     )
 }
@@ -2494,6 +2663,7 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
     value: Zatoshis,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     mut rng: impl RngCore + CryptoRng,
 ) -> CompactBlock {
     let mut ctx = fake_compact_tx(&mut rng);
@@ -2582,6 +2752,8 @@ fn fake_compact_block_spending<P: consensus::Parameters, Fvk: TestFvk>(
         prev_hash,
         initial_sapling_tree_size,
         initial_orchard_tree_size,
+        #[cfg(feature = "orchard")]
+        initial_ironwood_tree_size,
         rng,
     )
 }
@@ -2592,6 +2764,7 @@ fn fake_compact_block_from_compact_tx(
     prev_hash: BlockHash,
     initial_sapling_tree_size: u32,
     initial_orchard_tree_size: u32,
+    #[cfg(feature = "orchard")] initial_ironwood_tree_size: u32,
     mut rng: impl RngCore,
 ) -> CompactBlock {
     let mut cb = CompactBlock {
@@ -2646,6 +2819,8 @@ pub struct NoteCommitments {
     sapling: Vec<::sapling::Node>,
     #[cfg(feature = "orchard")]
     orchard: Vec<MerkleHashOrchard>,
+    #[cfg(feature = "orchard")]
+    ironwood: Vec<MerkleHashOrchard>,
 }
 
 impl NoteCommitments {
@@ -2671,6 +2846,16 @@ impl NoteCommitments {
                         .map(|act| MerkleHashOrchard::from_cmx(&act.cmx().unwrap()))
                 })
                 .collect(),
+            #[cfg(feature = "orchard")]
+            ironwood: cb
+                .vtx
+                .iter()
+                .flat_map(|tx| {
+                    tx.ironwood_actions
+                        .iter()
+                        .map(|act| MerkleHashOrchard::from_cmx(&act.cmx().unwrap()))
+                })
+                .collect(),
         }
     }
 
@@ -2684,6 +2869,12 @@ impl NoteCommitments {
     #[cfg(feature = "orchard")]
     pub fn orchard(&self) -> &[MerkleHashOrchard] {
         self.orchard.as_ref()
+    }
+
+    /// Returns the Ironwood note commitments.
+    #[cfg(feature = "orchard")]
+    pub fn ironwood(&self) -> &[MerkleHashOrchard] {
+        self.ironwood.as_ref()
     }
 }
 
@@ -2701,6 +2892,12 @@ pub struct MockWalletDb {
         { ORCHARD_SHARD_HEIGHT * 2 },
         ORCHARD_SHARD_HEIGHT,
     >,
+    #[cfg(feature = "orchard")]
+    pub ironwood_tree: ShardTree<
+        MemoryShardStore<::orchard::tree::MerkleHashOrchard, BlockHeight>,
+        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_SHARD_HEIGHT,
+    >,
     account_ids: Vec<u32>,
     addresses_by_account: HashMap<u32, Vec<AddressInfo>>,
     ufvks_by_account: HashMap<u32, UnifiedFullViewingKey>,
@@ -2714,6 +2911,8 @@ impl MockWalletDb {
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), 100),
             #[cfg(feature = "orchard")]
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), 100),
+            #[cfg(feature = "orchard")]
+            ironwood_tree: ShardTree::new(MemoryShardStore::empty(), 100),
             account_ids: vec![],
             addresses_by_account: HashMap::new(),
             ufvks_by_account: HashMap::new(),
@@ -3227,6 +3426,44 @@ impl WalletCommitmentTrees for MockWalletDb {
         roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>> {
         self.with_orchard_tree_mut(|t| {
+            for (root, i) in roots.iter().zip(0u64..) {
+                let root_addr = incrementalmerkletree::Address::from_parts(
+                    ORCHARD_SHARD_HEIGHT.into(),
+                    start_index + i,
+                );
+                t.insert(root_addr, *root.root_hash())?;
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "orchard")]
+    type IronwoodShardStore<'a> = MemoryShardStore<::orchard::tree::MerkleHashOrchard, BlockHeight>;
+
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::IronwoodShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        callback(&mut self.ironwood_tree)
+    }
+
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_ironwood_tree_mut(|t| {
             for (root, i) in roots.iter().zip(0u64..) {
                 let root_addr = incrementalmerkletree::Address::from_parts(
                     ORCHARD_SHARD_HEIGHT.into(),

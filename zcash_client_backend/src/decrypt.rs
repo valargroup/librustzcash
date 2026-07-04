@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "orchard")]
+use nonempty::NonEmpty;
 use sapling::note_encryption::{PreparedIncomingViewingKey, SaplingDomain};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
@@ -13,10 +15,10 @@ use zcash_protocol::{
 };
 use zip32::Scope;
 
-use crate::data_api::DecryptedTransaction;
+use crate::data_api::{DecryptedTransaction, NoteCommitmentTree};
 
 #[cfg(feature = "orchard")]
-use orchard::note_encryption::OrchardDomain;
+use orchard::primitives::redpallas;
 
 /// An enumeration of the possible relationships a TXO can have to the wallet.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -41,6 +43,7 @@ pub enum TransferType {
 /// A decrypted shielded output.
 pub struct DecryptedOutput<Note, AccountId> {
     index: usize,
+    note_commitment_tree: Option<NoteCommitmentTree>,
     note: Note,
     account: AccountId,
     memo: MemoBytes,
@@ -57,6 +60,25 @@ impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
     ) -> Self {
         Self {
             index,
+            note_commitment_tree: None,
+            note,
+            account,
+            memo,
+            transfer_type,
+        }
+    }
+
+    pub(crate) fn new_in_tree(
+        note_commitment_tree: NoteCommitmentTree,
+        index: usize,
+        note: Note,
+        account: AccountId,
+        memo: MemoBytes,
+        transfer_type: TransferType,
+    ) -> Self {
+        Self {
+            index,
+            note_commitment_tree: Some(note_commitment_tree),
             note,
             account,
             memo,
@@ -93,6 +115,12 @@ impl<Note, AccountId> DecryptedOutput<Note, AccountId> {
 }
 
 impl<A> DecryptedOutput<sapling::Note, A> {
+    /// Returns the note commitment tree to which this output belongs.
+    pub fn note_commitment_tree(&self) -> NoteCommitmentTree {
+        self.note_commitment_tree
+            .unwrap_or(NoteCommitmentTree::Sapling)
+    }
+
     pub fn note_value(&self) -> Zatoshis {
         Zatoshis::from_u64(self.note.value().inner())
             .expect("Sapling note value is expected to have been validated by consensus.")
@@ -101,10 +129,78 @@ impl<A> DecryptedOutput<sapling::Note, A> {
 
 #[cfg(feature = "orchard")]
 impl<A> DecryptedOutput<orchard::note::Note, A> {
+    /// Returns the note commitment tree to which this output belongs.
+    pub fn note_commitment_tree(&self) -> NoteCommitmentTree {
+        self.note_commitment_tree
+            .unwrap_or(NoteCommitmentTree::Orchard)
+    }
+
     pub fn note_value(&self) -> Zatoshis {
         Zatoshis::from_u64(self.note.value().inner())
             .expect("Orchard note value is expected to have been validated by consensus.")
     }
+}
+
+#[cfg(feature = "orchard")]
+fn decrypt_orchard_outputs<AccountId: Copy, V>(
+    ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
+    actions: &NonEmpty<orchard::Action<redpallas::Signature<redpallas::SpendAuth>>>,
+    index_offset: usize,
+    note_commitment_tree: NoteCommitmentTree,
+) -> Vec<DecryptedOutput<orchard::note::Note, AccountId>>
+where
+    V: orchard::note_encryption::DomainVersion,
+    orchard::note_encryption::NoteEncryptionDomain<V>: zcash_note_encryption::Domain<
+            Note = orchard::note::Note,
+            Memo = [u8; 512],
+            IncomingViewingKey = orchard::keys::PreparedIncomingViewingKey,
+            OutgoingViewingKey = orchard::keys::OutgoingViewingKey,
+            ValueCommitment = orchard::value::ValueCommitment,
+        >,
+{
+    ufvks
+        .iter()
+        .flat_map(|(account, ufvk)| ufvk.orchard().into_iter().map(|fvk| (*account, fvk)))
+        .flat_map(|(account, fvk)| {
+            let ivk_external =
+                orchard::keys::PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
+            let ivk_internal =
+                orchard::keys::PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::Internal));
+            let ovk = fvk.to_ovk(Scope::External);
+
+            actions.iter().enumerate().flat_map(move |(index, action)| {
+                let domain =
+                    orchard::note_encryption::NoteEncryptionDomain::<V>::for_action(action);
+                try_note_decryption(&domain, &ivk_external, action)
+                    .map(|ret| (ret, TransferType::Incoming))
+                    .or_else(|| {
+                        try_note_decryption(&domain, &ivk_internal, action)
+                            .map(|ret| (ret, TransferType::AccountInternal))
+                    })
+                    .or_else(|| {
+                        try_output_recovery_with_ovk(
+                            &domain,
+                            &ovk,
+                            action,
+                            action.cv_net(),
+                            &action.encrypted_note().out_ciphertext,
+                        )
+                        .map(|ret| (ret, TransferType::Outgoing))
+                    })
+                    .into_iter()
+                    .map(move |((note, _, memo), transfer_type)| {
+                        DecryptedOutput::new_in_tree(
+                            note_commitment_tree,
+                            index_offset + index,
+                            note,
+                            account,
+                            MemoBytes::from_bytes(&memo).expect("correct length"),
+                            transfer_type,
+                        )
+                    })
+            })
+        })
+        .collect()
 }
 
 /// Scans a [`Transaction`] for any information that can be decrypted by the set of
@@ -194,57 +290,34 @@ pub fn decrypt_transaction<'a, P: consensus::Parameters, AccountId: Copy>(
     #[cfg(feature = "orchard")]
     let orchard_bundle = tx.orchard_bundle();
     #[cfg(feature = "orchard")]
-    let orchard_outputs = orchard_bundle
+    let orchard_outputs: Vec<_> = orchard_bundle
         .iter()
         .flat_map(|bundle| {
-            ufvks
-                .iter()
-                .flat_map(|(account, ufvk)| ufvk.orchard().into_iter().map(|fvk| (*account, fvk)))
-                .flat_map(|(account, fvk)| {
-                    let ivk_external = orchard::keys::PreparedIncomingViewingKey::new(
-                        &fvk.to_ivk(Scope::External),
-                    );
-                    let ivk_internal = orchard::keys::PreparedIncomingViewingKey::new(
-                        &fvk.to_ivk(Scope::Internal),
-                    );
-                    let ovk = fvk.to_ovk(Scope::External);
-
-                    bundle
-                        .actions()
-                        .iter()
-                        .enumerate()
-                        .flat_map(move |(index, action)| {
-                            let domain = OrchardDomain::for_action(action);
-                            try_note_decryption(&domain, &ivk_external, action)
-                                .map(|ret| (ret, TransferType::Incoming))
-                                .or_else(|| {
-                                    try_note_decryption(&domain, &ivk_internal, action)
-                                        .map(|ret| (ret, TransferType::AccountInternal))
-                                })
-                                .or_else(|| {
-                                    try_output_recovery_with_ovk(
-                                        &domain,
-                                        &ovk,
-                                        action,
-                                        action.cv_net(),
-                                        &action.encrypted_note().out_ciphertext,
-                                    )
-                                    .map(|ret| (ret, TransferType::Outgoing))
-                                })
-                                .into_iter()
-                                .map(move |((note, _, memo), transfer_type)| {
-                                    DecryptedOutput::new(
-                                        index,
-                                        note,
-                                        account,
-                                        MemoBytes::from_bytes(&memo).expect("correct length"),
-                                        transfer_type,
-                                    )
-                                })
-                        })
-                })
+            decrypt_orchard_outputs::<_, orchard::note_encryption::OrchardVersion>(
+                ufvks,
+                bundle.actions(),
+                0,
+                NoteCommitmentTree::Orchard,
+            )
         })
         .collect();
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let orchard_outputs = {
+        let mut orchard_outputs = orchard_outputs;
+        // Ironwood is represented as Orchard-shaped V3 outputs at this API boundary. Offset
+        // Ironwood action indices by the Orchard action count so mixed-bundle transactions have
+        // unique Orchard output identifiers.
+        let orchard_action_count = orchard_bundle.map_or(0, |bundle| bundle.actions().len());
+        orchard_outputs.extend(tx.ironwood_bundle().iter().flat_map(|bundle| {
+            decrypt_orchard_outputs::<_, orchard::note_encryption::IronwoodVersion>(
+                ufvks,
+                bundle.actions(),
+                orchard_action_count,
+                NoteCommitmentTree::Ironwood,
+            )
+        }));
+        orchard_outputs
+    };
 
     DecryptedTransaction::new(
         mined_height,

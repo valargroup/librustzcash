@@ -7,7 +7,7 @@ use std::rc::Rc;
 use tracing::{debug, trace};
 
 use zcash_client_backend::data_api::{
-    SAPLING_SHARD_HEIGHT,
+    NoteCommitmentTree, SAPLING_SHARD_HEIGHT,
     scanning::{ScanPriority, ScanRange, spanning_tree::SpanningTree},
 };
 use zcash_protocol::{
@@ -15,14 +15,12 @@ use zcash_protocol::{
     consensus::{self, BlockHeight, NetworkUpgrade},
 };
 
-use crate::TableConstants;
 use crate::{
     PRUNING_DEPTH, VERIFY_LOOKAHEAD,
     error::SqliteClientError,
     wallet::{block_height_extrema, init::WalletMigrationError},
 };
 
-use super::common::table_constants;
 use super::{block_max_scanned, wallet_birthday};
 
 #[cfg(feature = "orchard")]
@@ -318,11 +316,12 @@ pub(crate) fn scan_complete<P: consensus::Parameters>(
                     required_orchard_subtrees.insert(
                         Address::above_position(ORCHARD_SHARD_HEIGHT.into(), *position).index(),
                     );
-
-                    #[cfg(not(feature = "orchard"))]
-                    return Err(SqliteClientError::UnsupportedPoolType(PoolType::Shielded(
-                        *protocol,
-                    )));
+                }
+                #[cfg(feature = "orchard")]
+                NoteCommitmentTree::Ironwood => {
+                    required_ironwood_subtrees.insert(
+                        Address::above_position(ORCHARD_SHARD_HEIGHT.into(), *position).index(),
+                    );
                 }
                 ShieldedPool::Ironwood => {
                     #[cfg(feature = "orchard")]
@@ -428,6 +427,22 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
     params: &P,
     pools: &[ShieldedPool],
 ) -> Result<(), SqliteClientError> {
+    #[cfg(feature = "orchard")]
+    fn table_has_column(
+        conn: &rusqlite::Transaction<'_>,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<bool, SqliteClientError> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+        let column_exists = stmt
+            .query_map([], |row| row.get::<_, String>("name"))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == column_name);
+
+        Ok(column_exists)
+    }
+
     fn mark_pool(
         conn: &rusqlite::Transaction<'_>,
         pool: ShieldedPool,
@@ -443,6 +458,7 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
              SET witness_stabilized = 1
              WHERE witness_stabilized = 0
                AND commitment_tree_position IS NOT NULL
+               {note_filter}
                AND EXISTS (
                    SELECT 1 FROM {table_prefix}_tree_shards shard
                    WHERE shard.subtree_end_height IS NOT NULL
@@ -476,7 +492,6 @@ fn tip_shard_end_height(
     conn: &rusqlite::Transaction<'_>,
     protocol: ShieldedPool,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
-    let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
     conn.query_row(
         &format!("SELECT MAX(subtree_end_height) FROM {table_prefix}_tree_shards"),
         [],
@@ -530,12 +545,10 @@ pub(crate) fn update_chain_tip<P: consensus::Parameters>(
     let orchard_shard_tip = tip_shard_end_height(conn, ShieldedPool::Orchard)?;
 
     #[cfg(feature = "orchard")]
-    let min_shard_tip = match (sapling_shard_tip, orchard_shard_tip) {
-        (None, None) => None,
-        (None, Some(o)) => Some(o),
-        (Some(s), None) => Some(s),
-        (Some(s), Some(o)) => Some(std::cmp::min(s, o)),
-    };
+    let min_shard_tip = [sapling_shard_tip, orchard_shard_tip, ironwood_shard_tip]
+        .into_iter()
+        .flatten()
+        .min();
     #[cfg(not(feature = "orchard"))]
     let min_shard_tip = sapling_shard_tip;
 
@@ -818,6 +831,8 @@ pub(crate) mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        Frontier::empty(),
                     ),
                     prior_sapling_roots,
                     #[cfg(feature = "orchard")]
@@ -975,6 +990,8 @@ pub(crate) mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        Frontier::empty(),
                     ),
                     prior_sapling_roots: if insert_prior_roots {
                         prior_sapling_roots
@@ -1233,6 +1250,8 @@ pub(crate) mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        Frontier::empty(),
                     ),
                     prior_sapling_roots,
                     #[cfg(feature = "orchard")]
@@ -1426,6 +1445,8 @@ pub(crate) mod tests {
                         sapling_initial_tree,
                         #[cfg(feature = "orchard")]
                         orchard_initial_tree,
+                        #[cfg(feature = "orchard")]
+                        Frontier::empty(),
                     ),
                     prior_sapling_roots,
                     #[cfg(feature = "orchard")]
@@ -1755,6 +1776,7 @@ pub(crate) mod tests {
                         birthday_prior_block_hash,
                         Frontier::empty(), // the Sapling tree is unused in this test
                         orchard_initial_tree,
+                        Frontier::empty(),
                     ),
                     prior_sapling_roots: vec![],
                     prior_orchard_roots,

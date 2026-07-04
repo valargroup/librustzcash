@@ -8,7 +8,7 @@ indicated by the `PLANNED` status in order to make it possible to correctly
 represent the transitive `semver` implications of changes within the enclosing
 workspace.
 
-## Unreleased
+## [0.22.0] - PLANNED
 
 ### Added
 - A new migration adds a `note_version` column to `orchard_received_notes`,
@@ -110,15 +110,25 @@ workspace.
   establishes that account's ownership of the address. Funds received at such an address
   become spendable once the account derives it.
 
-## [0.21.1] - 2026-06-19
+### Changed
+- Wallet summaries now count V3 Orchard-style notes as Ironwood balance instead
+  of Orchard balance.
+- The `orchard_received_notes` table now stores a `note_version`, and its
+  uniqueness constraint includes `(transaction_id, action_index, note_version)`
+  so Orchard and Ironwood notes with the same action index remain distinct.
+- Public wallet output views now expose Ironwood V3 Orchard-style notes with
+  SQLite pool code `4`; existing sent-note rows for those notes are migrated
+  from Orchard pool code `3` to Ironwood pool code `4`.
+- Wallet migrations now requeue already scanned NU6.3-era ranges for historical
+  scanning when Ironwood tree storage is added, so existing wallets can populate
+  Ironwood tree state.
 
 ### Fixed
-- Fixed a bug in `WalletDb::delete_account` that caused it to fail with
-  `rusqlite::Error::InvalidParameterName(":address")` when the account being
-  deleted was referenced by a `sent_notes` row via its `to_account_id` column
-  (for example, after an internal transfer to an address belonging to the
-  account being deleted). The `sent_notes` update statement bound a parameter
-  named `:address` while the SQL expected `:to_address`.
+- Scanning now recovers internal change from wallet-created shielded spends
+  whose stored transaction has no expiry height, and from spends whose mined
+  status is learned before their containing block has been scanned.
+- V6 transaction reconstruction now preserves Ironwood bundles when deriving the
+  consensus branch from the serialized expiry height.
 
 ## [0.21.0] - 2026-06-02
 
