@@ -4,7 +4,6 @@
 use std::convert::Infallible;
 
 use orchard::bundle::BundleVersion;
-use zcash_primitives::transaction::builder::transactional_bundle_type;
 use zcash_protocol::{
     consensus::{self, BlockHeight},
     value::Zatoshis,
@@ -30,10 +29,9 @@ pub(crate) fn bundle_pool_restrictions_for_target_height<P: consensus::Parameter
 /// transactional (non-coinbase) Orchard-pool bundle of the given version, carrying the
 /// given numbers of requested spends and outputs.
 ///
-/// This derives the count from [`transactional_bundle_type`], so it follows the
-/// builder's padding policy per pool (Orchard padded to the 2-action minimum, Ironwood
-/// unpadded); the builder enforces an exact balance against the fee computed from
-/// these counts.
+/// This derives the count from [`orchard::builder::BundleType::DEFAULT`], so it
+/// follows the builder's default transactional bundle policy; the builder enforces
+/// an exact balance against the fee computed from these counts.
 pub(crate) fn transactional_action_count(
     bundle_version: BundleVersion,
     num_spends: usize,
@@ -41,9 +39,8 @@ pub(crate) fn transactional_action_count(
 ) -> Result<usize, &'static str> {
     // These bundles are always built as non-coinbase bundles with the bundle version's
     // default flags, matching how the orchard/ironwood builders are constructed in
-    // `zcash_primitives`; `transactional_bundle_type` supplies the per-pool padding
-    // policy (Orchard padded to the 2-action minimum, Ironwood unpadded).
-    transactional_bundle_type(bundle_version).num_actions(
+    // `zcash_primitives`.
+    orchard::builder::BundleType::DEFAULT.num_actions(
         bundle_version.default_flags(),
         num_spends,
         num_outputs,
