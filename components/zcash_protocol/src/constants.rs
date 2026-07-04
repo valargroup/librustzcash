@@ -36,15 +36,10 @@ pub const V5_TX_VERSION: u32 = 5;
 /// The version group ID for Zcash v5 transactions.
 pub const V5_VERSION_GROUP_ID: u32 = 0x26A7270A;
 
-/// Transaction version 6, specified in [ZIP 230](https://zips.z.cash/zip-0230).
-#[cfg(any(zcash_unstable = "nu6.3", zcash_unstable = "nu7"))]
+/// Transaction version 6, specified in [ZIP 229](https://zips.z.cash/zip-0229).
 pub const V6_TX_VERSION: u32 = 6;
 /// The version group ID for Zcash v6 transactions.
-///
-/// This value is gated by `zcash_unstable = "nu6.3"` or `zcash_unstable = "nu7"`
-/// and is a placeholder until the network upgrade version group ID is chosen.
-#[cfg(any(zcash_unstable = "nu6.3", zcash_unstable = "nu7"))]
-pub const V6_VERSION_GROUP_ID: u32 = 0xFFFFFFFF;
+pub const V6_VERSION_GROUP_ID: u32 = 0xD884B698;
 
 /// This version is used exclusively for in-development transaction
 /// serialization, and will never be active under the consensus rules.
@@ -60,3 +55,14 @@ pub const ZFUTURE_TX_VERSION: u32 = 0x0000FFFF;
 /// removed as appropriate in favor of the new version group ID.
 #[cfg(zcash_unstable = "zfuture")]
 pub const ZFUTURE_VERSION_GROUP_ID: u32 = 0xFFFFFFFF;
+
+#[cfg(test)]
+mod tests {
+    use super::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
+
+    #[test]
+    fn v6_transaction_constants_match_network() {
+        assert_eq!(V6_TX_VERSION, 6);
+        assert_eq!(V6_VERSION_GROUP_ID, 0xD884B698);
+    }
+}
