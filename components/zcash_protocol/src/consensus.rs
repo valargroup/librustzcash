@@ -776,8 +776,8 @@ impl TryFrom<u32> for BranchId {
             0x4dec_4df0 => Ok(BranchId::Nu6_1),
             0x5437_f330 => Ok(BranchId::Nu6_2),
             #[cfg(zcash_unstable = "nu6.3")]
-            // TODO: Replace this placeholder once the Ironwood / NU6.3 consensus branch ID is chosen.
-            0xffff_ffff => Ok(BranchId::Nu6_3),
+            // Ironwood / NU6.3 consensus branch ID (finalized upstream; matches the signer's pin).
+            0x37a5_165b => Ok(BranchId::Nu6_3),
             #[cfg(zcash_unstable = "nu7")]
             0xffff_ffff => Ok(BranchId::Nu7),
             #[cfg(zcash_unstable = "zfuture")]
@@ -801,8 +801,8 @@ impl From<BranchId> for u32 {
             BranchId::Nu6_1 => 0x4dec_4df0,
             BranchId::Nu6_2 => 0x5437_f330,
             #[cfg(zcash_unstable = "nu6.3")]
-            // TODO: Replace this placeholder once the Ironwood / NU6.3 consensus branch ID is chosen.
-            BranchId::Nu6_3 => 0xffff_ffff,
+            // Ironwood / NU6.3 consensus branch ID (finalized upstream; matches the signer's pin).
+            BranchId::Nu6_3 => 0x37a5_165b,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => 0xffff_ffff,
             #[cfg(zcash_unstable = "zfuture")]
