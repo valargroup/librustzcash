@@ -10,79 +10,128 @@ use crate::{
         FLAG_SHIELDED_MODIFIABLE, FLAG_TRANSPARENT_INPUTS_MODIFIABLE,
         FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE,
     },
+    orchard::{Bundle as OrchardBundle, ORCHARD_SPENDS_AND_OUTPUTS_ENABLED},
 };
 
-use zcash_protocol::constants::{V5_TX_VERSION, V5_VERSION_GROUP_ID};
-#[cfg(zcash_unstable = "nu6.3")]
-use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
+#[cfg(feature = "orchard")]
+use crate::orchard::bundle_version_for_revision;
+
+use zcash_protocol::consensus::BranchId;
+use zcash_protocol::constants::{
+    V5_TX_VERSION, V5_VERSION_GROUP_ID, V6_TX_VERSION, V6_VERSION_GROUP_ID,
+};
 
 /// Initial flags allowing any modification.
 const INITIAL_TX_MODIFIABLE: u8 = FLAG_TRANSPARENT_INPUTS_MODIFIABLE
     | FLAG_TRANSPARENT_OUTPUTS_MODIFIABLE
     | FLAG_SHIELDED_MODIFIABLE;
 
-const LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED: u8 = 0b0000_0011;
-#[cfg(zcash_unstable = "nu6.3")]
-const NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED: u8 = 0b0000_0011;
+/// Errors that can occur when creating a PCZT.
+#[derive(Debug)]
+pub enum Error {
+    /// The transaction version implied by the consensus branch ID does not carry an
+    /// Ironwood bundle.
+    IronwoodNotSupported,
+    /// The consensus branch ID does not correspond to any known network upgrade.
+    UnknownConsensusBranchId,
+    /// The network upgrade for the consensus branch ID predates the v5
+    /// transaction format, so it cannot be used to create a PCZT.
+    UnsupportedConsensusBranchId,
+    /// The requested Orchard-protocol flags cannot be represented under the
+    /// Orchard or Ironwood bundle version implied by the consensus branch ID.
+    #[cfg(feature = "orchard")]
+    UnrepresentableOrchardFlags,
+}
+
+/// Returns the network upgrade for `consensus_branch_id`, rejecting unrecognized
+/// branch IDs and any upgrade that predates the v5 transaction format.
+fn consensus_branch_id_for_pczt(consensus_branch_id: u32) -> Result<BranchId, Error> {
+    match BranchId::try_from(consensus_branch_id).map_err(|_| Error::UnknownConsensusBranchId)? {
+        BranchId::Sprout
+        | BranchId::Overwinter
+        | BranchId::Sapling
+        | BranchId::Blossom
+        | BranchId::Heartwood
+        | BranchId::Canopy => Err(Error::UnsupportedConsensusBranchId),
+        branch_id => Ok(branch_id),
+    }
+}
 
 pub struct Creator {
     tx_version: u32,
     version_group_id: u32,
-    consensus_branch_id: u32,
+    consensus_branch_id: BranchId,
     fallback_lock_time: Option<u32>,
     expiry_height: u32,
     coin_type: u32,
     orchard_flags: u8,
+    ironwood_flags: u8,
     sapling_anchor: [u8; 32],
     orchard_anchor: [u8; 32],
+    ironwood_anchor: [u8; 32],
 }
 
 impl Creator {
+    /// Creates a new PCZT for the given consensus branch ID.
+    ///
+    /// The transaction version is implied by the consensus branch ID: the v6
+    /// transaction format from NU6.3 onward, and the v5 format for earlier upgrades.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownConsensusBranchId`] if `consensus_branch_id` is not
+    /// a recognized branch ID, or [`Error::UnsupportedConsensusBranchId`] if it
+    /// predates the v5 transaction format.
     pub fn new(
         consensus_branch_id: u32,
         expiry_height: u32,
         coin_type: u32,
         sapling_anchor: [u8; 32],
         orchard_anchor: [u8; 32],
-    ) -> Self {
-        Self {
-            // Default to v5 transaction format.
-            tx_version: V5_TX_VERSION,
-            version_group_id: V5_VERSION_GROUP_ID,
-            consensus_branch_id,
+    ) -> Result<Self, Error> {
+        let branch_id = consensus_branch_id_for_pczt(consensus_branch_id)?;
+
+        let (tx_version, version_group_id) = match branch_id {
+            // Pre-NU5 branches are rejected by `consensus_branch_id_for_pczt`; NU5
+            // through NU6.2 use the v5 transaction format.
+            BranchId::Sprout
+            | BranchId::Overwinter
+            | BranchId::Sapling
+            | BranchId::Blossom
+            | BranchId::Heartwood
+            | BranchId::Canopy
+            | BranchId::Nu5
+            | BranchId::Nu6
+            | BranchId::Nu6_1
+            | BranchId::Nu6_2 => (V5_TX_VERSION, V5_VERSION_GROUP_ID),
+            BranchId::Nu6_3 => (V6_TX_VERSION, V6_VERSION_GROUP_ID),
+            #[cfg(zcash_unstable = "nu7")]
+            BranchId::Nu7 => (V6_TX_VERSION, V6_VERSION_GROUP_ID),
+        };
+
+        Ok(Self {
+            tx_version,
+            version_group_id,
+            consensus_branch_id: branch_id,
             fallback_lock_time: None,
             expiry_height,
             coin_type,
-            orchard_flags: LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            orchard_flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
+            ironwood_flags: crate::orchard::IRONWOOD_SPENDS_OUTPUTS_AND_CROSS_ADDRESS_ENABLED,
             sapling_anchor,
             orchard_anchor,
-        }
+            ironwood_anchor: [0; 32],
+        })
     }
 
-    /// Creates a base PCZT using the v6 transaction format.
-    ///
-    /// Use this constructor when Ironwood metadata is needed. [`Creator::new`]
-    /// always creates a version 5 PCZT.
-    #[cfg(zcash_unstable = "nu6.3")]
-    pub fn new_v6(
-        consensus_branch_id: u32,
-        expiry_height: u32,
-        coin_type: u32,
-        sapling_anchor: [u8; 32],
-        orchard_anchor: [u8; 32],
-        ironwood_anchor: [u8; 32],
-    ) -> V6Creator {
-        V6Creator {
-            consensus_branch_id,
-            fallback_lock_time: None,
-            expiry_height,
-            coin_type,
-            sapling_anchor,
-            orchard_anchor,
-            orchard_flags: NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED,
-            ironwood_flags: crate::IRONWOOD_SPENDS_AND_OUTPUTS_ENABLED,
-            ironwood_anchor,
-        }
+    /// Returns the bundle version in effect for the given Orchard-protocol value pool
+    /// under this Creator's consensus branch ID, or `None` if the pool is not
+    /// supported under that branch.
+    #[cfg(feature = "orchard")]
+    fn bundle_version(&self, pool: orchard::ValuePool) -> Option<orchard::bundle::BundleVersion> {
+        self.consensus_branch_id
+            .orchard_protocol_revision()
+            .and_then(|revision| bundle_version_for_revision(revision, pool))
     }
 
     pub fn with_fallback_lock_time(mut self, fallback: u32) -> Self {
@@ -90,16 +139,67 @@ impl Creator {
         self
     }
 
+    /// Sets the Orchard flags for the PCZT.
+    ///
+    /// The flags are validated against, and encoded under, the Orchard bundle
+    /// version implied by the consensus branch ID passed to [`Creator::new`]
+    /// (which also fixes the note-plaintext version).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnrepresentableOrchardFlags`] if `flags` cannot be encoded
+    /// under that bundle version (e.g. cross-address-enabled flags under a
+    /// post-NU6.3 Orchard version, or cross-address-disabled flags under a pre-NU6.3
+    /// Orchard version).
     #[cfg(feature = "orchard")]
-    pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
-        let pool_restrictions = crate::orchard_pool_restrictions_for_branch(
-            zcash_protocol::consensus::BranchId::try_from(self.consensus_branch_id)
-                .expect("Creator was constructed with a valid consensus branch id"),
-        );
+    pub fn with_orchard_flags(
+        mut self,
+        orchard_flags: orchard::bundle::Flags,
+    ) -> Result<Self, Error> {
         self.orchard_flags = orchard_flags
-            .to_byte(pool_restrictions)
-            .expect("Orchard flags must be encodable for the transaction's consensus branch");
-        self
+            .to_byte(
+                self.bundle_version(orchard::ValuePool::Orchard)
+                    .expect("`Creator::new` rejects branches that predate NU5"),
+            )
+            .ok_or(Error::UnrepresentableOrchardFlags)?;
+        Ok(self)
+    }
+
+    /// Sets the Ironwood anchor for the PCZT.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IronwoodNotSupported`] if the transaction version implied by
+    /// the consensus branch ID passed to [`Creator::new`] does not carry an Ironwood
+    /// bundle.
+    pub fn with_ironwood_anchor(mut self, ironwood_anchor: [u8; 32]) -> Result<Self, Error> {
+        if self.tx_version != V6_TX_VERSION {
+            return Err(Error::IronwoodNotSupported);
+        }
+        self.ironwood_anchor = ironwood_anchor;
+        Ok(self)
+    }
+
+    /// Sets the Ironwood flags for the PCZT.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IronwoodNotSupported`] if the transaction version implied by
+    /// the consensus branch ID passed to [`Creator::new`] does not carry an Ironwood
+    /// bundle, or [`Error::UnrepresentableOrchardFlags`] if `flags` cannot be encoded
+    /// under the Ironwood bundle version.
+    #[cfg(feature = "orchard")]
+    pub fn with_ironwood_flags(
+        mut self,
+        ironwood_flags: orchard::bundle::Flags,
+    ) -> Result<Self, Error> {
+        self.ironwood_flags = ironwood_flags
+            .to_byte(
+                self.bundle_version(orchard::ValuePool::Ironwood)
+                    .ok_or(Error::IronwoodNotSupported)?,
+            )
+            .ok_or(Error::UnrepresentableOrchardFlags)?;
+        Ok(self)
     }
 
     pub fn build(self) -> Pczt {
@@ -107,7 +207,7 @@ impl Creator {
             global: crate::common::Global {
                 tx_version: self.tx_version,
                 version_group_id: self.version_group_id,
-                consensus_branch_id: self.consensus_branch_id,
+                consensus_branch_id: self.consensus_branch_id.into(),
                 fallback_lock_time: self.fallback_lock_time,
                 expiry_height: self.expiry_height,
                 coin_type: self.coin_type,
@@ -125,115 +225,33 @@ impl Creator {
                 anchor: self.sapling_anchor,
                 bsk: None,
             },
-            orchard: crate::orchard::Bundle {
+            orchard: OrchardBundle {
                 actions: vec![],
                 flags: self.orchard_flags,
-                value_sum: (0, true),
-                anchor: self.orchard_anchor,
+                value_sum: (0, false),
+                anchor: Some(self.orchard_anchor),
+                // The note-plaintext version is determined by the Orchard bundle version.
+                #[cfg(feature = "orchard")]
+                note_version: self
+                    .bundle_version(orchard::ValuePool::Orchard)
+                    .expect("`Creator::new` rejects branches that predate NU5")
+                    .note_version(),
+                #[cfg(not(feature = "orchard"))]
+                note_version: crate::orchard::NoteVersion::V2,
                 zkproof: None,
                 bsk: None,
             },
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood: crate::empty_ironwood_bundle(),
-        }
-    }
-}
-
-#[cfg(zcash_unstable = "nu6.3")]
-/// Builder returned by [`Creator::new_v6`] for version 6 PCZTs.
-///
-/// This type keeps version 6 and Ironwood-specific configuration separate from
-/// [`Creator`], which always produces version 5 PCZTs.
-pub struct V6Creator {
-    consensus_branch_id: u32,
-    fallback_lock_time: Option<u32>,
-    expiry_height: u32,
-    coin_type: u32,
-    sapling_anchor: [u8; 32],
-    orchard_anchor: [u8; 32],
-    orchard_flags: u8,
-    ironwood_flags: u8,
-    ironwood_anchor: [u8; 32],
-}
-
-#[cfg(zcash_unstable = "nu6.3")]
-impl V6Creator {
-    pub fn with_fallback_lock_time(mut self, fallback: u32) -> Self {
-        self.fallback_lock_time = Some(fallback);
-        self
-    }
-
-    #[cfg(feature = "orchard")]
-    pub fn with_orchard_flags(mut self, orchard_flags: orchard::bundle::Flags) -> Self {
-        self.orchard_flags = orchard_flags
-            .to_byte(orchard::bundle::BundleVersion::orchard_v3())
-            .expect("Orchard flags must be encodable in the NU6.3 format");
-        self
-    }
-
-    #[cfg(feature = "orchard")]
-    pub fn with_ironwood_flags(mut self, ironwood_flags: orchard::bundle::Flags) -> Self {
-        self.ironwood_flags = ironwood_flags
-            .to_byte(orchard::bundle::BundleVersion::ironwood_v3())
-            .expect("Ironwood flags must be encodable in the NU6.3 format");
-        self
-    }
-
-    pub fn with_ironwood_anchor(mut self, ironwood_anchor: [u8; 32]) -> Self {
-        self.ironwood_anchor = ironwood_anchor;
-        self
-    }
-
-    pub fn build(self) -> Pczt {
-        Pczt {
-            global: crate::common::Global {
-                tx_version: V6_TX_VERSION,
-                version_group_id: V6_VERSION_GROUP_ID,
-                consensus_branch_id: self.consensus_branch_id,
-                fallback_lock_time: self.fallback_lock_time,
-                expiry_height: self.expiry_height,
-                coin_type: self.coin_type,
-                tx_modifiable: INITIAL_TX_MODIFIABLE,
-                proprietary: BTreeMap::new(),
-            },
-            transparent: crate::transparent::Bundle {
-                inputs: vec![],
-                outputs: vec![],
-            },
-            sapling: crate::sapling::Bundle {
-                spends: vec![],
-                outputs: vec![],
-                value_sum: 0,
-                anchor: self.sapling_anchor,
-                bsk: None,
-            },
-            orchard: crate::orchard::Bundle {
-                actions: vec![],
-                flags: self.orchard_flags,
-                value_sum: (0, true),
-                anchor: self.orchard_anchor,
-                zkproof: None,
-                bsk: None,
-            },
-            ironwood: crate::orchard::Bundle {
-                actions: vec![],
+            ironwood: OrchardBundle {
                 flags: self.ironwood_flags,
-                value_sum: (0, true),
-                anchor: self.ironwood_anchor,
-                zkproof: None,
-                bsk: None,
+                anchor: Some(self.ironwood_anchor),
+                ..crate::orchard::EMPTY_IRONWOOD
             },
         }
     }
-}
 
-impl Creator {
     /// Builds a PCZT from the output of a [`Builder`].
     ///
-    /// Returns `None` if the `TxVersion` is incompatible with PCZTs, or if
-    /// Orchard-shaped bundles use note plaintext versions that are invalid for
-    /// their pools, or if Ironwood bundle data is present for a transaction
-    /// version that does not support Ironwood.
+    /// Returns `None` if the `TxVersion` is incompatible with PCZTs.
     ///
     /// [`Builder`]: zcash_primitives::transaction::builder::Builder
     #[cfg(feature = "zcp-builder")]
@@ -250,18 +268,8 @@ impl Creator {
             | zcash_primitives::transaction::TxVersion::V3 => None,
             zcash_primitives::transaction::TxVersion::V4 => Some(V4_TX_VERSION),
             zcash_primitives::transaction::TxVersion::V5 => Some(V5_TX_VERSION),
-            #[cfg(zcash_unstable = "nu6.3")]
             zcash_primitives::transaction::TxVersion::V6 => Some(V6_TX_VERSION),
-            #[cfg(zcash_unstable = "zfuture")]
-            zcash_primitives::transaction::TxVersion::ZFuture => None,
         }?;
-        if !parts.version.valid_in_branch(parts.consensus_branch_id) {
-            return None;
-        }
-        #[cfg(zcash_unstable = "nu6.3")]
-        if !parts.version.has_ironwood() && parts.ironwood.is_some() {
-            return None;
-        }
 
         // Spends and outputs not modifiable.
         let mut tx_modifiable = 0b0000_0000;
@@ -273,64 +281,6 @@ impl Creator {
         }) {
             tx_modifiable |= FLAG_HAS_SIGHASH_SINGLE;
         }
-
-        let orchard_bundle_format =
-            crate::orchard_pool_restrictions_for_branch(parts.consensus_branch_id);
-        #[cfg(zcash_unstable = "nu6.3")]
-        let default_orchard_flags = match orchard_bundle_format.protocol_version() {
-            // Pre-NU6.2 (`orchard_insecure_v1`) and NU6.2 (`orchard_v2`) Orchard bundles
-            // permit cross-address transfers; from NU6.3 (`orchard_v3`) onward the Orchard
-            // pool mandates the cross-address restriction.
-            orchard::ProtocolVersion::InsecureV1 | orchard::ProtocolVersion::V2 => {
-                LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED
-            }
-            orchard::ProtocolVersion::V3 => NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED,
-        };
-        #[cfg(not(zcash_unstable = "nu6.3"))]
-        let default_orchard_flags = LEGACY_ORCHARD_SPENDS_AND_OUTPUTS_ENABLED;
-        // Reject an Orchard bundle whose flags cannot be encoded under this
-        // transaction's Orchard pool restriction (e.g. an Ironwood bundle, which
-        // permits cross-address transfers, supplied as Orchard parts). Without
-        // this, `serialize_from` would panic instead of failing gracefully.
-        if let Some(bundle) = parts.orchard.as_ref() {
-            bundle.flags().to_byte(orchard_bundle_format)?;
-        }
-        let orchard = parts
-            .orchard
-            .map(|bundle| crate::orchard::Bundle::serialize_from(bundle, orchard_bundle_format))
-            .unwrap_or_else(|| crate::orchard::Bundle {
-                actions: vec![],
-                flags: default_orchard_flags,
-                value_sum: (0, true),
-                anchor: orchard::Anchor::empty_tree().to_bytes(),
-                zkproof: None,
-                bsk: None,
-            });
-        orchard.validate_orchard_note_plaintext_versions().ok()?;
-
-        #[cfg(zcash_unstable = "nu6.3")]
-        let ironwood = if parts.version.has_ironwood() {
-            parts
-                .ironwood
-                .map(|bundle| {
-                    crate::orchard::Bundle::serialize_from(
-                        bundle,
-                        orchard::bundle::BundleVersion::ironwood_v3(),
-                    )
-                })
-                .unwrap_or_else(crate::empty_ironwood_bundle)
-        } else {
-            if parts
-                .ironwood
-                .as_ref()
-                .is_some_and(|bundle| !bundle.actions().is_empty())
-            {
-                return None;
-            }
-            crate::empty_ironwood_bundle()
-        };
-        #[cfg(zcash_unstable = "nu6.3")]
-        ironwood.validate_ironwood_note_plaintext_versions().ok()?;
 
         Some(Pczt {
             global: crate::common::Global {
@@ -346,162 +296,61 @@ impl Creator {
             transparent: parts
                 .transparent
                 .map(crate::transparent::Bundle::serialize_from)
-                .unwrap_or_else(|| crate::transparent::Bundle {
-                    inputs: vec![],
-                    outputs: vec![],
-                }),
+                .unwrap_or(crate::transparent::EMPTY_BUNDLE),
             sapling: parts
                 .sapling
                 .map(crate::sapling::Bundle::serialize_from)
-                .unwrap_or_else(|| crate::sapling::Bundle {
-                    spends: vec![],
-                    outputs: vec![],
-                    value_sum: 0,
-                    anchor: sapling::Anchor::empty_tree().to_bytes(),
-                    bsk: None,
-                }),
-            orchard,
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood,
+                .unwrap_or(crate::sapling::EMPTY_BUNDLE),
+            orchard: parts
+                .orchard
+                .map(OrchardBundle::serialize_from)
+                .unwrap_or(crate::orchard::EMPTY_ORCHARD),
+            ironwood: parts
+                .ironwood
+                .map(OrchardBundle::serialize_from)
+                .unwrap_or(crate::orchard::EMPTY_IRONWOOD),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(zcash_unstable = "nu6.3")]
-    use super::*;
-    #[cfg(zcash_unstable = "nu6.3")]
     use zcash_protocol::consensus::BranchId;
+    use zcash_protocol::constants::{
+        V5_TX_VERSION, V5_VERSION_GROUP_ID, V6_TX_VERSION, V6_VERSION_GROUP_ID,
+    };
 
-    #[cfg(zcash_unstable = "nu6.3")]
+    use super::{Creator, Error};
+
     #[test]
-    fn new_keeps_legacy_v5_format_on_nu6_3_branch() {
-        let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32]).build();
-        let fallback = crate::empty_ironwood_bundle();
-
+    fn tx_version_follows_branch() {
+        let pczt = Creator::new(BranchId::Nu6_2.into(), 10_000_000, 133, [0; 32], [0; 32])
+            .unwrap()
+            .build();
         assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
         assert_eq!(pczt.global.version_group_id, V5_VERSION_GROUP_ID);
-        assert!(pczt.ironwood.actions.is_empty());
-        assert_eq!(pczt.ironwood.flags, fallback.flags);
-        assert_eq!(pczt.ironwood.value_sum, fallback.value_sum);
-        assert_eq!(pczt.ironwood.anchor, fallback.anchor);
-        assert_eq!(pczt.ironwood.zkproof, fallback.zkproof);
-        assert_eq!(pczt.ironwood.bsk, fallback.bsk);
-    }
 
-    #[cfg(zcash_unstable = "nu6.3")]
-    #[test]
-    fn new_v6_selects_v6() {
-        let pczt = Creator::new_v6(
-            BranchId::Nu6_3.into(),
-            10_000_000,
-            133,
-            [0; 32],
-            [0; 32],
-            [1; 32],
-        )
-        .build();
-
+        let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
+            .unwrap()
+            .build();
         assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
         assert_eq!(pczt.global.version_group_id, V6_VERSION_GROUP_ID);
-        assert_eq!(pczt.orchard.flags, NU6_3_ORCHARD_CROSS_ADDRESS_DISABLED);
-        assert_eq!(pczt.ironwood.anchor, [1; 32]);
     }
 
-    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
     #[test]
-    fn explicit_orchard_flags_use_selected_format() {
-        // Per ZIP 229 the NU6.3 Orchard cross-address restriction applies to v5
-        // transactions too, so a v5 PCZT at NU6.3 must disable cross-address.
+    fn ironwood_anchor_requires_v6() {
+        assert!(matches!(
+            Creator::new(BranchId::Nu6_2.into(), 10_000_000, 133, [0; 32], [0; 32])
+                .unwrap()
+                .with_ironwood_anchor([1; 32]),
+            Err(Error::IronwoodNotSupported)
+        ));
+
         let pczt = Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, [0; 32], [0; 32])
-            .with_orchard_flags(orchard::bundle::Flags::CROSS_ADDRESS_DISABLED)
+            .unwrap()
+            .with_ironwood_anchor([1; 32])
+            .unwrap()
             .build();
-
-        assert_eq!(pczt.global.tx_version, V5_TX_VERSION);
-        assert_eq!(pczt.orchard.flags, 0b0000_0011);
-
-        // The Orchard pool at NU6.3 forbids cross-address transfers, so a v6
-        // Orchard bundle must disable them; the encoded byte never sets bit 2.
-        // (`with_orchard_flags(Flags::ENABLED)` is not representable for v6.)
-        let pczt = Creator::new_v6(
-            BranchId::Nu6_3.into(),
-            10_000_000,
-            133,
-            [0; 32],
-            [0; 32],
-            [1; 32],
-        )
-        .with_orchard_flags(orchard::bundle::Flags::CROSS_ADDRESS_DISABLED)
-        .build();
-
-        assert_eq!(pczt.global.tx_version, V6_TX_VERSION);
-        assert_eq!(pczt.orchard.flags, 0b0000_0011);
-    }
-
-    #[cfg(all(zcash_unstable = "nu6.3", feature = "zcp-builder"))]
-    #[test]
-    fn build_from_parts_uses_empty_ironwood_bundle() {
-        let pczt = Creator::build_from_parts(zcash_primitives::transaction::builder::PcztParts {
-            params: zcash_protocol::consensus::Network::TestNetwork,
-            version: zcash_primitives::transaction::TxVersion::V6,
-            consensus_branch_id: BranchId::Nu6_3,
-            lock_time: 0,
-            expiry_height: 0u32.into(),
-            transparent: None,
-            sapling: None,
-            orchard: None,
-            ironwood: None,
-        })
-        .unwrap();
-        let fallback = crate::empty_ironwood_bundle();
-
-        assert!(pczt.ironwood.actions.is_empty());
-        assert_eq!(pczt.ironwood.flags, fallback.flags);
-        assert_eq!(pczt.ironwood.value_sum, fallback.value_sum);
-        assert_eq!(pczt.ironwood.anchor, fallback.anchor);
-        assert_eq!(pczt.ironwood.zkproof, fallback.zkproof);
-        assert_eq!(pczt.ironwood.bsk, fallback.bsk);
-    }
-
-    #[cfg(all(zcash_unstable = "nu6.3", feature = "zcp-builder"))]
-    #[test]
-    fn build_from_parts_rejects_version_invalid_for_branch() {
-        assert!(
-            Creator::build_from_parts(zcash_primitives::transaction::builder::PcztParts {
-                params: zcash_protocol::consensus::Network::TestNetwork,
-                version: zcash_primitives::transaction::TxVersion::V6,
-                consensus_branch_id: BranchId::Nu5,
-                lock_time: 0,
-                expiry_height: 0u32.into(),
-                transparent: None,
-                sapling: None,
-                orchard: None,
-                ironwood: None,
-            })
-            .is_none()
-        );
-    }
-
-    #[cfg(all(zcash_unstable = "nu6.3", feature = "zcp-builder"))]
-    #[test]
-    fn build_from_parts_rejects_metadata_only_ironwood_for_v5() {
-        let mut ironwood = crate::empty_ironwood_bundle();
-        ironwood.anchor = [1; 32];
-
-        assert!(
-            Creator::build_from_parts(zcash_primitives::transaction::builder::PcztParts {
-                params: zcash_protocol::consensus::Network::TestNetwork,
-                version: zcash_primitives::transaction::TxVersion::V5,
-                consensus_branch_id: BranchId::Nu5,
-                lock_time: 0,
-                expiry_height: 0u32.into(),
-                transparent: None,
-                sapling: None,
-                orchard: None,
-                ironwood: Some(ironwood.into_parsed_ironwood().unwrap()),
-            })
-            .is_none()
-        );
+        assert_eq!(pczt.ironwood.anchor, Some([1; 32]));
     }
 }

@@ -29,17 +29,12 @@ impl IoFinalizer {
     pub fn finalize_io(self) -> Result<Pczt, Error> {
         let Self { pczt } = self;
 
-        #[cfg(zcash_unstable = "nu6.3")]
-        let ironwood_actions_empty = pczt.ironwood.actions.is_empty();
-        #[cfg(not(zcash_unstable = "nu6.3"))]
-        let ironwood_actions_empty = true;
-
-        let has_shielded_spends = !(pczt.sapling.spends.is_empty()
-            && pczt.orchard.actions.is_empty()
-            && ironwood_actions_empty);
-        let has_shielded_outputs = !(pczt.sapling.outputs.is_empty()
-            && pczt.orchard.actions.is_empty()
-            && ironwood_actions_empty);
+        let has_orchard_actions = !pczt.orchard.actions.is_empty();
+        let has_ironwood_actions = !pczt.ironwood.actions.is_empty();
+        let has_shielded_spends =
+            !(pczt.sapling.spends.is_empty() && !has_orchard_actions && !has_ironwood_actions);
+        let has_shielded_outputs =
+            !(pczt.sapling.outputs.is_empty() && !has_orchard_actions && !has_ironwood_actions);
 
         // We can't build a transaction that has no spends or outputs.
         // However, we don't attempt to reject an entirely dummy transaction.
@@ -55,7 +50,6 @@ impl IoFinalizer {
             transparent,
             mut sapling,
             mut orchard,
-            #[cfg(zcash_unstable = "nu6.3")]
             mut ironwood,
             tx_data,
         } = pczt.extract_tx_data(
@@ -65,7 +59,6 @@ impl IoFinalizer {
             },
             |s| s.extract_effects().map_err(ExtractError::SaplingExtract),
             |o| o.extract_effects().map_err(ExtractError::OrchardExtract),
-            #[cfg(zcash_unstable = "nu6.3")]
             |i| i.extract_effects().map_err(ExtractError::IronwoodExtract),
         )?;
 
@@ -79,33 +72,33 @@ impl IoFinalizer {
         let txid_parts = tx_data.digest(TxIdDigester);
         let shielded_sighash = sighash(&tx_data, &SignableInput::Shielded, &txid_parts);
 
+        // The Sapling bundle is always finalized: unlike the Orchard-protocol
+        // Transaction Extractor, the Sapling one requires `bsk` to be set even when
+        // the bundle is empty.
         sapling
             .finalize_io(shielded_sighash, OsRng)
             .map_err(Error::SaplingFinalize)?;
-        orchard
-            .finalize_io(shielded_sighash, OsRng)
-            .map_err(Error::OrchardFinalize)?;
-        #[cfg(zcash_unstable = "nu6.3")]
-        let ironwood = if tx_data.version().has_ironwood() {
+        // An empty Orchard-protocol bundle carries no value commitment information
+        // and contributes nothing to the transaction; leave its `bsk` unset so that
+        // it stays in its canonical empty form (and so remains omissible by, or
+        // representable in, the serialization formats).
+        if has_orchard_actions {
+            orchard
+                .finalize_io(shielded_sighash, OsRng)
+                .map_err(Error::OrchardFinalize)?;
+        }
+        if has_ironwood_actions {
             ironwood
                 .finalize_io(shielded_sighash, OsRng)
                 .map_err(Error::IronwoodFinalize)?;
-            crate::orchard::Bundle::serialize_from(
-                ironwood,
-                orchard::bundle::BundleVersion::ironwood_v3(),
-            )
-        } else {
-            crate::empty_ironwood_bundle()
-        };
-        let orchard_bundle_format = crate::orchard_bundle_format(&global);
+        }
 
         Ok(Pczt {
             global,
             transparent: crate::transparent::Bundle::serialize_from(transparent),
             sapling: crate::sapling::Bundle::serialize_from(sapling),
-            orchard: crate::orchard::Bundle::serialize_from(orchard, orchard_bundle_format),
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood,
+            orchard: crate::orchard::Bundle::serialize_from(orchard),
+            ironwood: crate::orchard::Bundle::serialize_from(ironwood),
         })
     }
 }
@@ -114,10 +107,9 @@ impl IoFinalizer {
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
-    #[cfg(zcash_unstable = "nu6.3")]
-    IronwoodFinalize(orchard::pczt::IoFinalizerError),
     NoOutputs,
     NoSpends,
+    IronwoodFinalize(orchard::pczt::IoFinalizerError),
     OrchardFinalize(orchard::pczt::IoFinalizerError),
     SaplingFinalize(sapling::pczt::IoFinalizerError),
 }

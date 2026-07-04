@@ -1,4 +1,4 @@
-use orchard::pczt::{Updater, UpdaterError};
+use orchard::pczt::{ParseError, Updater, UpdaterError};
 
 use crate::Pczt;
 
@@ -13,13 +13,14 @@ impl super::Updater {
             transparent,
             sapling,
             orchard,
-            #[cfg(zcash_unstable = "nu6.3")]
             ironwood,
         } = self.pczt;
 
-        let bundle_format = crate::orchard_bundle_format(&global);
         let mut bundle = orchard
-            .into_parsed_orchard(bundle_format)
+            .into_parsed_with_version(
+                crate::orchard::orchard_bundle_version(&global)
+                    .ok_or(OrchardError::UnsupportedConsensusBranchId)?,
+            )
             .map_err(OrchardError::Parser)?;
 
         bundle.update_with(f).map_err(OrchardError::Updater)?;
@@ -29,18 +30,13 @@ impl super::Updater {
                 global,
                 transparent,
                 sapling,
-                orchard: crate::orchard::Bundle::serialize_from(bundle, bundle_format),
-                #[cfg(zcash_unstable = "nu6.3")]
+                orchard: crate::orchard::Bundle::serialize_from(bundle),
                 ironwood,
             },
         })
     }
 
     /// Updates the Ironwood bundle with information in the given closure.
-    ///
-    /// Returns an error without invoking the closure if the PCZT is not version 6 on
-    /// NU6.3.
-    #[cfg(zcash_unstable = "nu6.3")]
     pub fn update_ironwood_with<F>(self, f: F) -> Result<Self, OrchardError>
     where
         F: FnOnce(Updater<'_>) -> Result<(), UpdaterError>,
@@ -53,12 +49,8 @@ impl super::Updater {
             ironwood,
         } = self.pczt;
 
-        crate::common::ensure_v6_consensus_branch(&global)
-            .map_err(crate::orchard::BundleParseError::from)
-            .map_err(OrchardError::Parser)?;
-
         let mut bundle = ironwood
-            .into_parsed_ironwood()
+            .into_ironwood_parsed()
             .map_err(OrchardError::Parser)?;
 
         bundle.update_with(f).map_err(OrchardError::Updater)?;
@@ -69,10 +61,7 @@ impl super::Updater {
                 transparent,
                 sapling,
                 orchard,
-                ironwood: crate::orchard::Bundle::serialize_from(
-                    bundle,
-                    orchard::bundle::BundleVersion::ironwood_v3(),
-                ),
+                ironwood: crate::orchard::Bundle::serialize_from(bundle),
             },
         })
     }
@@ -81,6 +70,9 @@ impl super::Updater {
 /// Errors that can occur while updating the Orchard bundle of a PCZT.
 #[derive(Debug)]
 pub enum OrchardError {
-    Parser(crate::orchard::BundleParseError),
+    Parser(ParseError),
+    /// The PCZT's consensus branch ID is unrecognized, or predates NU5 (under which
+    /// the Orchard protocol is not supported).
+    UnsupportedConsensusBranchId,
     Updater(UpdaterError),
 }

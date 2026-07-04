@@ -12,54 +12,100 @@ impl Signer {
         Self { pczt }
     }
 
-    /// Exposes the capability to sign the Orchard spends.
+    /// Exposes the capability to sign the Ironwood spends.
+    ///
+    /// The bundle is parsed with a preverified signing parse that skips deriving each
+    /// spend's `FullViewingKey` (an expensive step the spend authorization signature
+    /// does not depend on). Callers that rely on the wire `fvk` bytes MUST have
+    /// already run the full Verifier checks over the identical PCZT bytes: they are
+    /// not validated here, and the signing closure sees each spend's `fvk` as `None`.
+    ///
+    /// Any elided derived fields (and an elided anchor) are recomputed and filled in
+    /// place before parsing, so the returned PCZT carries them populated; see
+    /// [`crate::orchard::Bundle::fill_derived_fields`]. On error the fill may be
+    /// retained.
+    ///
+    /// The signing closure must not add, remove, or reorder actions. A well-behaved
+    /// closure leaves the returned PCZT's wire `fvk` bytes unchanged; a violating one
+    /// is detected and returns [`OrchardParseError::SigningClosureModifiedActions`]
+    /// without applying its changes.
     #[cfg(feature = "orchard")]
-    pub fn sign_orchard_with<E, F>(self, f: F) -> Result<Self, E>
+    pub fn sign_ironwood_with<E, F>(self, f: F) -> Result<Self, E>
     where
-        E: From<crate::orchard::BundleParseError>,
+        E: From<OrchardParseError>,
         F: FnOnce(&Pczt, &mut orchard::pczt::Bundle, &mut u8) -> Result<(), E>,
     {
         let mut pczt = self.pczt;
 
         let mut tx_modifiable = pczt.global.tx_modifiable;
-        let bundle_format = crate::orchard_bundle_format(&pczt.global);
 
-        let mut bundle = pczt.orchard.clone().into_parsed_orchard(bundle_format)?;
+        // Fill any elided derived field on the wire bundle first, so the `rk`
+        // snapshotted below is always present.
+        pczt.ironwood
+            .fill_derived_fields()
+            .map_err(|e| E::from(OrchardParseError::Fill(e)))?;
+        let fvk_snapshot = snapshot_spend_fvks(&pczt.ironwood);
+        let mut bundle = pczt
+            .ironwood
+            .clone()
+            .into_ironwood_parsed_preverified_for_signing()
+            .map_err(OrchardParseError::Parse)?;
 
         f(&pczt, &mut bundle, &mut tx_modifiable)?;
 
         pczt.global.tx_modifiable = tx_modifiable;
-        pczt.orchard = crate::orchard::Bundle::serialize_from(bundle, bundle_format);
+        pczt.ironwood = crate::orchard::Bundle::serialize_from(bundle);
+        restore_spend_fvks(&mut pczt.ironwood, &fvk_snapshot).map_err(E::from)?;
 
         Ok(Self { pczt })
     }
 
-    /// Exposes the capability to sign the Ironwood spends.
+    /// Exposes the capability to sign the Orchard spends.
     ///
-    /// Returns an error without invoking the closure if the PCZT is not version 6 on
-    /// NU6.3.
-    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-    pub fn sign_ironwood_with<E, F>(self, f: F) -> Result<Self, E>
+    /// The bundle is parsed with a preverified signing parse that skips deriving each
+    /// spend's `FullViewingKey` (an expensive step the spend authorization signature
+    /// does not depend on). Callers that rely on the wire `fvk` bytes MUST have
+    /// already run the full Verifier checks over the identical PCZT bytes: they are
+    /// not validated here, and the signing closure sees each spend's `fvk` as `None`.
+    ///
+    /// Any elided derived fields (and an elided anchor) are recomputed and filled in
+    /// place before parsing, so the returned PCZT carries them populated; see
+    /// [`crate::orchard::Bundle::fill_derived_fields`]. On error the fill may be
+    /// retained.
+    ///
+    /// The signing closure must not add, remove, or reorder actions. A well-behaved
+    /// closure leaves the returned PCZT's wire `fvk` bytes unchanged; a violating one
+    /// is detected and returns [`OrchardParseError::SigningClosureModifiedActions`]
+    /// without applying its changes.
+    #[cfg(feature = "orchard")]
+    pub fn sign_orchard_with<E, F>(self, f: F) -> Result<Self, E>
     where
-        E: From<crate::orchard::BundleParseError>,
+        E: From<OrchardParseError>,
         F: FnOnce(&Pczt, &mut orchard::pczt::Bundle, &mut u8) -> Result<(), E>,
     {
         let mut pczt = self.pczt;
 
-        crate::common::ensure_v6_consensus_branch(&pczt.global)
-            .map_err(crate::orchard::BundleParseError::from)?;
-
         let mut tx_modifiable = pczt.global.tx_modifiable;
 
-        let mut bundle = pczt.ironwood.clone().into_parsed_ironwood()?;
+        let bundle_version = crate::orchard::orchard_bundle_version(&pczt.global)
+            .ok_or(OrchardParseError::UnsupportedConsensusBranchId)?;
+        // Fill any elided derived field on the wire bundle first, so the `rk`
+        // snapshotted below is always present.
+        pczt.orchard
+            .fill_derived_fields()
+            .map_err(|e| E::from(OrchardParseError::Fill(e)))?;
+        let fvk_snapshot = snapshot_spend_fvks(&pczt.orchard);
+        let mut bundle = pczt
+            .orchard
+            .clone()
+            .into_parsed_with_version_preverified_for_signing(bundle_version)
+            .map_err(OrchardParseError::Parse)?;
 
         f(&pczt, &mut bundle, &mut tx_modifiable)?;
 
         pczt.global.tx_modifiable = tx_modifiable;
-        pczt.ironwood = crate::orchard::Bundle::serialize_from(
-            bundle,
-            orchard::bundle::BundleVersion::ironwood_v3(),
-        );
+        pczt.orchard = crate::orchard::Bundle::serialize_from(bundle);
+        restore_spend_fvks(&mut pczt.orchard, &fvk_snapshot).map_err(E::from)?;
 
         Ok(Self { pczt })
     }
@@ -109,5 +155,178 @@ impl Signer {
     /// Finishes the low-level Signer role, returning the updated PCZT.
     pub fn finish(self) -> Pczt {
         self.pczt
+    }
+}
+
+/// A by-position snapshot of each spend's wire `(rk, fvk)` bytes: the `fvk` that the
+/// preverified signing parse drops and must restore, paired with the `rk` used as a
+/// per-position tamper check. See [`restore_spend_fvks`].
+#[cfg(feature = "orchard")]
+type SpendFvkSnapshot = alloc::vec::Vec<(Option<[u8; 32]>, Option<[u8; 96]>)>;
+
+/// Snapshots each action's spend `(rk, fvk)` wire bytes, by position, for
+/// [`restore_spend_fvks`] to restore after serialization.
+#[cfg(feature = "orchard")]
+fn snapshot_spend_fvks(bundle: &crate::orchard::Bundle) -> SpendFvkSnapshot {
+    bundle
+        .actions()
+        .iter()
+        .map(|action| (action.spend.rk, action.spend.fvk))
+        .collect()
+}
+
+/// Restores the wire `fvk` bytes from [`snapshot_spend_fvks`] into each spend by
+/// position, after checking the signing closure did not resize or reorder the action
+/// list.
+///
+/// Positional restore is only sound if each position still holds its original action,
+/// so this checks the action count and each position's wire `rk` — the spend field
+/// that pins an action's identity (a nullifier can be shared, and the pre-parse fill
+/// guarantees `rk` is present when the snapshot is taken) — against the snapshot
+/// before writing any `fvk`. On a mismatch it writes nothing and returns
+/// [`OrchardParseError::SigningClosureModifiedActions`].
+#[cfg(feature = "orchard")]
+fn restore_spend_fvks(
+    bundle: &mut crate::orchard::Bundle,
+    snapshot: &SpendFvkSnapshot,
+) -> Result<(), OrchardParseError> {
+    // Reject a resized or reordered list before writing: a count change misaligns
+    // every later `fvk`, and a reorder moves `rk`s off their snapshotted positions.
+    if bundle.actions.len() != snapshot.len() {
+        return Err(OrchardParseError::SigningClosureModifiedActions);
+    }
+    for (action, (rk, _)) in bundle.actions.iter().zip(snapshot) {
+        if action.spend.rk != *rk {
+            return Err(OrchardParseError::SigningClosureModifiedActions);
+        }
+    }
+    for (action, (_, fvk)) in bundle.actions.iter_mut().zip(snapshot) {
+        action.spend.fvk = *fvk;
+    }
+    Ok(())
+}
+
+/// Errors that can occur while parsing an Orchard-protocol bundle of a PCZT for
+/// signing.
+#[cfg(feature = "orchard")]
+#[derive(Debug)]
+pub enum OrchardParseError {
+    /// The bundle data was structurally invalid.
+    Parse(orchard::pczt::ParseError),
+    /// An elided derived field could not be recomputed and filled before parsing.
+    Fill(crate::orchard::FillError),
+    /// The PCZT's consensus branch ID is unrecognized, or predates NU5 (under which
+    /// the Orchard protocol is not supported).
+    UnsupportedConsensusBranchId,
+    /// A signing closure passed to [`Signer::sign_orchard_with`] or
+    /// [`Signer::sign_ironwood_with`] added, removed, or reordered actions, which
+    /// those methods forbid. The PCZT is left unmodified.
+    SigningClosureModifiedActions,
+}
+
+#[cfg(feature = "orchard")]
+impl From<orchard::pczt::ParseError> for OrchardParseError {
+    fn from(e: orchard::pczt::ParseError) -> Self {
+        OrchardParseError::Parse(e)
+    }
+}
+
+#[cfg(all(test, feature = "orchard"))]
+mod tests {
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use crate::orchard::{Action, Bundle, NoteVersion, Output, Spend};
+
+    use super::{OrchardParseError, restore_spend_fvks, snapshot_spend_fvks};
+
+    #[test]
+    fn restore_spend_fvks_preserves_duplicate_nullifiers_by_position() {
+        let first_fvk = Some([7u8; 96]);
+        let second_fvk = Some([9u8; 96]);
+        // Shared nullifier, distinct `rk`s: proves the restore keys on position, not
+        // the (here ambiguous) nullifier.
+        let mut bundle = bundle_with_duplicate_nullifier_fvks([first_fvk, second_fvk]);
+        let snapshot = snapshot_spend_fvks(&bundle);
+
+        bundle.actions[0].spend.fvk = None;
+        bundle.actions[1].spend.fvk = None;
+
+        restore_spend_fvks(&mut bundle, &snapshot).expect("actions were not modified");
+
+        assert_eq!(bundle.actions[0].spend.fvk, first_fvk);
+        assert_eq!(bundle.actions[1].spend.fvk, second_fvk);
+    }
+
+    #[test]
+    fn restore_spend_fvks_rejects_reordered_actions() {
+        let first_fvk = Some([7u8; 96]);
+        let second_fvk = Some([9u8; 96]);
+        let mut bundle = bundle_with_duplicate_nullifier_fvks([first_fvk, second_fvk]);
+        let snapshot = snapshot_spend_fvks(&bundle);
+
+        // A signing closure swaps the two actions; their distinct wire `rk`s move too.
+        bundle.actions.swap(0, 1);
+
+        assert!(matches!(
+            restore_spend_fvks(&mut bundle, &snapshot),
+            Err(OrchardParseError::SigningClosureModifiedActions)
+        ));
+        // Left as the closure left it: `fvk`s were not restored onto swapped actions.
+        assert_eq!(bundle.actions[0].spend.fvk, second_fvk);
+        assert_eq!(bundle.actions[1].spend.fvk, first_fvk);
+    }
+
+    /// Returns a two-action bundle whose spends share a nullifier but carry
+    /// distinct wire `rk`s and the given distinct `fvk`s.
+    fn bundle_with_duplicate_nullifier_fvks(fvks: [Option<[u8; 96]>; 2]) -> Bundle {
+        Bundle {
+            actions: fvks
+                .into_iter()
+                .enumerate()
+                // Distinct `rk` per action (`[10; 32]`, `[11; 32]`), shared
+                // nullifier `[3; 32]`.
+                .map(|(i, fvk)| Action {
+                    cv_net: Some([0; 32]),
+                    spend: Spend {
+                        nullifier: Some([3u8; 32]),
+                        rk: Some([10 + i as u8; 32]),
+                        spend_auth_sig: None,
+                        recipient: None,
+                        value: None,
+                        rho: None,
+                        rseed: None,
+                        fvk,
+                        witness: None,
+                        alpha: None,
+                        zip32_derivation: None,
+                        dummy_sk: None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    output: Output {
+                        cmx: Some([0; 32]),
+                        ephemeral_key: Some([0; 32]),
+                        enc_ciphertext: Some(Vec::new()),
+                        memo_kind: None,
+                        out_ciphertext: Vec::new(),
+                        recipient: None,
+                        value: None,
+                        rseed: None,
+                        ock: None,
+                        zip32_derivation: None,
+                        user_address: Option::<String>::None,
+                        proprietary: BTreeMap::new(),
+                    },
+                    rcv: None,
+                })
+                .collect(),
+            flags: 0,
+            value_sum: (0, false),
+            anchor: Some([0; 32]),
+            note_version: NoteVersion::V2,
+            zkproof: None,
+            bsk: None,
+        }
     }
 }

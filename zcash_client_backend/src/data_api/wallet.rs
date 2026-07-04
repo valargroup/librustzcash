@@ -204,6 +204,7 @@ fn orchard_zip32_derivation_for_account(
 #[cfg(all(feature = "pczt", feature = "orchard"))]
 fn orchard_output_info_from_pczt_action<AccountId>(
     act: &pczt::orchard::Action,
+    note_version: orchard::note::NoteVersion,
 ) -> Result<Option<OrchardPcztOutputInfo<AccountId>>, PcztError>
 where
     AccountId: serde::de::DeserializeOwned,
@@ -218,19 +219,16 @@ where
             .output()
             .value()
             .map(orchard::value::NoteValue::from_raw)?;
-        let rho = orchard::note::Rho::from_bytes(act.spend().nullifier()).into_option()?;
+        // `nullifier` is optional in the PCZT wire format. On this path it is
+        // populated (the PCZT has been through the Prover), but the closure
+        // returns `Option`, so bail out gracefully rather than assume it.
+        let rho = orchard::note::Rho::from_bytes(act.spend().nullifier().as_ref()?).into_option()?;
         let rseed =
             act.output().rseed().as_ref().and_then(|rseed| {
                 orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()
             })?;
 
-        orchard_note_from_pczt_parts(
-            recipient,
-            value,
-            rho,
-            rseed,
-            (*act.output().note_version()).into(),
-        )
+        orchard_note_from_pczt_parts(recipient, value, rho, rseed, note_version)
     };
 
     let external_address = act
@@ -3207,7 +3205,12 @@ where
         .orchard()
         .actions()
         .iter()
-        .map(orchard_output_info_from_pczt_action::<DbT::AccountId>)
+        .map(|act| {
+            orchard_output_info_from_pczt_action::<DbT::AccountId>(
+                act,
+                ::orchard::note::NoteVersion::V2,
+            )
+        })
         .collect::<Result<Vec<_>, PcztError>>()?;
 
     #[cfg(zcash_unstable = "nu6.3")]
@@ -3215,7 +3218,12 @@ where
         .ironwood()
         .actions()
         .iter()
-        .map(orchard_output_info_from_pczt_action::<DbT::AccountId>)
+        .map(|act| {
+            orchard_output_info_from_pczt_action::<DbT::AccountId>(
+                act,
+                ::orchard::note::NoteVersion::V3,
+            )
+        })
         .collect::<Result<Vec<_>, PcztError>>()?;
 
     let sapling_output_info = finalized
@@ -3311,11 +3319,9 @@ where
         tx_extractor = tx_extractor.with_sapling(spend_vk, output_vk);
     }
     if let Some(orchard_vk) = orchard_vk {
+        // The extractor verifies both the Orchard and Ironwood bundles of a v6
+        // transaction with this key (they share the post-NU6.3 circuit).
         tx_extractor = tx_extractor.with_orchard(orchard_vk);
-        #[cfg(zcash_unstable = "nu6.3")]
-        {
-            tx_extractor = tx_extractor.with_ironwood(orchard_vk);
-        }
     }
     let transaction = tx_extractor.extract()?;
     let txid = transaction.txid();

@@ -15,6 +15,7 @@ use crate::Pczt;
 
 mod orchard;
 pub use self::orchard::OrchardError;
+pub type IronwoodError = OrchardError;
 
 mod sapling;
 pub use self::sapling::SaplingError;
@@ -29,8 +30,6 @@ pub struct TransactionExtractor<'a> {
         &'a ::sapling::circuit::OutputVerifyingKey,
     )>,
     orchard_vk: Option<&'a ::orchard::circuit::VerifyingKey>,
-    #[cfg(zcash_unstable = "nu6.3")]
-    ironwood_vk: Option<&'a ::orchard::circuit::VerifyingKey>,
     _unused: PhantomData<&'a ()>,
 }
 
@@ -41,8 +40,6 @@ impl<'a> TransactionExtractor<'a> {
             pczt,
             sapling_vk: None,
             orchard_vk: None,
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood_vk: None,
             _unused: PhantomData,
         }
     }
@@ -71,25 +68,12 @@ impl<'a> TransactionExtractor<'a> {
         self
     }
 
-    /// Provides an existing Orchard verifying key for validating the Ironwood proof (if
-    /// any).
-    ///
-    /// If not provided, and the PCZT has an Ironwood bundle, an Orchard verifying key will
-    /// be generated on the fly.
-    #[cfg(zcash_unstable = "nu6.3")]
-    pub fn with_ironwood(mut self, ironwood_vk: &'a ::orchard::circuit::VerifyingKey) -> Self {
-        self.ironwood_vk = Some(ironwood_vk);
-        self
-    }
-
     /// Attempts to extract a valid transaction from the PCZT.
     pub fn extract(self) -> Result<Transaction, Error> {
         let Self {
             pczt,
             sapling_vk,
             orchard_vk,
-            #[cfg(zcash_unstable = "nu6.3")]
-            ironwood_vk,
             _unused,
         } = self;
 
@@ -106,10 +90,9 @@ impl<'a> TransactionExtractor<'a> {
                 o.extract()
                     .map_err(|e| Error::Orchard(OrchardError::Extract(e)))
             },
-            #[cfg(zcash_unstable = "nu6.3")]
             |i| {
                 i.extract()
-                    .map_err(|e| Error::Ironwood(OrchardError::Extract(e)))
+                    .map_err(|e| Error::Ironwood(IronwoodError::Extract(e)))
             },
         )?;
 
@@ -134,16 +117,9 @@ impl<'a> TransactionExtractor<'a> {
                 })
                 .transpose()
             },
-            #[cfg(zcash_unstable = "zfuture")]
-            |_| unimplemented!("PCZT support for TZEs is not implemented."),
         )?;
 
-        let tx = tx_data.freeze().expect("v5 tx can't fail here");
-        // Per ZIP 229 the Orchard circuit (and pool restriction) is selected by the
-        // consensus branch, not the transaction version: a v5 Orchard bundle at
-        // NU6.3 must be verified with the NU6.3 circuit.
-        let orchard_circuit_version =
-            crate::orchard_pool_restrictions_for_branch(tx.consensus_branch_id()).circuit_version();
+        let tx = tx_data.freeze().expect("txid construction can't fail here");
 
         // Now that we have a supposedly fully-authorized transaction, verify it.
         if let Some(bundle) = tx.sapling_bundle() {
@@ -153,23 +129,12 @@ impl<'a> TransactionExtractor<'a> {
                 .map_err(Error::Sapling)?;
         }
         if let Some(bundle) = tx.orchard_bundle() {
-            orchard::verify_bundle(
-                bundle,
-                orchard_vk,
-                orchard_circuit_version,
-                *shielded_sighash.as_ref(),
-            )
-            .map_err(Error::Orchard)?;
+            orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
+                .map_err(Error::Orchard)?;
         }
-        #[cfg(zcash_unstable = "nu6.3")]
         if let Some(bundle) = tx.ironwood_bundle() {
-            orchard::verify_bundle(
-                bundle,
-                ironwood_vk,
-                ::orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
-                *shielded_sighash.as_ref(),
-            )
-            .map_err(Error::Ironwood)?;
+            orchard::verify_bundle(bundle, orchard_vk, *shielded_sighash.as_ref())
+                .map_err(Error::Ironwood)?;
         }
 
         Ok(tx)
@@ -182,16 +147,13 @@ impl Authorization for Unbound {
     type TransparentAuth = ::transparent::pczt::Unbound;
     type SaplingAuth = ::sapling::pczt::Unbound;
     type OrchardAuth = ::orchard::pczt::Unbound;
-    #[cfg(zcash_unstable = "zfuture")]
-    type TzeAuth = core::convert::Infallible;
 }
 
 /// Errors that can occur while extracting a transaction from a PCZT.
 #[derive(Debug)]
 pub enum Error {
     Extract(crate::ExtractError),
-    #[cfg(zcash_unstable = "nu6.3")]
-    Ironwood(OrchardError),
+    Ironwood(IronwoodError),
     Orchard(OrchardError),
     Sapling(SaplingError),
     SaplingRequired,
