@@ -216,6 +216,7 @@ pub struct Spend {
     ///
     /// This exposes the input value to all participants. For Signers who don't need this
     /// information, or after signatures have been applied, this can be redacted.
+    #[getset(get = "pub")]
     pub(crate) value: Option<u64>,
 
     /// The rho value for the note being spent.
