@@ -67,7 +67,10 @@ impl RusqliteMigration for Migration {
                 SELECT
                     orchard_received_notes.id AS id_within_pool_table,
                     orchard_received_notes.transaction_id,
-                    3 AS pool,
+                    CASE
+                        WHEN orchard_received_notes.note_version = 3 THEN 4
+                        ELSE 3
+                    END AS pool,
                     orchard_received_notes.action_index AS output_index,
                     account_id,
                     orchard_received_notes.value,
@@ -78,7 +81,12 @@ impl RusqliteMigration for Migration {
                 FROM orchard_received_notes
                 LEFT JOIN sent_notes
                 ON (sent_notes.transaction_id, sent_notes.output_pool, sent_notes.output_index) =
-                   (orchard_received_notes.transaction_id, 3, orchard_received_notes.action_index)
+                   (orchard_received_notes.transaction_id,
+                    CASE
+                        WHEN orchard_received_notes.note_version = 3 THEN 4
+                        ELSE 3
+                    END,
+                    orchard_received_notes.action_index)
             UNION
                 SELECT
                     ironwood_received_notes.id AS id_within_pool_table,
@@ -123,7 +131,10 @@ impl RusqliteMigration for Migration {
             JOIN sapling_received_notes rn ON rn.id = s.sapling_received_note_id
             UNION
             SELECT
-                3 AS pool,
+                CASE
+                    WHEN rn.note_version = 3 THEN 4
+                    ELSE 3
+                END AS pool,
                 s.orchard_received_note_id AS received_output_id,
                 s.transaction_id,
                 rn.account_id

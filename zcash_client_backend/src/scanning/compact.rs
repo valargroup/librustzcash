@@ -251,6 +251,27 @@ where
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
+
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+            self.ironwood.add_outputs(
+                block_hash,
+                txid,
+                IronwoodDomain::for_compact_action,
+                tx.ironwood_actions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, action)| {
+                        CompactAction::try_from(action).map_err(|_| {
+                            invalid_compact_encoding(
+                                block_height,
+                                txid,
+                                NoteCommitmentTree::Ironwood,
+                                i,
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
         }
 
         Ok(())
