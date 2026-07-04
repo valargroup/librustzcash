@@ -618,10 +618,13 @@ impl fmt::Display for ScanError {
         use ScanError::*;
         match &self {
             EncodingInvalid {
-                txid, tree, index, ..
+                txid,
+                pool_type,
+                index,
+                ..
             } => write!(
                 f,
-                "{tree:?} compact item {index} of transaction {txid} was improperly encoded."
+                "{pool_type:?} compact item {index} of transaction {txid} was improperly encoded."
             ),
             PrevHashMismatch { at_height } => write!(
                 f,
@@ -637,32 +640,41 @@ impl fmt::Display for ScanError {
                 )
             }
             TreeSizeMismatch {
-                tree,
+                protocol,
                 at_height,
                 given,
                 computed,
             } => {
                 write!(
                     f,
-                    "The {tree:?} note commitment tree size provided by a compact block did not match the expected size at height {at_height}; given {given}, expected {computed}"
+                    "The {protocol:?} note commitment tree size provided by a compact block did not match the expected size at height {at_height}; given {given}, expected {computed}"
                 )
             }
-            TreeSizeUnknown { tree, at_height } => {
+            TreeSizeUnknown {
+                protocol,
+                at_height,
+            } => {
                 write!(
                     f,
-                    "Unable to determine {tree:?} note commitment tree size at height {at_height}"
+                    "Unable to determine {protocol:?} note commitment tree size at height {at_height}"
                 )
             }
-            TreeSizeInvalid { tree, at_height } => {
+            TreeSizeInvalid {
+                protocol,
+                at_height,
+            } => {
                 write!(
                     f,
-                    "Received invalid (potentially default) {tree:?} note commitment tree size metadata at height {at_height}"
+                    "Received invalid (potentially default) {protocol:?} note commitment tree size metadata at height {at_height}"
                 )
             }
-            TreeSizeOverflow { tree, at_height } => {
+            TreeSizeOverflow {
+                protocol,
+                at_height,
+            } => {
                 write!(
                     f,
-                    "The {tree:?} note commitment tree size at height {at_height} would exceed the `u32` range."
+                    "The {protocol:?} note commitment tree size at height {at_height} would exceed the `u32` range."
                 )
             }
         }

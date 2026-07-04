@@ -40,13 +40,9 @@ fn encode_note_version(version: NoteVersion) -> i64 {
 }
 
 fn decode_note_version(version: i64) -> Result<NoteVersion, SqliteClientError> {
-    match version {
-        2 => Ok(NoteVersion::V2),
-        3 => Ok(NoteVersion::V3),
-        _ => Err(SqliteClientError::CorruptedData(format!(
-            "Invalid Orchard note version {version}."
-        ))),
-    }
+    parse_note_version(version).ok_or_else(|| {
+        SqliteClientError::CorruptedData(format!("Invalid Orchard note version {version}."))
+    })
 }
 
 pub(crate) fn to_received_note<P: consensus::Parameters>(
@@ -85,13 +81,6 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
         })
     }?;
     let note_version = decode_note_version(row.get("note_version")?)?;
-
-    let note_version = {
-        let code: i64 = row.get("note_version")?;
-        parse_note_version(code).ok_or_else(|| {
-            SqliteClientError::CorruptedData(format!("Unrecognized note version code {code}"))
-        })
-    }?;
 
     let note_commitment_tree_position = Position::from(
         u64::try_from(row.get::<_, i64>("commitment_tree_position")?).map_err(|_| {
@@ -319,13 +308,18 @@ pub(crate) fn select_unspent_note_meta(
     )
 }
 
-/// Encodes a note plaintext version for storage in the `note_version` column of a received-notes
-/// table. The encoding matches the note plaintext lead byte signaling the version.
-pub(crate) fn note_version_code(version: NoteVersion) -> i64 {
-    match version {
-        NoteVersion::V2 => 2,
-        NoteVersion::V3 => 3,
-    }
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) fn select_unspent_ironwood_note_meta(
+    conn: &Connection,
+    wallet_birthday: BlockHeight,
+    anchor_height: BlockHeight,
+) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
+    super::common::select_unspent_note_meta(
+        conn,
+        ShieldedPool::Ironwood,
+        wallet_birthday,
+        anchor_height,
+    )
 }
 
 /// Decodes a note plaintext version from its `note_version` column encoding, returning `None` if
@@ -373,15 +367,15 @@ pub(crate) fn put_received_note<
             transaction_id, action_index, account_id, address_id,
             diversifier, value, rho, rseed, note_version, memo, nf,
             is_change, commitment_tree_position,
-            recipient_key_scope, note_version
+            recipient_key_scope
         )
         VALUES (
             :transaction_id, :action_index, :account_id, :address_id,
             :diversifier, :value, :rho, :rseed, :note_version, :memo, :nf,
             :is_change, :commitment_tree_position,
-            :recipient_key_scope, :note_version
+            :recipient_key_scope
         )
-        ON CONFLICT (transaction_id, action_index, note_version) DO UPDATE
+        ON CONFLICT (transaction_id, action_index) DO UPDATE
         SET account_id = :account_id,
             address_id = :address_id,
             diversifier = :diversifier,
@@ -393,8 +387,7 @@ pub(crate) fn put_received_note<
             memo = IFNULL(:memo, memo),
             is_change = MAX(:is_change, is_change),
             commitment_tree_position = IFNULL(:commitment_tree_position, commitment_tree_position),
-            recipient_key_scope = :recipient_key_scope,
-            note_version = :note_version
+            recipient_key_scope = :recipient_key_scope
         RETURNING id",
     ))?;
 
@@ -417,7 +410,6 @@ pub(crate) fn put_received_note<
         ":is_change": output.is_change(),
         ":commitment_tree_position": output.note_commitment_tree_position().map(u64::from),
         ":recipient_key_scope": output.recipient_key_scope().map(|s| KeyScope::from(s).encode()),
-        ":note_version": note_version_code(note_version),
     ];
 
     let received_note_id = stmt_upsert_received_note
@@ -1233,23 +1225,29 @@ pub(crate) mod tests {
         mirror_orchard_tree_state_to_ironwood(st.wallet().conn());
 
         let recipient = OrchardPoolTester::fvk_default_address(&dfvk);
-        let proposal = st.propose_standard_transfer_with_tx_version::<Infallible>(
+        let proposal = st
+            .propose_standard_transfer_with_tx_version::<Infallible>(
+                account.id(),
+                StandardFeeRule::Zip317,
+                ConfirmationsPolicy::MIN,
+                &recipient,
+                Zatoshis::const_from_u64(10000),
+                None,
+                None,
+                ShieldedPool::Orchard,
+                TxVersion::V5,
+            )
+            .unwrap();
+
+        let result = st.create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
             account.id(),
-            StandardFeeRule::Zip317,
-            ConfirmationsPolicy::MIN,
-            &recipient,
-            Zatoshis::const_from_u64(10000),
-            None,
-            None,
-            ShieldedPool::Orchard,
+            OvkPolicy::Sender,
+            &proposal,
             TxVersion::V5,
         );
-
         assert_matches!(
-            proposal,
-            Err(zcash_client_backend::data_api::error::Error::NoteSelection(
-                zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion
-            ))
+            result,
+            Err(zcash_client_backend::data_api::error::Error::ProposalNotSupported)
         );
     }
 

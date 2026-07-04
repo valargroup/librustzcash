@@ -13,7 +13,7 @@
 use {
     crate::{
         data_api::{
-            WalletCommitmentTrees, WalletRead, WalletWrite,
+            ORCHARD_SHARD_HEIGHT, WalletCommitmentTrees, WalletRead, WalletWrite,
             chain::{
                 BlockCache, ChainState, CommitmentTreeRoot, error::Error as ChainError,
                 scan_cached_blocks,
@@ -306,7 +306,14 @@ where
 
         info!("Ironwood tree has {} subtrees", ironwood_roots.len());
         db_data
-            .put_ironwood_subtree_roots(0, &ironwood_roots)
+            .with_ironwood_tree_mut(|t| {
+                for (root, i) in ironwood_roots.iter().zip(0u64..) {
+                    let root_addr =
+                        incrementalmerkletree::Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), i);
+                    t.insert(root_addr, *root.root_hash())?;
+                }
+                Ok::<_, ShardTreeError<_>>(())
+            })
             .map_err(Error::WalletTrees)?;
     }
 

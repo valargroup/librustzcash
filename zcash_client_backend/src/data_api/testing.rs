@@ -649,8 +649,7 @@ where
         cb.chain_metadata = Some(compact_formats::ChainMetadata {
             sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
             orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
-            // The test framework does not generate Ironwood notes.
-            ironwood_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: prior_cached_block.ironwood_end_size,
         });
 
         let res = self.cache_block(&prior_cached_block, cb);
@@ -900,6 +899,29 @@ where
             &mut self.wallet_data,
             from_height,
             &prior_cached_block.chain_state,
+            limit,
+        )
+    }
+
+    /// Invokes [`scan_cached_blocks`] with a caller-provided prior chain state.
+    pub fn try_scan_cached_blocks_with_state(
+        &mut self,
+        from_height: BlockHeight,
+        from_state: &ChainState,
+        limit: usize,
+    ) -> Result<
+        ScanSummary,
+        super::chain::error::Error<
+            <DbT as WalletRead>::Error,
+            <Cache::BlockSource as BlockSource>::Error,
+        >,
+    > {
+        scan_cached_blocks(
+            &self.network,
+            self.cache.block_source(),
+            &mut self.wallet_data,
+            from_height,
+            from_state,
             limit,
         )
     }
@@ -1714,8 +1736,6 @@ impl TestBuilder<(), ()> {
         nu6_3: None,
         #[cfg(zcash_unstable = "nu7")]
         nu7: None,
-        #[cfg(zcash_unstable = "zfuture")]
-        z_future: None,
     };
 
     /// Constructs a new test environment builder.
@@ -2783,8 +2803,11 @@ fn fake_compact_block_from_compact_tx(
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
         orchard_commitment_tree_size: initial_orchard_tree_size
             + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
-        // The test framework does not generate Ironwood notes.
-        ironwood_commitment_tree_size: 0,
+        ironwood_commitment_tree_size: initial_ironwood_tree_size
+            + cb.vtx
+                .iter()
+                .map(|tx| tx.ironwood_actions.len() as u32)
+                .sum::<u32>(),
     });
     cb
 }
@@ -3440,40 +3463,17 @@ impl WalletCommitmentTrees for MockWalletDb {
     }
 
     #[cfg(feature = "orchard")]
-    type IronwoodShardStore<'a> = MemoryShardStore<::orchard::tree::MerkleHashOrchard, BlockHeight>;
-
-    #[cfg(feature = "orchard")]
-    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<Option<A>, E>
     where
         for<'a> F: FnMut(
             &'a mut ShardTree<
-                Self::IronwoodShardStore<'a>,
+                Self::OrchardShardStore<'a>,
                 { ORCHARD_SHARD_HEIGHT * 2 },
                 ORCHARD_SHARD_HEIGHT,
             >,
         ) -> Result<A, E>,
         E: From<ShardTreeError<Self::Error>>,
     {
-        callback(&mut self.ironwood_tree)
-    }
-
-    #[cfg(feature = "orchard")]
-    fn put_ironwood_subtree_roots(
-        &mut self,
-        start_index: u64,
-        roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
-    ) -> Result<(), ShardTreeError<Self::Error>> {
-        self.with_ironwood_tree_mut(|t| {
-            for (root, i) in roots.iter().zip(0u64..) {
-                let root_addr = incrementalmerkletree::Address::from_parts(
-                    ORCHARD_SHARD_HEIGHT.into(),
-                    start_index + i,
-                );
-                t.insert(root_addr, *root.root_hash())?;
-            }
-            Ok::<_, ShardTreeError<Self::Error>>(())
-        })?;
-
-        Ok(())
+        callback(&mut self.ironwood_tree).map(Some)
     }
 }

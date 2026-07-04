@@ -10,7 +10,7 @@ use tracing::{debug, trace};
 use zcash_note_encryption::batch;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_protocol::{
-    ShieldedPool,
+    ShieldedPool, TxId,
     consensus::{self, BlockHeight, NetworkUpgrade, TxIndex},
 };
 
@@ -70,18 +70,34 @@ type TaggedIronwoodBatchRunner<IvkTag, Tasks> = BatchRunner<
     Tasks,
 >;
 
+fn protocol_for_tree(tree: NoteCommitmentTree) -> ShieldedPool {
+    match tree {
+        NoteCommitmentTree::Sapling => ShieldedPool::Sapling,
+        #[cfg(feature = "orchard")]
+        NoteCommitmentTree::Orchard => ShieldedPool::Orchard,
+        #[cfg(feature = "orchard")]
+        NoteCommitmentTree::Ironwood => ShieldedPool::Ironwood,
+    }
+}
+
 fn checked_tree_size_add(
     tree: NoteCommitmentTree,
     at_height: BlockHeight,
     position: u32,
     output_count: usize,
 ) -> Result<u32, ScanError> {
-    let output_count =
-        u32::try_from(output_count).map_err(|_| ScanError::TreeSizeOverflow { tree, at_height })?;
+    let protocol = protocol_for_tree(tree);
+    let output_count = u32::try_from(output_count).map_err(|_| ScanError::TreeSizeOverflow {
+        protocol,
+        at_height,
+    })?;
 
     position
         .checked_add(output_count)
-        .ok_or(ScanError::TreeSizeOverflow { tree, at_height })
+        .ok_or(ScanError::TreeSizeOverflow {
+            protocol,
+            at_height,
+        })
 }
 
 fn invalid_compact_encoding(
@@ -93,7 +109,7 @@ fn invalid_compact_encoding(
     ScanError::EncodingInvalid {
         at_height,
         txid,
-        tree,
+        pool_type: protocol_for_tree(tree),
         index,
     }
 }
@@ -600,7 +616,10 @@ impl PositionTracker {
             P: consensus::Parameters,
         {
             let at_height = block.height();
-            let overflow = || ScanError::TreeSizeOverflow { tree, at_height };
+            let overflow = || ScanError::TreeSizeOverflow {
+                protocol,
+                at_height,
+            };
             let output_count = block.vtx.iter().try_fold(0u32, |acc, tx| {
                 let tx_outputs = u32::try_from(tx_output_count(tx)).map_err(|_| overflow())?;
                 acc.checked_add(tx_outputs).ok_or_else(overflow)
@@ -618,7 +637,10 @@ impl PositionTracker {
                                     if at_height < activation_height {
                                         Ok(0)
                                     } else {
-                                        Err(ScanError::TreeSizeUnknown { tree, at_height })
+                                        Err(ScanError::TreeSizeUnknown {
+                                            protocol,
+                                            at_height,
+                                        })
                                     }
                                 },
                             )
@@ -628,9 +650,12 @@ impl PositionTracker {
                             // check that the subtraction will not underflow; if it would
                             // do so, we were given invalid chain metadata for a block
                             // with outputs in this shielded protocol.
-                            final_tree_size(m)
-                                .checked_sub(output_count)
-                                .ok_or(ScanError::TreeSizeInvalid { tree, at_height })
+                            final_tree_size(m).checked_sub(output_count).ok_or(
+                                ScanError::TreeSizeInvalid {
+                                    protocol,
+                                    at_height,
+                                },
+                            )
                         },
                     )
                 },
@@ -675,7 +700,7 @@ impl PositionTracker {
             params,
             block,
             prior_block_metadata,
-            NoteCommitmentTree::Ironwood,
+            ShieldedPool::Ironwood,
             NetworkUpgrade::Nu6_3,
             |m| m.ironwood_tree_size(),
             |tx| tx.ironwood_actions.len(),
@@ -813,7 +838,7 @@ impl PositionTracker {
             #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
             if chain_meta.ironwood_commitment_tree_size != self.ironwood_tree_position {
                 return Err(ScanError::TreeSizeMismatch {
-                    tree: NoteCommitmentTree::Ironwood,
+                    protocol: ShieldedPool::Ironwood,
                     at_height,
                     given: chain_meta.ironwood_commitment_tree_size,
                     computed: self.ironwood_tree_position,
@@ -835,6 +860,7 @@ mod tests {
     use zcash_keys::keys::UnifiedSpendingKey;
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::{
+        ShieldedPool,
         consensus::{BlockHeight, Network},
         value::Zatoshis,
     };
@@ -1070,7 +1096,6 @@ mod tests {
         use crate::proto::compact_formats::{ChainMetadata, CompactBlock, CompactOrchardAction};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1104,7 +1129,6 @@ mod tests {
         use crate::proto::compact_formats::{CompactBlock, CompactSaplingSpend, CompactTx};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1129,7 +1153,6 @@ mod tests {
         use crate::proto::compact_formats::{CompactBlock, CompactSaplingOutput, CompactTx};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1159,7 +1182,6 @@ mod tests {
         use crate::proto::compact_formats::{CompactBlock, CompactOrchardAction, CompactTx};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1190,7 +1212,6 @@ mod tests {
         use crate::proto::compact_formats::{ChainMetadata, CompactBlock, CompactOrchardAction};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1227,7 +1248,6 @@ mod tests {
         use crate::proto::compact_formats::{ChainMetadata, CompactBlock};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1246,7 +1266,6 @@ mod tests {
         use crate::proto::compact_formats::{CompactBlock, CompactSaplingOutput, CompactTx};
 
         CompactBlock {
-            proto_version: 4,
             height: 1,
             hash: vec![0; 32],
             prev_hash: vec![1; 32],
@@ -1269,8 +1288,10 @@ mod tests {
 
     fn assert_decode_error(err: &ScanError, expected_tree: NoteCommitmentTree) {
         match err {
-            ScanError::EncodingInvalid { tree, index, .. } => {
-                assert_eq!(*tree, expected_tree);
+            ScanError::EncodingInvalid {
+                pool_type, index, ..
+            } => {
+                assert_eq!(*pool_type, super::protocol_for_tree(expected_tree));
                 assert_eq!(*index, 0);
             }
             err => panic!("expected a compact decoding error, got {err:?}"),
@@ -1307,7 +1328,7 @@ mod tests {
         assert!(matches!(
             err,
             ScanError::TreeSizeOverflow {
-                tree: NoteCommitmentTree::Sapling,
+                protocol: ShieldedPool::Sapling,
                 ..
             }
         ));
@@ -1337,7 +1358,7 @@ mod tests {
         assert!(matches!(
             err,
             ScanError::TreeSizeOverflow {
-                tree: NoteCommitmentTree::Ironwood,
+                protocol: ShieldedPool::Ironwood,
                 ..
             }
         ));
@@ -1367,7 +1388,7 @@ mod tests {
         assert!(matches!(
             err,
             ScanError::TreeSizeMismatch {
-                tree: NoteCommitmentTree::Ironwood,
+                protocol: ShieldedPool::Ironwood,
                 given: 1,
                 computed: 0,
                 ..
@@ -1400,7 +1421,7 @@ mod tests {
         assert!(matches!(
             err,
             ScanError::TreeSizeInvalid {
-                tree: NoteCommitmentTree::Ironwood,
+                protocol: ShieldedPool::Ironwood,
                 ..
             }
         ));

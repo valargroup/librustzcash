@@ -1,7 +1,7 @@
 //! Error types for problems that may arise when reading or storing wallet data to SQLite.
 
 use std::error;
-use std::fmt;
+use std::{fmt, ops::Range};
 
 #[cfg(feature = "orchard")]
 use incrementalmerkletree::Position;
@@ -348,6 +348,24 @@ impl fmt::Display for SqliteClientError {
                 f,
                 "An error occurred accessing or updating note commitment tree data: {err}."
             ),
+            SqliteClientError::PutBlocksCommitmentTree {
+                pool,
+                block_range,
+                error,
+            } => write!(
+                f,
+                "An error occurred updating the {:?} note commitment tree for block range {:?}: {error}.",
+                pool, block_range
+            ),
+            SqliteClientError::TruncateCommitmentTree {
+                pool,
+                height,
+                error,
+            } => write!(
+                f,
+                "An error occurred truncating the {:?} note commitment tree to height {height}: {error}.",
+                pool
+            ),
             #[cfg(feature = "orchard")]
             SqliteClientError::HistoricalFrontierInvalid(err) => write!(
                 f,
@@ -527,6 +545,15 @@ impl From<PutBlocksError<SqliteClientError, commitment_tree::Error>> for SqliteC
             }
             ll::wallet::PutBlocksError::Storage(e) => e,
             ll::wallet::PutBlocksError::ShardTree(e) => SqliteClientError::from(e),
+            ll::wallet::PutBlocksError::ShardTreeForBlockRange {
+                pool,
+                block_range,
+                error,
+            } => SqliteClientError::PutBlocksCommitmentTree {
+                pool,
+                block_range,
+                error,
+            },
             #[cfg(feature = "transparent-inputs")]
             ll::wallet::PutBlocksError::GapAddresses(e) => SqliteClientError::from(e),
         }

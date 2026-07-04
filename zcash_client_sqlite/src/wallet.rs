@@ -1942,6 +1942,12 @@ fn estimate_tree_size<P: consensus::Parameters>(
     pool_activation_height: BlockHeight,
     chain_tip_height: BlockHeight,
 ) -> Result<Option<u64>, SqliteClientError> {
+    let TableConstants {
+        table_prefix,
+        shard_height,
+        ..
+    } = table_constants::<SqliteClientError>(shielded_protocol)?;
+
     // Estimate the size of the tree by linear extrapolation from available
     // data closest to the chain tip.
     //
@@ -1982,20 +1988,16 @@ fn estimate_tree_size<P: consensus::Parameters>(
 
     // Get the tree size at the last scanned height, if known.
     let last_scanned = block_max_scanned(conn, params)?.and_then(|last_scanned| {
-        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-        if table_prefix == IRONWOOD_TABLES_PREFIX {
-            return last_scanned
-                .ironwood_tree_size()
-                .map(|tree_size| (last_scanned.block_height(), u64::from(tree_size)));
-        }
-
         match shielded_protocol {
             ShieldedPool::Sapling => last_scanned.sapling_tree_size(),
             #[cfg(feature = "orchard")]
             ShieldedPool::Orchard => last_scanned.orchard_tree_size(),
             #[cfg(not(feature = "orchard"))]
             ShieldedPool::Orchard => None,
-            ShieldedPool::Ironwood => todo!("Ironwood pool support is not yet implemented"),
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => last_scanned.ironwood_tree_size(),
+            #[cfg(not(feature = "orchard"))]
+            ShieldedPool::Ironwood => None,
         }
         .map(|tree_size| (last_scanned.block_height(), u64::from(tree_size)))
     });
@@ -2123,12 +2125,10 @@ fn subtree_scan_progress<P: consensus::Parameters>(
 ) -> Result<Option<Progress>, SqliteClientError> {
     let TableConstants {
         table_prefix,
-        output_count_col: default_output_count_col,
+        output_count_col,
         shard_height,
         ..
     } = table_constants::<SqliteClientError>(shielded_protocol)?;
-    let table_prefix = tree_prefix.unwrap_or(table_prefix);
-    let output_count_col = output_count_col.unwrap_or(default_output_count_col);
 
     // Each query against the `blocks` table that contributes to scan-progress accounting
     // must exclude heights that fall within a `scan_queue` range whose priority indicates
@@ -2272,8 +2272,6 @@ fn subtree_scan_progress<P: consensus::Parameters>(
             conn,
             params,
             shielded_protocol,
-            table_prefix,
-            shard_height,
             pool_activation_height,
             chain_tip_height,
         )?,
@@ -2453,9 +2451,7 @@ impl ProgressEstimator for SubtreeProgressEstimator {
         subtree_scan_progress(
             conn,
             params,
-            ShieldedPool::Orchard,
-            Some(IRONWOOD_TABLES_PREFIX),
-            Some("ironwood_action_count"),
+            ShieldedPool::Ironwood,
             nu6_3_activation_height,
             birthday_height,
             recover_until_height,
@@ -2567,12 +2563,6 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         })
         .collect::<Result<HashMap<AccountUuid, AccountBalance>, _>>()?;
 
-    struct PoolBalanceQuery {
-        protocol: ShieldedPool,
-        note_version_filter: Option<i64>,
-        tree_prefix: Option<&'static str>,
-    }
-
     fn with_pool_balances<F>(
         tx: &rusqlite::Transaction,
         target_height: TargetHeight,
@@ -2591,16 +2581,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             Zatoshis,
         ) -> Result<(), SqliteClientError>,
     {
-        let PoolBalanceQuery {
-            protocol,
-            note_version_filter,
-            tree_prefix,
-        } = query;
         let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-        let tree_prefix = tree_prefix.unwrap_or(table_prefix);
-        let note_version_clause = note_version_filter
-            .map(|note_version| format!("AND rn.note_version = {note_version}"))
-            .unwrap_or_default();
 
         // If the shard containing the anchor height contains any unscanned ranges that start
         // below or including that height, none of our shielded balance is currently spendable.
@@ -2630,7 +2611,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             target_height.saturating_sub(u32::from(confirmations_policy.trusted()));
 
         let any_spendable =
-            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, tree_prefix))?;
+            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?;
 
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
@@ -2643,7 +2624,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
-             LEFT OUTER JOIN v_{tree_prefix}_shards_scan_state scan_state
+            LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
                 ON rn.commitment_tree_position >= scan_state.start_position
                 AND rn.commitment_tree_position < scan_state.end_position_exclusive
              LEFT OUTER JOIN transparent_received_output_spends ros
@@ -2655,7 +2636,6 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                 ON tt.id_tx = tro.transaction_id
              WHERE ({}) -- the transaction is unexpired
              AND rn.id NOT IN ({}) -- and the received note is unspent
-             {note_version_clause}
              GROUP BY rn.id",
             common::tx_unexpired_condition("t"),
             common::spent_notes_clause(table_prefix)
@@ -2797,11 +2777,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             anchor_height,
             confirmations_policy,
             &mut account_balances,
-            PoolBalanceQuery {
-                protocol: ShieldedPool::Orchard,
-                note_version_filter: Some(3),
-                tree_prefix: Some(IRONWOOD_TABLES_PREFIX),
-            },
+            ShieldedPool::Ironwood,
             |balances,
              spendable_value,
              change_pending_confirmation,
@@ -3001,6 +2977,8 @@ fn parse_tx<P: consensus::Parameters>(
                     consensus_branch_id,
                     tx_data.lock_time(),
                     expiry_height,
+                    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+                    tx_data.zip233_amount(),
                     tx_data.transparent_bundle().cloned(),
                     tx_data.sapling_bundle().cloned(),
                     tx_data.orchard_bundle().cloned(),
@@ -3013,10 +2991,7 @@ fn parse_tx<P: consensus::Parameters>(
                     consensus_branch_id,
                     tx_data.lock_time(),
                     expiry_height,
-                    #[cfg(all(
-                        any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                        feature = "zip-233"
-                    ))]
+                    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
                     tx_data.zip233_amount(),
                     tx_data.transparent_bundle().cloned(),
                     tx_data.sprout_bundle().cloned(),
@@ -3031,10 +3006,7 @@ fn parse_tx<P: consensus::Parameters>(
                 consensus_branch_id,
                 tx_data.lock_time(),
                 expiry_height,
-                #[cfg(all(
-                    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                    feature = "zip-233"
-                ))]
+                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
                 tx_data.zip233_amount(),
                 tx_data.transparent_bundle().cloned(),
                 tx_data.sprout_bundle().cloned(),
@@ -3238,21 +3210,6 @@ pub(crate) fn get_anchor_height(
     target_height: TargetHeight,
     min_confirmations: NonZeroU32,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
-    let sapling_anchor_height = get_max_checkpointed_height(
-        conn,
-        ShieldedPool::Sapling,
-        target_height,
-        min_confirmations,
-    )?;
-
-    #[cfg(feature = "orchard")]
-    let orchard_anchor_height = get_max_checkpointed_height(
-        conn,
-        ShieldedPool::Orchard,
-        target_height,
-        min_confirmations,
-    )?;
-
     #[cfg(not(feature = "orchard"))]
     let query = "SELECT MAX(checkpoint_id) FROM sapling_tree_checkpoints
                  WHERE checkpoint_id <= :max_checkpoint_height";
@@ -3339,6 +3296,7 @@ pub(crate) fn get_anchor_height(
                     )
                  )";
 
+    let max_checkpoint_height = target_height - u32::from(min_confirmations);
     let anchor_height = conn
         .query_row(
             query,
@@ -3346,9 +3304,10 @@ pub(crate) fn get_anchor_height(
             |row| row.get::<_, Option<u32>>(0),
         )
         .optional()?
-        .flatten();
+        .flatten()
+        .map(BlockHeight::from);
 
-    Ok(anchor_height.map(BlockHeight::from))
+    Ok(anchor_height)
 }
 
 pub(crate) fn get_target_and_anchor_heights(
@@ -4204,7 +4163,12 @@ pub(crate) fn truncate_to_height_internal<P: consensus::Parameters>(
         #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
         if tree_has_checkpoints(conn, crate::IRONWOOD_TABLES_PREFIX)? {
             wdb.with_ironwood_tree_mut(|tree| {
-                tree.truncate_to_checkpoint(&truncation_height)?;
+                tree.truncate_to_checkpoint(&truncation_height)
+                    .map_err(|error| SqliteClientError::TruncateCommitmentTree {
+                        pool: ShieldedPool::Ironwood,
+                        height: truncation_height,
+                        error,
+                    })?;
                 Ok::<_, SqliteClientError>(())
             })?;
         }
@@ -4339,6 +4303,23 @@ pub(crate) fn truncate_to_chain_state<P: consensus::Parameters, CL, R>(
             )
             .map_err(|error| SqliteClientError::TruncateCommitmentTree {
                 pool: ShieldedPool::Orchard,
+                height: target_height,
+                error,
+            })?;
+            Ok::<_, SqliteClientError>(())
+        })?;
+
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        wdb.with_ironwood_tree_mut(|tree| {
+            tree.insert_frontier(
+                chain_state.final_ironwood_tree().clone(),
+                Retention::Checkpoint {
+                    id: target_height,
+                    marking: Marking::None,
+                },
+            )
+            .map_err(|error| SqliteClientError::TruncateCommitmentTree {
+                pool: ShieldedPool::Ironwood,
                 height: target_height,
                 error,
             })?;
@@ -5514,11 +5495,10 @@ pub(crate) fn get_block_range(
     protocol: ShieldedPool,
     commitment_tree_address: incrementalmerkletree::Address,
 ) -> Result<Option<Range<BlockHeight>>, SqliteClientError> {
-    let prefix = match protocol {
-        ShieldedPool::Sapling => "sapling",
-        ShieldedPool::Orchard => "orchard",
-        ShieldedPool::Ironwood => todo!("Ironwood pool support is not yet implemented"),
-    };
+    let TableConstants {
+        table_prefix: prefix,
+        ..
+    } = table_constants::<SqliteClientError>(protocol)?;
 
     get_block_range_for_tree(conn, prefix, commitment_tree_address)
 }

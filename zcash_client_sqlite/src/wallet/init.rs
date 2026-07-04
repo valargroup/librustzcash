@@ -192,6 +192,10 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::AddressGeneration(e) => WalletMigrationError::AddressGeneration(e),
         SqliteClientError::BadAccountData(e) => WalletMigrationError::CorruptedData(e),
         SqliteClientError::CommitmentTree(e) => WalletMigrationError::CommitmentTree(Box::new(e)),
+        SqliteClientError::PutBlocksCommitmentTree { error, .. }
+        | SqliteClientError::TruncateCommitmentTree { error, .. } => {
+            WalletMigrationError::CommitmentTree(Box::new(error))
+        }
         SqliteClientError::UnsupportedPoolType(pool) => WalletMigrationError::CorruptedData(
             format!("Wallet DB contains unsupported pool type {pool}"),
         ),
@@ -757,10 +761,7 @@ mod tests {
         zip32::DiversifierIndex,
     };
 
-    #[cfg(all(
-        any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-        feature = "zip-233"
-    ))]
+    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
     use zcash_protocol::value::Zatoshis;
 
     pub(crate) fn describe_tables(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
@@ -1207,10 +1208,7 @@ mod tests {
                 BranchId::Canopy,
                 0,
                 BlockHeight::from(0),
-                #[cfg(all(
-                    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
-                    feature = "zip-233"
-                ))]
+                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
                 Zatoshis::ZERO,
                 None,
                 None,

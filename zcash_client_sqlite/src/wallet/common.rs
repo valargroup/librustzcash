@@ -28,8 +28,6 @@ use crate::{
     },
 };
 
-#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
-use crate::IRONWOOD_TABLES_PREFIX;
 #[cfg(feature = "orchard")]
 use {
     crate::IRONWOOD_TABLES_PREFIX, crate::ORCHARD_TABLES_PREFIX,

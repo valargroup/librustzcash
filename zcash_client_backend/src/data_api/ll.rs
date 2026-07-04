@@ -648,10 +648,16 @@ pub trait ReceivedShieldedOutput {
             PoolType::Shielded(ShieldedPool::Sapling) => NoteCommitmentTree::Sapling,
             #[cfg(feature = "orchard")]
             PoolType::Shielded(ShieldedPool::Orchard) => NoteCommitmentTree::Orchard,
+            #[cfg(feature = "orchard")]
+            PoolType::Shielded(ShieldedPool::Ironwood) => NoteCommitmentTree::Ironwood,
             PoolType::Transparent => unreachable!("transparent outputs are not shielded"),
             #[cfg(not(feature = "orchard"))]
             PoolType::Shielded(ShieldedPool::Orchard) => {
                 unreachable!("Orchard outputs require the orchard feature")
+            }
+            #[cfg(not(feature = "orchard"))]
+            PoolType::Shielded(ShieldedPool::Ironwood) => {
+                unreachable!("Ironwood outputs require the orchard feature")
             }
         }
     }
@@ -862,6 +868,8 @@ mod tests {
             TransactionData, components::orchard::testing::arb_bundle,
         };
         use zcash_protocol::consensus::BranchId;
+        #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+        use zcash_protocol::value::Zatoshis;
 
         use super::TxMeta;
 
@@ -872,6 +880,8 @@ mod tests {
             BranchId::Nu6_3,
             0,
             1u32.into(),
+            #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+            Zatoshis::ZERO,
             None,
             None,
             None,

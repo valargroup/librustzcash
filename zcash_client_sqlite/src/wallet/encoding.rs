@@ -41,10 +41,10 @@ pub(crate) fn pool_code(pool_type: PoolType) -> i64 {
     // for unified addresses, but this is exclusively an internal
     // implementation detail.
     match pool_type {
-        PoolType::Transparent => 0i64,
-        PoolType::Shielded(ShieldedPool::Sapling) => 2i64,
-        PoolType::Shielded(ShieldedPool::Orchard) => 3i64,
-        PoolType::Shielded(ShieldedPool::Ironwood) => 4i64,
+        PoolType::Transparent => TRANSPARENT_POOL_CODE,
+        PoolType::Shielded(ShieldedPool::Sapling) => SAPLING_POOL_CODE,
+        PoolType::Shielded(ShieldedPool::Orchard) => ORCHARD_POOL_CODE,
+        PoolType::Shielded(ShieldedPool::Ironwood) => IRONWOOD_POOL_CODE,
     }
 }
 

@@ -801,32 +801,6 @@ pub(crate) fn get_checkpoint(
         .transpose()
 }
 
-pub(crate) fn get_max_checkpointed_height(
-    conn: &rusqlite::Connection,
-    protocol: ShieldedPool,
-    target_height: TargetHeight,
-    min_confirmations: NonZeroU32,
-) -> Result<Option<BlockHeight>, SqliteClientError> {
-    let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
-    let max_checkpoint_height = target_height - u32::from(min_confirmations);
-
-    // We exclude from consideration all checkpoints having heights greater than the maximum
-    // checkpoint height. The checkpoint depth is the number of excluded checkpoints + 1.
-    conn.query_row(
-        &format!(
-            "SELECT checkpoint_id
-             FROM {table_prefix}_tree_checkpoints
-             WHERE checkpoint_id <= :max_checkpoint_height
-             ORDER BY checkpoint_id DESC
-             LIMIT 1",
-        ),
-        named_params![":max_checkpoint_height": u32::from(max_checkpoint_height)],
-        |row| row.get::<_, u32>(0).map(BlockHeight::from),
-    )
-    .optional()
-    .map_err(SqliteClientError::from)
-}
-
 pub(crate) fn get_checkpoint_at_depth(
     conn: &rusqlite::Connection,
     table_prefix: &'static str,

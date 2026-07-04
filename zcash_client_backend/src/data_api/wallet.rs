@@ -49,7 +49,7 @@ use super::InputSource;
 use crate::{
     data_api::{
         Account, MaxSpendMode, NoteCommitmentTree, SentTransaction, SentTransactionOutput,
-        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
+        TargetValue, WalletCommitmentTrees, WalletRead, WalletWrite, Zip32Derivation, error::Error,
         wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
@@ -273,6 +273,93 @@ impl<AccountId: Copy> PcztRecipient<AccountId> {
     }
 }
 
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+struct OrchardOutputInfo<AccountId> {
+    pczt_recipient: PcztRecipient<AccountId>,
+    external_address: Option<ZcashAddress>,
+    note: orchard::Note,
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_zip32_derivation_for_account(
+    derivation: &Zip32Derivation,
+    coin_type: u32,
+) -> orchard::pczt::Zip32Derivation {
+    orchard::pczt::Zip32Derivation::parse(
+        derivation.seed_fingerprint().to_bytes(),
+        vec![
+            zip32::ChildIndex::hardened(32).index(),
+            zip32::ChildIndex::hardened(coin_type).index(),
+            zip32::ChildIndex::hardened(u32::from(derivation.account_index())).index(),
+        ],
+    )
+    .expect("valid")
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_note_from_pczt_parts(
+    recipient: orchard::Address,
+    value: orchard::value::NoteValue,
+    rho: orchard::note::Rho,
+    rseed: orchard::note::RandomSeed,
+    note_version: orchard::note::NoteVersion,
+) -> Option<orchard::Note> {
+    orchard::Note::from_parts(recipient, value, rho, rseed, note_version).into_option()
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+fn orchard_output_info_from_pczt_action<AccountId: serde::de::DeserializeOwned>(
+    act: &pczt::orchard::Action,
+    note_version: orchard::note::NoteVersion,
+) -> Result<Option<OrchardOutputInfo<AccountId>>, PcztError> {
+    let note = || {
+        let recipient = act
+            .output()
+            .recipient()
+            .as_ref()
+            .and_then(|b| orchard::Address::from_raw_address_bytes(b).into_option())?;
+        let value = act
+            .output()
+            .value()
+            .map(orchard::value::NoteValue::from_raw)?;
+        let rho = orchard::note::Rho::from_bytes(act.spend().nullifier()).into_option()?;
+        let rseed =
+            act.output().rseed().as_ref().and_then(|rseed| {
+                orchard::note::RandomSeed::from_bytes(*rseed, &rho).into_option()
+            })?;
+
+        orchard_note_from_pczt_parts(recipient, value, rho, rseed, note_version)
+    };
+
+    let external_address = act
+        .output()
+        .user_address()
+        .as_deref()
+        .map(ZcashAddress::try_from_encoded)
+        .transpose()
+        .map_err(|e| PcztError::Invalid(format!("Invalid user_address: {e}")))?;
+
+    let pczt_recipient = act
+        .output()
+        .proprietary()
+        .get(PROPRIETARY_OUTPUT_INFO)
+        .map(|v| postcard::from_bytes::<PcztRecipient<AccountId>>(v))
+        .transpose()
+        .map_err(|e: postcard::Error| {
+            PcztError::Invalid(format!(
+                "Postcard decoding of proprietary output info failed: {e}"
+            ))
+        })?;
+
+    Ok(pczt_recipient
+        .zip(note())
+        .map(|(pczt_recipient, note)| OrchardOutputInfo {
+            pczt_recipient,
+            external_address,
+            note,
+        }))
+}
+
 /// Scans a [`Transaction`] for any information that can be decrypted by the accounts in
 /// the wallet, and saves it to the wallet.
 pub fn decrypt_and_store_transaction<ParamsT, DbT>(
@@ -316,7 +403,7 @@ pub type ProposeTransferErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT> = Error<
 pub type ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT> = Error<
     <DbT as WalletRead>::Error,
     CommitmentTreeErrT,
-    GreedyInputSelectorError,
+    BalanceError,
     <FeeRuleT as FeeRule>::Error,
     <FeeRuleT as FeeRule>::Error,
     <DbT as InputSource>::NoteRef,
@@ -831,13 +918,6 @@ where
         fallback_change_pool,
         DustOutputPolicy::default(),
     );
-    #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
-    let change_strategy = if legacy_orchard_bundle_requested(proposed_version) {
-        change_strategy.with_legacy_orchard_change()
-    } else {
-        change_strategy
-    };
-
     propose_transfer(
         wallet_db,
         params,
@@ -874,7 +954,7 @@ pub fn propose_send_max_transfer<DbT, ParamsT, FeeRuleT, CommitmentTreeErrT>(
     memo: Option<MemoBytes>,
     mode: MaxSpendMode,
     confirmations_policy: ConfirmationsPolicy,
-    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+    #[cfg(feature = "unstable")] _proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<FeeRuleT, <DbT as InputSource>::NoteRef>,
     ProposeSendMaxErrT<DbT, CommitmentTreeErrT, FeeRuleT>,
@@ -906,8 +986,6 @@ where
         confirmations_policy,
         recipient,
         memo,
-        #[cfg(feature = "unstable")]
-        proposed_version,
     )?;
 
     Ok(proposal)
@@ -1269,8 +1347,7 @@ where
                 builder.add_orchard_spend(orchard_fvk.clone(), *note, merkle_path.clone())?;
             }
 
-            builder.add_ironwood_change_output(
-                orchard_fvk.clone(),
+            builder.add_ironwood_output(
                 internal_ovk.map(Into::into),
                 recipient,
                 ironwood_amount,
@@ -1553,10 +1630,10 @@ impl<AccountId> BuildRecipient<AccountId> {
 }
 
 #[allow(clippy::type_complexity)]
-struct BuildState<'a, P, AccountId> {
+struct BuildState<P, AccountId> {
     #[cfg(feature = "transparent-inputs")]
     step_index: usize,
-    builder: Builder<'a, P, ()>,
+    builder: Builder<P, ()>,
     #[cfg(feature = "transparent-inputs")]
     transparent_input_addresses: HashMap<TransparentAddress, TransparentAddressMetadata>,
     #[cfg(feature = "orchard")]
@@ -1593,10 +1670,7 @@ fn build_proposed_transaction<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>
         (TransparentAddress, OutPoint),
     >,
     #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
-) -> Result<
-    BuildState<'static, ParamsT, DbT::AccountId>,
-    CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>,
->
+) -> Result<BuildState<ParamsT, DbT::AccountId>, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
 where
     DbT: WalletWrite + WalletCommitmentTrees,
     ParamsT: consensus::Parameters + Clone,
@@ -2743,9 +2817,6 @@ where
     let prior_step_results = &[];
     let proposal_step = proposal.steps().first();
     let unused_transparent_outputs = &mut HashMap::new();
-    #[cfg(feature = "unstable")]
-    let proposed_version = Some(TxVersion::V5);
-
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
         wallet_db,
         params,
@@ -3231,10 +3302,6 @@ where
     }
     if let Some(orchard_vk) = orchard_vk {
         tx_extractor = tx_extractor.with_orchard(orchard_vk);
-        #[cfg(zcash_unstable = "nu7")]
-        {
-            tx_extractor = tx_extractor.with_ironwood(orchard_vk);
-        }
     }
     let transaction = tx_extractor.extract()?;
     let txid = transaction.txid();
@@ -3251,6 +3318,7 @@ where
         note: D::Note,
         output: &O,
         output_pool: ShieldedPool,
+        note_commitment_tree: Option<NoteCommitmentTree>,
         output_index: usize,
         pczt_recipient: PcztRecipient<AccountId>,
         external_address: Option<ZcashAddress>,
@@ -3287,7 +3355,7 @@ where
         }?;
 
         Ok(SentTransactionOutput::from_parts_in_tree(
-            Some(note_commitment_tree),
+            note_commitment_tree,
             output_index,
             recipient,
             note_value,
@@ -3313,6 +3381,7 @@ where
                             output_info.note,
                             action,
                             ShieldedPool::Orchard,
+                            Some(NoteCommitmentTree::Orchard),
                             output_index,
                             output_info.pczt_recipient,
                             output_info.external_address,
@@ -3345,7 +3414,7 @@ where
                             output_info.note,
                             action,
                             ShieldedPool::Orchard,
-                            NoteCommitmentTree::Ironwood,
+                            Some(NoteCommitmentTree::Ironwood),
                             stored_ironwood_output_index(&transaction, raw_output_index),
                             output_info.pczt_recipient,
                             output_info.external_address,
@@ -3377,6 +3446,7 @@ where
                             note,
                             action,
                             ShieldedPool::Sapling,
+                            Some(NoteCommitmentTree::Sapling),
                             output_index,
                             pczt_recipient,
                             external_address,
@@ -3613,14 +3683,16 @@ mod tests {
     #[cfg(all(feature = "unstable", zcash_unstable = "nu7"))]
     #[test]
     fn requested_pczt_version_rejects_mismatched_created_pczt() {
-        let pczt = pczt::roles::creator::Creator::new_v6(
+        let pczt = pczt::roles::creator::Creator::new(
             BranchId::Nu6_3.into(),
             10_000_000,
             133,
             [0; 32],
             [0; 32],
-            [1; 32],
         )
+        .unwrap()
+        .with_ironwood_anchor([1; 32])
+        .unwrap()
         .build();
 
         match super::ensure_created_pczt_matches_requested_version(&pczt, TxVersion::V5) {

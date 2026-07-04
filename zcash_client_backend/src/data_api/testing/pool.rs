@@ -6208,7 +6208,9 @@ fn pczt_legacy_v5_orchard_unshield_after_nu6_3<Dsf>(
     assert!(pczt_created.ironwood().actions().is_empty());
     assert_eq!(
         u32::from_le_bytes(
-            pczt_created.serialize_legacy_v1().unwrap()[4..8]
+            pczt::v1::Pczt::try_from(pczt_created.clone())
+                .unwrap()
+                .serialize()[4..8]
                 .try_into()
                 .unwrap()
         ),
@@ -6378,6 +6380,15 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
             ::orchard::ValuePool::Orchard,
         )
         .expect("the PCZT's consensus branch supports the Orchard pool")
+        .circuit_version(),
+    );
+    #[cfg(zcash_unstable = "nu7")]
+    let ironwood_pk = ::orchard::circuit::ProvingKey::build(
+        zcash_primitives::transaction::components::orchard::bundle_version_for_branch(
+            pczt_branch_id,
+            ::orchard::ValuePool::Ironwood,
+        )
+        .expect("the PCZT's consensus branch supports the Ironwood pool")
         .circuit_version(),
     );
     let pczt_prover = Prover::new(pczt_updated)

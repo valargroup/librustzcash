@@ -23,8 +23,8 @@ use zcash_script::solver::ScriptKind;
 use crate::{
     TransferType,
     data_api::{
-        DecryptedTransaction, NoteCommitmentTree, SAPLING_SHARD_HEIGHT, ScannedBlock,
-        TransactionStatus, WalletCommitmentTrees, chain::ChainState, ll::ReceivedShieldedOutput,
+        DecryptedTransaction, SAPLING_SHARD_HEIGHT, ScannedBlock, TransactionStatus,
+        WalletCommitmentTrees, chain::ChainState, ll::ReceivedShieldedOutput,
     },
     wallet::{Recipient, WalletTransparentOutput},
 };
@@ -587,6 +587,28 @@ where
                 )
                 .map_err(|error| PutBlocksError::ShardTreeForBlockRange {
                     pool: ShieldedPool::Orchard,
+                    block_range: from_state.block_height()..(last_scanned_height + 1),
+                    error,
+                })
+            })?;
+        }
+
+        // Update the Ironwood note commitment tree with all newly read note commitments
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+        {
+            let mut ironwood_subtrees = ironwood_subtrees.into_iter();
+            let mut missing_checkpoints = missing_ironwood_checkpoints.into_iter();
+            wallet_db.with_ironwood_tree_mut(|ironwood_tree| {
+                update_tree(
+                    "Ironwood",
+                    from_state.final_ironwood_tree(),
+                    from_state.block_height(),
+                    ironwood_tree,
+                    &mut ironwood_subtrees,
+                    &mut missing_checkpoints,
+                )
+                .map_err(|error| PutBlocksError::ShardTreeForBlockRange {
+                    pool: ShieldedPool::Ironwood,
                     block_range: from_state.block_height()..(last_scanned_height + 1),
                     error,
                 })

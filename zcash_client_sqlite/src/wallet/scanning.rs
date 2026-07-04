@@ -7,7 +7,7 @@ use std::rc::Rc;
 use tracing::{debug, trace};
 
 use zcash_client_backend::data_api::{
-    NoteCommitmentTree, SAPLING_SHARD_HEIGHT,
+    SAPLING_SHARD_HEIGHT,
     scanning::{ScanPriority, ScanRange, spanning_tree::SpanningTree},
 };
 use zcash_protocol::{
@@ -21,7 +21,11 @@ use crate::{
     wallet::{block_height_extrema, init::WalletMigrationError},
 };
 
-use super::{block_max_scanned, wallet_birthday};
+use super::{
+    block_max_scanned,
+    common::{TableConstants, table_constants},
+    wallet_birthday,
+};
 
 #[cfg(feature = "orchard")]
 use zcash_client_backend::data_api::{IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT};
@@ -317,12 +321,6 @@ pub(crate) fn scan_complete<P: consensus::Parameters>(
                         Address::above_position(ORCHARD_SHARD_HEIGHT.into(), *position).index(),
                     );
                 }
-                #[cfg(feature = "orchard")]
-                NoteCommitmentTree::Ironwood => {
-                    required_ironwood_subtrees.insert(
-                        Address::above_position(ORCHARD_SHARD_HEIGHT.into(), *position).index(),
-                    );
-                }
                 ShieldedPool::Ironwood => {
                     #[cfg(feature = "orchard")]
                     required_ironwood_subtrees.insert(
@@ -427,22 +425,6 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
     params: &P,
     pools: &[ShieldedPool],
 ) -> Result<(), SqliteClientError> {
-    #[cfg(feature = "orchard")]
-    fn table_has_column(
-        conn: &rusqlite::Transaction<'_>,
-        table_name: &str,
-        column_name: &str,
-    ) -> Result<bool, SqliteClientError> {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
-        let column_exists = stmt
-            .query_map([], |row| row.get::<_, String>("name"))?
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .any(|name| name == column_name);
-
-        Ok(column_exists)
-    }
-
     fn mark_pool(
         conn: &rusqlite::Transaction<'_>,
         pool: ShieldedPool,
@@ -458,7 +440,6 @@ pub(crate) fn mark_stabilized_notes<P: consensus::Parameters>(
              SET witness_stabilized = 1
              WHERE witness_stabilized = 0
                AND commitment_tree_position IS NOT NULL
-               {note_filter}
                AND EXISTS (
                    SELECT 1 FROM {table_prefix}_tree_shards shard
                    WHERE shard.subtree_end_height IS NOT NULL
@@ -492,6 +473,7 @@ fn tip_shard_end_height(
     conn: &rusqlite::Transaction<'_>,
     protocol: ShieldedPool,
 ) -> Result<Option<BlockHeight>, SqliteClientError> {
+    let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
     conn.query_row(
         &format!("SELECT MAX(subtree_end_height) FROM {table_prefix}_tree_shards"),
         [],
@@ -543,12 +525,21 @@ pub(crate) fn update_chain_tip<P: consensus::Parameters>(
     let sapling_shard_tip = tip_shard_end_height(conn, ShieldedPool::Sapling)?;
     #[cfg(feature = "orchard")]
     let orchard_shard_tip = tip_shard_end_height(conn, ShieldedPool::Orchard)?;
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+    let ironwood_shard_tip = tip_shard_end_height(conn, ShieldedPool::Ironwood)?;
 
-    #[cfg(feature = "orchard")]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
     let min_shard_tip = [sapling_shard_tip, orchard_shard_tip, ironwood_shard_tip]
         .into_iter()
         .flatten()
         .min();
+    #[cfg(all(feature = "orchard", not(zcash_unstable = "nu7")))]
+    let min_shard_tip = match (sapling_shard_tip, orchard_shard_tip) {
+        (None, None) => None,
+        (None, Some(o)) => Some(o),
+        (Some(s), None) => Some(s),
+        (Some(s), Some(o)) => Some(std::cmp::min(s, o)),
+    };
     #[cfg(not(feature = "orchard"))]
     let min_shard_tip = sapling_shard_tip;
 
