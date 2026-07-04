@@ -933,7 +933,7 @@ impl<AccountId: Eq + Hash> WalletSummary<AccountId> {
     }
 
     /// Returns the Ironwood subtree index that should start the next range of subtree
-    /// roots passed to [`WalletCommitmentTrees::put_ironwood_subtree_roots`].
+    /// roots inserted via [`WalletCommitmentTrees::with_ironwood_tree_mut`].
     #[cfg(feature = "orchard")]
     pub fn next_ironwood_subtree_index(&self) -> u64 {
         self.next_ironwood_subtree_index

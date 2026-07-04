@@ -13,7 +13,7 @@
 use {
     crate::{
         data_api::{
-            ORCHARD_SHARD_HEIGHT, WalletCommitmentTrees, WalletRead, WalletWrite,
+            WalletCommitmentTrees, WalletRead, WalletWrite,
             chain::{
                 BlockCache, ChainState, CommitmentTreeRoot, error::Error as ChainError,
                 scan_cached_blocks,
@@ -36,6 +36,9 @@ use {
     zcash_primitives::merkle_tree::HashSer,
     zcash_protocol::consensus::{BlockHeight, Parameters},
 };
+
+#[cfg(all(feature = "sync", feature = "orchard", zcash_unstable = "nu7"))]
+use crate::data_api::ORCHARD_SHARD_HEIGHT;
 
 #[cfg(all(feature = "sync", feature = "orchard"))]
 use orchard::tree::MerkleHashOrchard;

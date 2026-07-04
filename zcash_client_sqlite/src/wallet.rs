@@ -139,7 +139,7 @@ use crate::{
     wallet::{commitment_tree::SqliteShardStore, encoding::LEGACY_ADDRESS_INDEX_NULL},
 };
 
-#[cfg(feature = "orchard")]
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
 use crate::IRONWOOD_TABLES_PREFIX;
 
 #[cfg(feature = "transparent-inputs")]

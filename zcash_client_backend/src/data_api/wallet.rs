@@ -49,7 +49,7 @@ use super::InputSource;
 use crate::{
     data_api::{
         Account, MaxSpendMode, NoteCommitmentTree, SentTransaction, SentTransactionOutput,
-        TargetValue, WalletCommitmentTrees, WalletRead, WalletWrite, Zip32Derivation, error::Error,
+        WalletCommitmentTrees, WalletRead, WalletWrite, error::Error,
         wallet::input_selection::propose_send_max,
     },
     decrypt_transaction,
@@ -59,6 +59,13 @@ use crate::{
     proposal::{Proposal, ProposalError, Step, StepOutputIndex},
     wallet::{Note, OvkPolicy, Recipient},
 };
+
+#[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+use crate::data_api::TargetValue;
+
+#[cfg(all(feature = "pczt", feature = "orchard"))]
+use crate::data_api::Zip32Derivation;
+
 use sapling::{
     note_encryption::{PreparedIncomingViewingKey, try_sapling_note_decryption},
     prover::{OutputProver, SpendProver},

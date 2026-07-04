@@ -101,6 +101,7 @@ fn spendable_note_version_clause(protocol: ShieldedPool) -> &'static str {
     match protocol {
         ShieldedPool::Sapling => "",
         ShieldedPool::Orchard => "AND rn.note_version = 2",
+        ShieldedPool::Ironwood => "AND rn.note_version = 3",
     }
 }
 
