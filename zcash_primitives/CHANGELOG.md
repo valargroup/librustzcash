@@ -11,11 +11,42 @@ workspace.
 ## [Unreleased]
 
 ### Added
+- `zcash_primitives::transaction::components::orchard::bundle_version_for_branch`
+- `zcash_primitives::transaction::builder::transactional_bundle_type`, exposing
+  the per-pool `orchard::builder::BundleType` the builder uses for
+  transactional (non-coinbase) Orchard-pool bundles, for fee and change
+  calculation to stay consistent with.
+
+### Changed
+- The transaction builder no longer pads transactional Ironwood bundles to the
+  2-action minimum: an Ironwood bundle now contains exactly the requested
+  actions (so the single-output Orchard→Ironwood migration shape builds as one
+  action instead of two). Transactional Orchard bundles remain padded. See
+  `zcash_primitives::transaction::builder::transactional_bundle_type` for the
+  rationale and trade-off.
+- `zcash_primitives::transaction::components::orchard::read_v5_bundle` now takes
+  the consensus branch ID under which the transaction was constructed instead of
+  an `orchard::bundle::BundleVersion`; the Orchard bundle version is derived
+  from the branch ID via `bundle_version_for_branch`. A transaction whose
+  consensus branch ID predates NU5 is now rejected as invalid data if it
+  contains a non-empty Orchard bundle.
+- `zcash_primitives::transaction::components::orchard::read_v6_bundle` now takes
+  the consensus branch ID and the `orchard::ValuePool` identifying the bundle
+  slot to read, instead of an `orchard::bundle::BundleVersion`; the slot's
+  bundle version is derived via `bundle_version_for_branch`. A non-empty bundle
+  in a slot whose value pool is not supported under the transaction's consensus
+  branch ID (the Orchard pool prior to NU5; the Ironwood pool prior to NU6.3)
+  is now rejected as invalid data.
+
+## [0.29.0-pre.0] - 2026-06-30
+
+### Added
 - `zcash_primitives::block::Block::from_parts` (behind the `test-dependencies`
   feature flag).
 - `zcash_primitives::transaction`:
   - `TxVersion::V6`, the NU6.3 transaction format supporting Transparent,
     Sapling, Orchard, and Ironwood bundles.
+  - `TxVersion::has_ironwood`
   - `TransactionData::from_parts_v6`, for constructing v6 transactions with
     separate Orchard and Ironwood bundles.
   - `TransactionData::ironwood_bundle`, for accessing the Ironwood bundle on a
@@ -23,49 +54,82 @@ workspace.
   - `TxDigests::ironwood_digest`, for carrying the Ironwood bundle digest.
   - `TransactionDigest::{IronwoodDigest, digest_ironwood}`, for digest
     implementations that commit to Ironwood bundles.
+- `zcash_primitives::transaction::builder::Builder::add_orchard_change_output`,
+  for constructing wallet-controlled Orchard change outputs.
+- `zcash_primitives::transaction::builder` Ironwood support:
+  - `BuildConfig::Standard::ironwood_anchor`, the anchor used to construct the
+    Ironwood bundle.
+  - `Builder::{add_ironwood_spend, add_ironwood_output}`, which build the
+    Ironwood bundle alongside the Orchard bundle and require
+    `orchard::note::NoteVersion::V3` notes.
+  - `BuildResult::ironwood_meta` and `PcztParts::ironwood`/`PcztResult::ironwood_meta`,
+    exposing the Ironwood bundle and its build metadata.
+  - `Error::{IronwoodBuild, IronwoodSpend, IronwoodSpendUnsupportedNoteVersion,
+    IronwoodRecipient, IronwoodBuilderNotAvailable}`.
 - `zcash_primitives::transaction::builder`:
-  - `BuildConfig::Standard::ironwood_anchor`, enabling callers to provide the
-    anchor for the separate Ironwood note commitment tree.
-  - `Builder::add_ironwood_spend` and `Builder::add_ironwood_output`, which
-    build Ironwood actions using the Ironwood note plaintext format.
-  - `Builder::add_orchard_change_output` and
-    `Builder::add_ironwood_change_output`, which add wallet-controlled retained
-    value outputs for Orchard and Ironwood bundles.
-  - `Builder::with_expiry_height`, enabling callers to override the default
-    transaction expiry height when constructing transactions or PCZTs.
+  - `Builder::with_expiry_height`, for overriding the expiry height of the
+    transaction under construction. For non-coinbase transactions, setting this
+    to `BlockHeight::from(0)` disables transaction expiry.
   - `Error::CoinbaseExpiryHeightMismatch`, returned when a coinbase builder's
-    expiry height does not match its target block height.
-  - `BuildResult::ironwood_meta`, which exposes the randomized action
-    positions for Ironwood bundles.
-  - `PcztParts::ironwood` and `PcztResult::ironwood_meta`, which expose
-    Ironwood PCZT bundle data and randomized action positions.
-- `zcash_primitives::transaction::components::orchard`:
-  - `read_ironwood_v6_bundle` and `write_ironwood_v6_bundle` (behind the
-    `zcash_unstable = "nu6.3"` cfg flag), for reading and writing the Ironwood
-    bundle in the v6 transaction format under the Ironwood pool restriction.
+    expiry height is overridden to a value that does not match its target block
+    height.
 
 ### Changed
-- `zcash_primitives::transaction::components::orchard`:
-  - `read_v5_bundle` now takes the transaction's `consensus_branch_id` (a
-    `BranchId`) in place of its `ProofSizeEnforcement` argument; both the Orchard
-    pool restriction and the proof-size enforcement are now derived from the
-    consensus branch per ZIP 229.
-  - `write_v5_bundle` now takes the transaction's `consensus_branch_id` (a
-    `BranchId`), used to select the Orchard pool restriction when encoding the
-    bundle flags.
+- Migrated to `zcash_protocol 0.10.0-pre.0`, `zcash_transparent 0.9.0-pre.0`.
 - `zcash_primitives::transaction::builder`:
-  - The Orchard pool restriction for a transaction's Orchard bundle (and
-    therefore its cross-address rule and proving/verifying circuit) is now
-    selected by the consensus branch rather than the transaction version, so an
-    explicit version 5 request after NU6.3 still uses the NU6.3 Orchard pool
-    restriction.
-  - NU6.3 coinbase builders use Ironwood, not Orchard, for shielded outputs.
-  - `Builder::add_orchard_spend` and `Builder::add_ironwood_spend` now
-    explicitly enforce their note-version requirements.
+  - NU6.3 standard builders use the NU6.3 Orchard pool restrictions when
+    constructing V6 transactions.
+  - NU6.3 coinbase builders no longer expose Orchard outputs.
 - `TransactionDigest::digest_orchard` now receives `TxVersion`, so digest
   implementations can distinguish Orchard commitments by transaction format.
 - `TransactionDigest::digest_sapling` now receives `TxVersion`, so digest
   implementations can distinguish Sapling commitments by transaction format.
+- Updated the `orchard` dependency to the `feat/ironwood` revision `cbb6ed1`,
+  which gives every `Bundle` an explicit `BundleVersion` (distinguishing value
+  pool, protocol version, and bundle version) and lifts `Flags` out of
+  `BundleType`. Cross-address transfers are restricted to the Ironwood pool (an
+  Orchard v6 bundle can no longer set the cross-address flag). The bundle
+  (de)serialization helpers
+  `zcash_primitives::transaction::components::orchard::{read_v5_bundle,
+  read_v6_bundle, read_flags}` now take a `BundleVersion` argument, while
+  `write_v6_bundle` derives the version from the bundle.
+- `zcash_primitives::transaction::fees::FeeRule::fee_required` now takes an
+  additional `ironwood_action_count: usize` argument following
+  `orchard_action_count`. Implementors and callers must thread through the
+  number of Ironwood actions; pass `0` for transactions without an Ironwood
+  bundle. Under ZIP 317 each Ironwood action is charged one marginal fee, the
+  same as an Orchard action.
+- `TransactionData::from_parts_v6` is now also available behind
+  `zcash_unstable = "nu7"`, and includes the ZIP 233 amount argument when the
+  `zip-233` feature is enabled.
+- `TransactionData::{map_bundles, try_map_bundles}`: the `f_orchard` argument
+  is now `FnMut` instead of `FnOnce`, and is applied to the Ironwood bundle in
+  addition to the Orchard bundle. Callers whose `f_orchard` closures capture by
+  move, or that must not apply to the Ironwood bundle, must be updated.
+- `TransactionDigest::combine` now takes an additional `ironwood_digest`
+  argument.
+- The `TransactionDigest::HeaderDigest` associated type of
+  `BlockTxCommitmentDigester` is now `(TxVersion, BranchId)` (was `BranchId`).
+
+### Removed
+- All support for Transparent Zcash Extensions (TZEs), which was only ever
+  available behind the `--cfg zcash_unstable="zfuture"` development flag and has
+  been determined never to land. This removes the `zfuture` configuration and
+  everything it gated, including:
+  - `zcash_primitives::extensions` (the `transparent` extension traits and
+    types).
+  - `zcash_primitives::transaction::components::tze` and
+    `zcash_primitives::transaction::fees::tze`.
+  - `zcash_primitives::transaction::TxVersion::ZFuture`,
+    `TransactionData::{from_parts_zfuture, tze_bundle}`,
+    `TransactionData::write_tze`, `TransactionDigest::{TzeDigest, digest_tze}`,
+    and `TxDigests`/`TransactionDigest` no longer carry TZE digests.
+  - `zcash_primitives::transaction::builder::Builder::{build_zfuture,
+    get_fee_zfuture}`, the `ExtensionTxBuilder` implementation, and
+    `transaction::builder::Error::TzeBuild`.
+  - `zcash_primitives::transaction::fees::FutureFeeRule` and
+    `fees::FeeRule::fee_required_zfuture`.
+- `zcash_primitives::transaction::builder::BuildConfig::orchard_builder_config`
 
 ### Fixed
 - V6 transaction IDs and authorizing commitments now use the v6 Sapling,
