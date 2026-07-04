@@ -530,7 +530,7 @@ impl Parameters for TestNetwork {
             NetworkUpgrade::Nu6_1 => Some(BlockHeight(3_536_500)),
             NetworkUpgrade::Nu6_2 => Some(BlockHeight(4_052_000)),
             #[cfg(zcash_unstable = "nu6.3")]
-            NetworkUpgrade::Nu6_3 => None,
+            NetworkUpgrade::Nu6_3 => Some(BlockHeight(4_134_000)),
             #[cfg(zcash_unstable = "nu7")]
             NetworkUpgrade::Nu7 => None,
             #[cfg(zcash_unstable = "zfuture")]
@@ -743,9 +743,6 @@ pub enum BranchId {
     /// The consensus rules deployed by [`NetworkUpgrade::Nu6_2`].
     Nu6_2,
     /// The consensus rules to be deployed by [`NetworkUpgrade::Nu6_3`].
-    ///
-    /// This variant is gated by `zcash_unstable = "nu6.3"` and currently uses a
-    /// placeholder branch ID until the Ironwood / NU6.3 consensus branch ID is chosen.
     #[cfg(zcash_unstable = "nu6.3")]
     Nu6_3,
     /// The consensus rules to be deployed by [`NetworkUpgrade::Nu7`].
@@ -776,8 +773,7 @@ impl TryFrom<u32> for BranchId {
             0x4dec_4df0 => Ok(BranchId::Nu6_1),
             0x5437_f330 => Ok(BranchId::Nu6_2),
             #[cfg(zcash_unstable = "nu6.3")]
-            // TODO: Replace this placeholder once the Ironwood / NU6.3 consensus branch ID is chosen.
-            0xffff_ffff => Ok(BranchId::Nu6_3),
+            0x37a5_165b => Ok(BranchId::Nu6_3),
             #[cfg(zcash_unstable = "nu7")]
             0xffff_ffff => Ok(BranchId::Nu7),
             #[cfg(zcash_unstable = "zfuture")]
@@ -801,8 +797,7 @@ impl From<BranchId> for u32 {
             BranchId::Nu6_1 => 0x4dec_4df0,
             BranchId::Nu6_2 => 0x5437_f330,
             #[cfg(zcash_unstable = "nu6.3")]
-            // TODO: Replace this placeholder once the Ironwood / NU6.3 consensus branch ID is chosen.
-            BranchId::Nu6_3 => 0xffff_ffff,
+            BranchId::Nu6_3 => 0x37a5_165b,
             #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => 0xffff_ffff,
             #[cfg(zcash_unstable = "zfuture")]
@@ -1016,7 +1011,8 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockHeight, BranchId, MAIN_NETWORK, NetworkUpgrade, Parameters, UPGRADES_IN_ORDER,
+        BlockHeight, BranchId, MAIN_NETWORK, NetworkUpgrade, Parameters, TEST_NETWORK,
+        UPGRADES_IN_ORDER,
     };
 
     #[test]
@@ -1050,6 +1046,32 @@ mod tests {
     fn branch_id_from_u32() {
         assert_eq!(BranchId::try_from(0), Ok(BranchId::Sprout));
         assert!(BranchId::try_from(1).is_err());
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    #[test]
+    fn nu6_3_branch_id_matches_network() {
+        assert_eq!(u32::from(BranchId::Nu6_3), 0x37a5_165b);
+        assert_eq!(BranchId::try_from(0x37a5_165b), Ok(BranchId::Nu6_3));
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    #[test]
+    fn nu6_3_public_testnet_activation() {
+        assert_eq!(
+            TEST_NETWORK.activation_height(NetworkUpgrade::Nu6_3),
+            Some(BlockHeight(4_134_000))
+        );
+        assert!(!TEST_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight(4_133_999)));
+        assert!(TEST_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight(4_134_000)));
+        assert_eq!(
+            BranchId::for_height(&TEST_NETWORK, BlockHeight(4_133_999)),
+            BranchId::Nu6_2,
+        );
+        assert_eq!(
+            BranchId::for_height(&TEST_NETWORK, BlockHeight(4_134_000)),
+            BranchId::Nu6_3,
+        );
     }
 
     #[test]
