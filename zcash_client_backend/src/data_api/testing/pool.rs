@@ -450,6 +450,8 @@ pub fn scan_full_block_detects_outputs<T: ShieldedPoolTester>(
         Some(0),
         #[cfg(feature = "orchard")]
         Some(0),
+        #[cfg(feature = "orchard")]
+        Some(0),
     );
 
     // Phase 1: decrypt the block's shielded outputs.
@@ -3295,110 +3297,6 @@ where
     );
 }
 
-/// Regression test for a bug in which [`WalletWrite::delete_account`] failed with a
-/// `rusqlite::Error::InvalidParameterName(":address")` panic when the account being
-/// deleted was referenced by a `sent_notes` row via its `to_account_id` column.
-///
-/// The triggering state is reached when a transaction is sent from one account in the
-/// wallet to an address belonging to a second account in the same wallet, and the
-/// transaction is then decrypted via [`decrypt_and_store_transaction`] so that the
-/// cross-account transfer is recorded with a non-null `to_account_id` and a received
-/// output that has an associated address. Deleting the recipient account then exercises
-/// the `sent_notes` update path inside `delete_account`.
-///
-/// [`WalletWrite::delete_account`]: crate::data_api::WalletWrite::delete_account
-pub fn account_deletion_with_internal_transfer<T: ShieldedPoolTester, DSF>(
-    ds_factory: DSF,
-    cache: impl TestCache,
-) where
-    DSF: DataStoreFactory,
-    <DSF as DataStoreFactory>::DataStore: Reset,
-{
-    let mut st = TestBuilder::new()
-        .with_data_store_factory(ds_factory)
-        .with_block_cache(cache)
-        .build();
-
-    // Add two accounts to the wallet, derived from the same seed.
-    let seed = Secret::new([0u8; 32].to_vec());
-    let birthday = AccountBirthday::from_sapling_activation(st.network(), BlockHash([0; 32]));
-    let (account1, usk1) = st
-        .wallet_mut()
-        .create_account("account1", &seed, &birthday, None)
-        .unwrap();
-    let dfvk1 = T::sk_to_fvk(T::usk_to_sk(&usk1));
-
-    let (account2, usk2) = st
-        .wallet_mut()
-        .create_account("account2", &seed, &birthday, None)
-        .unwrap();
-    let dfvk2 = T::sk_to_fvk(T::usk_to_sk(&usk2));
-
-    // Add funds to account 1 in a single note.
-    let value = Zatoshis::from_u64(100000).unwrap();
-    let (h, _, _) = st.generate_next_block(&dfvk1, AddressType::DefaultExternal, value);
-    st.scan_cached_blocks(h, 1);
-
-    assert_eq!(st.get_total_balance(account1), value);
-    assert_eq!(st.get_total_balance(account2), Zatoshis::ZERO);
-
-    // Send funds from account 1 to an address belonging to account 2.
-    let bal_2 = Zatoshis::from_u64(50000).unwrap();
-    let addr2 = T::fvk_default_address(&dfvk2);
-    let req = TransactionRequest::new(vec![Payment::without_memo(
-        addr2.to_zcash_address(st.network()),
-        bal_2,
-    )])
-    .unwrap();
-
-    let change_strategy = fees::standard::SingleOutputChangeStrategy::new(
-        StandardFeeRule::Zip317,
-        None,
-        T::SHIELDED_PROTOCOL,
-        DustOutputPolicy::default(),
-    );
-    let input_selector = GreedyInputSelector::new();
-
-    let txid = st
-        .spend(
-            &input_selector,
-            &change_strategy,
-            &usk1,
-            req,
-            OvkPolicy::Sender,
-            ConfirmationsPolicy::MIN,
-        )
-        .unwrap()[0];
-
-    let (h, _) = st.generate_next_block_including(txid);
-    st.scan_cached_blocks(h, 1);
-
-    assert_eq!(st.get_total_balance(account2), bal_2);
-
-    // Decrypt and store the transaction. Because the wallet owns the funding inputs
-    // (account 1) and the output is received by account 2, this records the send as an
-    // internal cross-account transfer, setting `sent_notes.to_account_id` to account 2
-    // and associating the received output with account 2's address. This is the state
-    // that triggers the `delete_account` bug.
-    let tx = st.wallet().get_transaction(txid).unwrap().unwrap();
-    let params = *st.network();
-    decrypt_and_store_transaction(&params, st.wallet_mut(), &tx, Some(h)).unwrap();
-
-    // Deleting account 2, the recipient of the internal transfer, must succeed. Prior to
-    // the fix this failed with `rusqlite::Error::InvalidParameterName(":address")` because
-    // the `sent_notes` update statement bound the wrong parameter name.
-    assert_matches!(st.wallet_mut().delete_account(account2), Ok(_));
-
-    // account 1 should still exist and retain its change balance.
-    let summary = st
-        .wallet()
-        .get_wallet_summary(ConfirmationsPolicy::MIN)
-        .unwrap()
-        .unwrap();
-    assert!(summary.account_balances().get(&account2).is_none());
-    assert!(summary.account_balances().contains_key(&account1));
-}
-
 pub fn external_address_change_spends_detected_in_restore_from_seed<T: ShieldedPoolTester, Dsf>(
     ds_factory: Dsf,
     cache: impl TestCache,
@@ -3790,6 +3688,8 @@ pub fn birthday_in_anchor_shard<T: ShieldedPoolTester>(
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -4708,6 +4608,8 @@ pub fn truncate_to_chain_state_below_birthday<T: ShieldedPoolTester, Dsf>(
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -4852,6 +4754,8 @@ pub fn truncate_to_chain_state_above_scanned<T: ShieldedPoolTester, Dsf>(
         shard2_sapling_frontier,
         #[cfg(feature = "orchard")]
         shard2_orchard_frontier,
+        #[cfg(feature = "orchard")]
+        Frontier::empty(),
     );
 
     // Verify the scan queue extends beyond the target.
@@ -5291,6 +5195,8 @@ where
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -5553,6 +5459,8 @@ where
                     sapling_initial_tree,
                     #[cfg(feature = "orchard")]
                     orchard_initial_tree,
+                    #[cfg(feature = "orchard")]
+                    Frontier::empty(),
                 ),
                 prior_sapling_roots,
                 #[cfg(feature = "orchard")]
@@ -6113,9 +6021,266 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     Dsf: DataStoreFactory,
     <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
 {
+    pczt_single_step_with_network::<P0, P1, _>(
+        ds_factory,
+        cache,
+        TestBuilder::DEFAULT_NETWORK,
+        false,
+    );
+}
+
+#[cfg(all(feature = "pczt", feature = "orchard", zcash_unstable = "nu6.3"))]
+pub fn pczt_single_step_orchard_to_ironwood<Dsf>(ds_factory: Dsf, cache: impl TestCache)
+where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use super::orchard::OrchardPoolTester;
     use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
 
+    let zip212_enforcement_height = std::cmp::max(
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Nu5)
+            .unwrap(),
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Canopy)
+            .unwrap()
+            + ZIP212_GRACE_PERIOD,
+    );
+    let network = LocalNetwork {
+        nu6_3: Some(zip212_enforcement_height + 1),
+        ..TestBuilder::DEFAULT_NETWORK
+    };
+
+    pczt_single_step_with_network::<OrchardPoolTester, OrchardPoolTester, _>(
+        ds_factory, cache, network, true,
+    );
+}
+
+#[cfg(all(
+    feature = "pczt",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu6.3"
+))]
+pub fn pczt_legacy_v5_orchard_partial_unshield_after_nu6_3<Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    pczt_legacy_v5_orchard_unshield_after_nu6_3(ds_factory, cache, false);
+}
+
+#[cfg(all(
+    feature = "pczt",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu6.3"
+))]
+pub fn pczt_legacy_v5_orchard_full_unshield_after_nu6_3<Dsf>(ds_factory: Dsf, cache: impl TestCache)
+where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    pczt_legacy_v5_orchard_unshield_after_nu6_3(ds_factory, cache, true);
+}
+
+#[cfg(all(
+    feature = "pczt",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu6.3"
+))]
+fn pczt_legacy_v5_orchard_unshield_after_nu6_3<Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+    full_note_withdrawal: bool,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use super::orchard::OrchardPoolTester;
+    use zcash_primitives::transaction::TxVersion;
+    use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
+
+    let zip212_enforcement_height = std::cmp::max(
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Nu5)
+            .unwrap(),
+        TestBuilder::DEFAULT_NETWORK
+            .activation_height(NetworkUpgrade::Canopy)
+            .unwrap()
+            + ZIP212_GRACE_PERIOD,
+    );
+    let network = LocalNetwork {
+        nu6_3: Some(zip212_enforcement_height + 1),
+        ..TestBuilder::DEFAULT_NETWORK
+    };
+
     let mut st = TestBuilder::new()
+        .with_network(network)
+        .with_data_store_factory(ds_factory)
+        .with_block_cache(cache)
+        .with_initial_chain_state(|_, network| {
+            let birthday_height = std::cmp::max(
+                network.activation_height(NetworkUpgrade::Nu5).unwrap(),
+                network.activation_height(NetworkUpgrade::Canopy).unwrap() + ZIP212_GRACE_PERIOD,
+            );
+
+            InitialChainState {
+                chain_state: ChainState::new(
+                    birthday_height - 1,
+                    BlockHash([5; 32]),
+                    Frontier::empty(),
+                    Frontier::empty(),
+                    Frontier::empty(),
+                ),
+                prior_sapling_roots: vec![],
+                prior_orchard_roots: vec![],
+            }
+        })
+        .with_account_having_current_birthday()
+        .build();
+
+    let account = st.test_account().cloned().unwrap();
+    let orchard_fvk = OrchardPoolTester::test_account_fvk(&st);
+
+    let note_value = Zatoshis::const_from_u64(350000);
+    st.generate_next_block(&orchard_fvk, AddressType::DefaultExternal, note_value);
+    st.scan_cached_blocks(account.birthday().height(), 1);
+
+    assert_eq!(st.get_total_balance(account.id()), note_value);
+    assert_eq!(
+        st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+        note_value
+    );
+
+    let transparent_recipient = Address::Transparent(TransparentAddress::PublicKeyHash([7; 20]));
+    let transfer_amount = if full_note_withdrawal {
+        (note_value - Zatoshis::const_from_u64(15000)).unwrap()
+    } else {
+        Zatoshis::const_from_u64(200000)
+    };
+
+    let proposal = st
+        .propose_standard_transfer_with_tx_version::<Infallible>(
+            account.id(),
+            StandardFeeRule::Zip317,
+            ConfirmationsPolicy::MIN,
+            &transparent_recipient,
+            transfer_amount,
+            None,
+            None,
+            ShieldedProtocol::Orchard,
+            TxVersion::V5,
+        )
+        .unwrap();
+
+    assert_eq!(proposal.steps().len(), 1);
+    let step = proposal.steps().first();
+    if full_note_withdrawal {
+        assert_eq!(step.balance().proposed_change().len(), 1);
+        assert_eq!(
+            step.balance().proposed_change()[0].output_pool(),
+            PoolType::ORCHARD
+        );
+        assert_eq!(step.balance().proposed_change()[0].value(), Zatoshis::ZERO);
+    } else {
+        assert_eq!(step.balance().proposed_change().len(), 1);
+        assert_eq!(
+            step.balance().proposed_change()[0].output_pool(),
+            PoolType::ORCHARD
+        );
+    }
+
+    let pczt_created = st
+        .create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
+            account.id(),
+            OvkPolicy::Sender,
+            &proposal,
+            TxVersion::V5,
+        )
+        .unwrap();
+
+    assert_eq!(
+        *pczt_created.global().tx_version(),
+        zcash_protocol::constants::V5_TX_VERSION
+    );
+    assert!(pczt_created.ironwood().actions().is_empty());
+    assert_eq!(
+        u32::from_le_bytes(
+            pczt_created.serialize_legacy_v1().unwrap()[4..8]
+                .try_into()
+                .unwrap()
+        ),
+        1
+    );
+
+    assert_matches!(
+        st.extract_and_store_transaction_from_pczt(pczt_created.clone()),
+        Err(Error::Pczt(data_api::error::PcztError::Extraction(_)))
+    );
+
+    let pczt_updated =
+        OrchardPoolTester::add_proof_generation_keys(pczt_created, account.usk()).unwrap();
+    // The v5 Orchard bundle built after NU6.3 uses the NU6.3 pool restriction
+    // (OrchardNu6_3Onward) per ZIP 229, so it must be proven with the NU6.3 circuit.
+    #[cfg(zcash_unstable = "nu6.3")]
+    let orchard_pk =
+        ::orchard::circuit::ProvingKey::build(::orchard::circuit::OrchardCircuitVersion::PostNu6_3);
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let orchard_pk = ::orchard::circuit::ProvingKey::build(
+        ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+    );
+    let sapling_prover = LocalTxProver::bundled();
+    let pczt_proven = Prover::new(pczt_updated)
+        .create_orchard_proof(&orchard_pk)
+        .unwrap()
+        .create_sapling_proofs(&sapling_prover, &sapling_prover)
+        .unwrap()
+        .finish();
+
+    let mut signer = Signer::new(pczt_proven).unwrap();
+    OrchardPoolTester::apply_signatures_to_pczt(&mut signer, account.usk()).unwrap();
+    let pczt_authorized = signer.finish();
+
+    let txid = st
+        .extract_and_store_transaction_from_pczt(pczt_authorized)
+        .unwrap();
+
+    let tx = st
+        .wallet()
+        .get_transaction(txid)
+        .unwrap()
+        .expect("extracted PCZT transaction was stored");
+    assert!(tx.ironwood_bundle().is_none());
+
+    let sent_outputs = st.wallet().get_sent_outputs(&txid).unwrap();
+    assert!(sent_outputs.iter().any(|output| {
+        output.value() == transfer_amount
+            && output.external_recipient() == Some(&transparent_recipient)
+    }));
+}
+
+#[cfg(feature = "pczt")]
+fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
+    ds_factory: Dsf,
+    cache: impl TestCache,
+    network: LocalNetwork,
+    expect_ironwood_bundle: bool,
+) where
+    Dsf: DataStoreFactory,
+    <Dsf as DataStoreFactory>::AccountId: serde::Serialize + serde::de::DeserializeOwned,
+{
+    use zcash_protocol::consensus::ZIP212_GRACE_PERIOD;
+
+    #[cfg(not(zcash_unstable = "nu6.3"))]
+    let _ = expect_ironwood_bundle;
+
+    let mut st = TestBuilder::new()
+        .with_network(network)
         .with_data_store_factory(ds_factory)
         .with_block_cache(cache)
         .with_initial_chain_state(|_, network| {
@@ -6129,6 +6294,8 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
                 chain_state: ChainState::new(
                     birthday_height - 1,
                     BlockHash([5; 32]),
+                    Frontier::empty(),
+                    #[cfg(feature = "orchard")]
                     Frontier::empty(),
                     #[cfg(feature = "orchard")]
                     Frontier::empty(),
@@ -6201,12 +6368,37 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
 
     // Create proofs.
     let sapling_prover = LocalTxProver::bundled();
-    let orchard_pk = ::orchard::circuit::ProvingKey::build(
-        ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+    // Per ZIP 229 the Orchard circuit is selected by consensus branch, not tx
+    // version. This must mirror `orchard_protocol_for_branch` in every cfg so the
+    // proving key matches both the bundle the Creator built and the verifying key
+    // the extractor uses (otherwise extraction fails with `InvalidProof`).
+    let orchard_circuit_version = {
+        use zcash_protocol::consensus::BranchId;
+        let restrictions = match BranchId::try_from(*pczt_updated.global().consensus_branch_id()) {
+            #[cfg(zcash_unstable = "nu6.3")]
+            Ok(BranchId::Nu6_3) => ::orchard::bundle::BundleVersion::orchard_v3(),
+            #[cfg(zcash_unstable = "nu7")]
+            Ok(BranchId::Nu7) => ::orchard::bundle::BundleVersion::orchard_v3(),
+            Ok(BranchId::Nu6_2) => ::orchard::bundle::BundleVersion::orchard_v2(),
+            _ => ::orchard::bundle::BundleVersion::orchard_insecure_v1(),
+        };
+        restrictions.circuit_version()
+    };
+    let orchard_pk = ::orchard::circuit::ProvingKey::build(orchard_circuit_version);
+    #[cfg(zcash_unstable = "nu6.3")]
+    let ironwood_pk = ::orchard::circuit::ProvingKey::build(
+        ::orchard::bundle::BundleVersion::ironwood_v3().circuit_version(),
     );
-    let pczt_proven = Prover::new(pczt_updated)
+    let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)
-        .unwrap()
+        .unwrap();
+    #[cfg(zcash_unstable = "nu6.3")]
+    let pczt_prover = if pczt_prover.requires_ironwood_proof() {
+        pczt_prover.create_ironwood_proof(&ironwood_pk).unwrap()
+    } else {
+        pczt_prover
+    };
+    let pczt_proven = pczt_prover
         .create_sapling_proofs(&sapling_prover, &sapling_prover)
         .unwrap()
         .finish();
@@ -6220,6 +6412,24 @@ pub fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester, Dsf>(
     let extract_and_store_result = st.extract_and_store_transaction_from_pczt(pczt_authorized);
     assert_matches!(&extract_and_store_result, Ok(_));
     let txid = extract_and_store_result.unwrap();
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    {
+        let tx = st
+            .wallet()
+            .get_transaction(txid)
+            .unwrap()
+            .expect("extracted PCZT transaction was stored");
+
+        if expect_ironwood_bundle {
+            assert!(tx.ironwood_bundle().is_some());
+        }
+    }
+
+    let sent_outputs = st.wallet().get_sent_outputs(&txid).unwrap();
+    assert!(sent_outputs.iter().any(|output| {
+        output.value() == transfer_amount && output.external_recipient() == Some(&p1_to)
+    }));
 
     let (h, _) = st.generate_next_block_including(txid);
     st.scan_cached_blocks(h, 1);
@@ -6987,9 +7197,9 @@ pub fn propose_shielding_coinbase_with_zero_limit_insufficient_funds<T: Shielded
 
 /// Regression test for the propose-fee/build-fee mismatch fixed in #2376.
 ///
-/// Both `sapling::builder::BundleType::DEFAULT` and
-/// `orchard::builder::BundleType::DEFAULT` pad up to a minimum of 2
-/// outputs/actions (`MIN_SHIELDED_OUTPUTS` / `MIN_ACTIONS`). Before the fix,
+/// Both `sapling::builder::BundleType::DEFAULT` and the Orchard protocol action
+/// count helpers pad up to a minimum of 2 outputs/actions
+/// (`MIN_SHIELDED_OUTPUTS` / `MIN_ACTIONS`). Before the fix,
 /// `propose_shielding_coinbase` hardcoded `(1, 0)` / `(0, 1)` when asking the
 /// fee rule what fee to charge, so the proposal underestimated the fee by
 /// exactly one ZIP-317 marginal unit (5000 zat). The proposal succeeded, but

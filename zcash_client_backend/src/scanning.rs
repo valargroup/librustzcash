@@ -12,19 +12,18 @@ use subtle::{ConditionallySelectable, ConstantTimeEq, CtOption};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_note_encryption::{BatchDomain, Domain, ShieldedOutput};
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::{
-    ShieldedProtocol,
-    consensus::{self, BlockHeight},
-};
+use zcash_protocol::consensus::{self, BlockHeight};
 use zip32::Scope;
 
 use crate::{
-    data_api::{BlockMetadata, NullifierQuery, ScannedBlock, WalletRead},
+    data_api::{BlockMetadata, NoteCommitmentTree, NullifierQuery, ScannedBlock, WalletRead},
     proto::compact_formats::CompactBlock,
     scan::DecryptedOutput,
     wallet::WalletOutput,
 };
 
+#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+use orchard::note_encryption::IronwoodDomain;
 #[cfg(feature = "orchard")]
 use orchard::note_encryption::OrchardDomain;
 
@@ -186,8 +185,17 @@ impl<AccountId> ScanningKeyOps<SaplingDomain, AccountId, sapling::Nullifier>
 }
 
 #[cfg(feature = "orchard")]
-impl<AccountId> ScanningKeyOps<OrchardDomain, AccountId, orchard::note::Nullifier>
-    for ScanningKey<orchard::keys::IncomingViewingKey, orchard::keys::FullViewingKey, AccountId>
+impl<AccountId, V: orchard::note_encryption::DomainVersion>
+    ScanningKeyOps<
+        orchard::note_encryption::NoteEncryptionDomain<V>,
+        AccountId,
+        orchard::note::Nullifier,
+    > for ScanningKey<orchard::keys::IncomingViewingKey, orchard::keys::FullViewingKey, AccountId>
+where
+    orchard::note_encryption::NoteEncryptionDomain<V>: Domain<
+            IncomingViewingKey = orchard::keys::PreparedIncomingViewingKey,
+            Note = orchard::note::Note,
+        >,
 {
     fn prepare(&self) -> orchard::keys::PreparedIncomingViewingKey {
         orchard::keys::PreparedIncomingViewingKey::new(&self.ivk)
@@ -221,6 +229,11 @@ pub struct ScanningKeys<AccountId, IvkTag> {
         IvkTag,
         Box<dyn ScanningKeyOps<OrchardDomain, AccountId, orchard::note::Nullifier> + Send + Sync>,
     >,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    ironwood: HashMap<
+        IvkTag,
+        Box<dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier> + Send + Sync>,
+    >,
 }
 
 impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
@@ -238,11 +251,21 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
                     + Sync,
             >,
         >,
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))] ironwood: HashMap<
+            IvkTag,
+            Box<
+                dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier>
+                    + Send
+                    + Sync,
+            >,
+        >,
     ) -> Self {
         Self {
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+            ironwood,
         }
     }
 
@@ -252,6 +275,8 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
             sapling: HashMap::new(),
             #[cfg(feature = "orchard")]
             orchard: HashMap::new(),
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+            ironwood: HashMap::new(),
         }
     }
 
@@ -275,6 +300,20 @@ impl<AccountId, IvkTag> ScanningKeys<AccountId, IvkTag> {
     > {
         &self.orchard
     }
+
+    /// Returns the keys to be used for incoming Ironwood (V3) note detection.
+    ///
+    /// These are the same Orchard viewing keys, boxed for the Ironwood note-encryption
+    /// domain so that they trial-decrypt V3 (Ironwood) note plaintexts.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    pub fn ironwood(
+        &self,
+    ) -> &HashMap<
+        IvkTag,
+        Box<dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier> + Send + Sync>,
+    > {
+        &self.ironwood
+    }
 }
 
 impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
@@ -296,6 +335,15 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
             (AccountId, Scope),
             Box<
                 dyn ScanningKeyOps<OrchardDomain, AccountId, orchard::note::Nullifier>
+                    + Send
+                    + Sync,
+            >,
+        > = HashMap::new();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let mut ironwood: HashMap<
+            (AccountId, Scope),
+            Box<
+                dyn ScanningKeyOps<IronwoodDomain, AccountId, orchard::note::Nullifier>
                     + Send
                     + Sync,
             >,
@@ -328,6 +376,16 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
                             key_scope: Some(scope),
                         }),
                     );
+                    #[cfg(zcash_unstable = "nu6.3")]
+                    ironwood.insert(
+                        (account_id, scope),
+                        Box::new(ScanningKey {
+                            ivk: fvk.to_ivk(scope),
+                            nk: Some(fvk.clone()),
+                            account_id,
+                            key_scope: Some(scope),
+                        }),
+                    );
                 }
             }
         }
@@ -336,6 +394,8 @@ impl<AccountId: Copy + Eq + Hash + Send + Sync + 'static>
             sapling,
             #[cfg(feature = "orchard")]
             orchard,
+            #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+            ironwood,
         }
     }
 }
@@ -468,11 +528,11 @@ impl<AccountId: Copy> Nullifiers<AccountId> {
 /// Errors that may occur in chain scanning
 #[derive(Clone, Debug)]
 pub enum ScanError {
-    /// The encoding of a compact Sapling output or compact Orchard action was invalid.
+    /// The encoding of a compact shielded output was invalid.
     EncodingInvalid {
         at_height: BlockHeight,
         txid: TxId,
-        pool_type: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         index: usize,
     },
 
@@ -487,20 +547,20 @@ pub enum ScanError {
         new_height: BlockHeight,
     },
 
-    /// The note commitment tree size for the given protocol at the proposed new block is not equal
+    /// The note commitment tree size for the given tree at the proposed new block is not equal
     /// to the size at the previous block plus the count of this block's outputs.
     TreeSizeMismatch {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
         given: u32,
         computed: u32,
     },
 
-    /// The size of the note commitment tree for the given protocol was not provided as part of a
+    /// The size of the note commitment tree for the given tree was not provided as part of a
     /// [`CompactBlock`] being scanned, making it impossible to construct the nullifier for a
     /// detected note.
     TreeSizeUnknown {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
     },
 
@@ -508,14 +568,14 @@ pub enum ScanError {
     /// that is invalidated by the data in the block itself. This may be caused by the presence
     /// of default values in the chain metadata.
     TreeSizeInvalid {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
     },
 
-    /// The size of the note commitment tree for the given protocol would exceed the
+    /// The size of the note commitment tree for the given tree would exceed the
     /// `u32` range as a result of applying the outputs in the block being scanned.
     TreeSizeOverflow {
-        protocol: ShieldedProtocol,
+        tree: NoteCommitmentTree,
         at_height: BlockHeight,
     },
 }
@@ -555,13 +615,10 @@ impl fmt::Display for ScanError {
         use ScanError::*;
         match &self {
             EncodingInvalid {
-                txid,
-                pool_type,
-                index,
-                ..
+                txid, tree, index, ..
             } => write!(
                 f,
-                "{pool_type:?} output {index} of transaction {txid} was improperly encoded."
+                "{tree:?} compact item {index} of transaction {txid} was improperly encoded."
             ),
             PrevHashMismatch { at_height } => write!(
                 f,
@@ -577,41 +634,32 @@ impl fmt::Display for ScanError {
                 )
             }
             TreeSizeMismatch {
-                protocol,
+                tree,
                 at_height,
                 given,
                 computed,
             } => {
                 write!(
                     f,
-                    "The {protocol:?} note commitment tree size provided by a compact block did not match the expected size at height {at_height}; given {given}, expected {computed}"
+                    "The {tree:?} note commitment tree size provided by a compact block did not match the expected size at height {at_height}; given {given}, expected {computed}"
                 )
             }
-            TreeSizeUnknown {
-                protocol,
-                at_height,
-            } => {
+            TreeSizeUnknown { tree, at_height } => {
                 write!(
                     f,
-                    "Unable to determine {protocol:?} note commitment tree size at height {at_height}"
+                    "Unable to determine {tree:?} note commitment tree size at height {at_height}"
                 )
             }
-            TreeSizeInvalid {
-                protocol,
-                at_height,
-            } => {
+            TreeSizeInvalid { tree, at_height } => {
                 write!(
                     f,
-                    "Received invalid (potentially default) {protocol:?} note commitment tree size metadata at height {at_height}"
+                    "Received invalid (potentially default) {tree:?} note commitment tree size metadata at height {at_height}"
                 )
             }
-            TreeSizeOverflow {
-                protocol,
-                at_height,
-            } => {
+            TreeSizeOverflow { tree, at_height } => {
                 write!(
                     f,
-                    "The {protocol:?} note commitment tree size at height {at_height} would exceed the `u32` range."
+                    "The {tree:?} note commitment tree size at height {at_height} would exceed the `u32` range."
                 )
             }
         }
@@ -661,6 +709,10 @@ struct PositionTracker {
     orchard_tree_position: u32,
     #[cfg(feature = "orchard")]
     orchard_final_tree_size: u32,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    ironwood_tree_position: u32,
+    #[cfg(feature = "orchard")]
+    ironwood_final_tree_size: u32,
 }
 
 impl PositionTracker {
@@ -674,6 +726,14 @@ impl PositionTracker {
     fn orchard_note_position(&self, output_idx: usize) -> Position {
         Position::from(u64::from(
             self.orchard_tree_position + u32::try_from(output_idx).unwrap(),
+        ))
+    }
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn ironwood_note_position(&self, output_idx: usize) -> Position {
+        Position::from(u64::from(
+            self.ironwood_tree_position
+                + u32::try_from(output_idx).expect("Ironwood action count cannot exceed a u32"),
         ))
     }
 }
@@ -740,6 +800,8 @@ fn find_received<
     block_height: BlockHeight,
     last_commitments_in_block: bool,
     txid: TxId,
+    note_commitment_tree: NoteCommitmentTree,
+    output_index: impl Fn(usize) -> usize,
     note_position: impl Fn(usize) -> Position,
     keys: &HashMap<IvkTag, SK>,
     spent_from_accounts: &HashSet<AccountId>,
@@ -828,8 +890,9 @@ fn find_received<
             let note_commitment_tree_position = note_position(output_idx);
             let nf = key.nf(&note, note_commitment_tree_position);
 
-            shielded_outputs.push(WalletOutput::from_parts(
-                output_idx,
+            shielded_outputs.push(WalletOutput::from_parts_in_tree(
+                note_commitment_tree,
+                output_index(output_idx),
                 output.ephemeral_key(),
                 note,
                 is_change,
@@ -987,6 +1050,11 @@ pub mod testing {
                         + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
                     orchard_commitment_tree_size: initial_orchard_tree_size
                         + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
+                    ironwood_commitment_tree_size: cb
+                        .vtx
+                        .iter()
+                        .map(|tx| tx.ironwood_actions.len() as u32)
+                        .sum::<u32>(),
                 }
             });
 

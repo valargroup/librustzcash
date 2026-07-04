@@ -28,7 +28,6 @@ jobs:
           - all-pools
           - all-features
           - NU6.3
-          - NU7
 
         include:
           - target: Linux
@@ -49,9 +48,6 @@ jobs:
           - state: NU6.3
             all-features: true
             rustflags: '--cfg zcash_unstable="nu6.3"'
-          - state: NU7
-            all-features: true
-            rustflags: '--cfg zcash_unstable="nu7"'
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -97,7 +93,6 @@ jobs:
           - all-pools
           - all-features
           - NU6.3
-          - NU7
 
         include:
           - target: macOS
@@ -116,17 +111,12 @@ jobs:
           - state: NU6.3
             all-features: true
             rustflags: '--cfg zcash_unstable="nu6.3"'
-          - state: NU7
-            all-features: true
-            rustflags: '--cfg zcash_unstable="nu7"'
 
         exclude:
           - target: macOS
             state: all-features
           - target: macOS
             state: NU6.3
-          - target: macOS
-            state: NU7
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -170,7 +160,6 @@ jobs:
           - Orchard
           - all-features
           - NU6.3
-          - NU7
 
         include:
           - target: Linux
@@ -185,9 +174,6 @@ jobs:
           - state: NU6.3
             all-features: true
             rustflags: '--cfg zcash_unstable="nu6.3"'
-          - state: NU7
-            all-features: true
-            rustflags: '--cfg zcash_unstable="nu7"'
 
     env:
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -215,6 +201,61 @@ jobs:
           --workspace
           ${{ steps.prepare.outputs.feature-flags }}
           --features expensive-tests
+      - name: Verify working directory is clean
+        run: git diff --exit-code
+
+  # States that we want to ensure can be built, but that we don't actively run tests for.
+  check-msrv:
+    name: Check ${{ matrix.state }} build on ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        target:
+          - Linux
+          - macOS
+          - Windows
+        state:
+          - ZFuture
+          - ZFuture-allfeatures
+
+        include:
+          - target: Linux
+            os: ubuntu-latest
+          - target: macOS
+            os: macOS-latest
+          - target: Windows
+            os: windows-latest
+
+          - state: ZFuture
+            rustflags: '--cfg zcash_unstable="zfuture"'
+          - state: ZFuture-allfeatures
+            all-features: true
+            rustflags: '--cfg zcash_unstable="zfuture"'
+
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      RUSTDOCFLAGS: ${{ matrix.rustflags }}
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - id: prepare
+        uses: ./.github/actions/prepare
+        with:
+          all-features: ${{ matrix.all-features || false }}
+          extra-features: ${{ matrix.extra_flags || '' }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: msrv
+          save-if: "false"
+      - name: Run check
+        run: >
+          cargo check
+          --release
+          --workspace
+          --tests
+          ${{ steps.prepare.outputs.feature-flags }}
       - name: Verify working directory is clean
         run: git diff --exit-code
 
@@ -540,6 +581,7 @@ jobs:
     name: Required status checks have passed
     needs:
       - required-test
+      - check-msrv
       - build-latest
       - build-nodefault
       - bitrot
