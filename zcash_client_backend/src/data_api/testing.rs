@@ -649,7 +649,16 @@ where
         cb.chain_metadata = Some(compact_formats::ChainMetadata {
             sapling_commitment_tree_size: prior_cached_block.sapling_end_size,
             orchard_commitment_tree_size: prior_cached_block.orchard_end_size,
-            ironwood_commitment_tree_size: prior_cached_block.ironwood_end_size,
+            ironwood_commitment_tree_size: {
+                #[cfg(feature = "orchard")]
+                {
+                    prior_cached_block.ironwood_end_size
+                }
+                #[cfg(not(feature = "orchard"))]
+                {
+                    0
+                }
+            },
         });
 
         let res = self.cache_block(&prior_cached_block, cb);
@@ -2798,16 +2807,27 @@ fn fake_compact_block_from_compact_tx(
     };
     cb.prev_hash.extend_from_slice(&prev_hash.0);
     cb.vtx.push(ctx);
+    let ironwood_commitment_tree_size = {
+        #[cfg(feature = "orchard")]
+        {
+            initial_ironwood_tree_size
+                + cb.vtx
+                    .iter()
+                    .map(|tx| tx.ironwood_actions.len() as u32)
+                    .sum::<u32>()
+        }
+        #[cfg(not(feature = "orchard"))]
+        {
+            0
+        }
+    };
+
     cb.chain_metadata = Some(compact_formats::ChainMetadata {
         sapling_commitment_tree_size: initial_sapling_tree_size
             + cb.vtx.iter().map(|tx| tx.outputs.len() as u32).sum::<u32>(),
         orchard_commitment_tree_size: initial_orchard_tree_size
             + cb.vtx.iter().map(|tx| tx.actions.len() as u32).sum::<u32>(),
-        ironwood_commitment_tree_size: initial_ironwood_tree_size
-            + cb.vtx
-                .iter()
-                .map(|tx| tx.ironwood_actions.len() as u32)
-                .sum::<u32>(),
+        ironwood_commitment_tree_size,
     });
     cb
 }
