@@ -14,7 +14,7 @@ use transparent::{address::TransparentAddress, bundle::OutPoint};
 use zcash_keys::{address::Receiver, encoding::AddressCodec as _};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::{
-    PoolType, ShieldedProtocol,
+    PoolType,
     consensus::{self, BlockHeight},
     value::{BalanceError, Zatoshis},
 };
@@ -22,13 +22,13 @@ use zcash_protocol::{
 use crate::{
     TransferType,
     data_api::{
-        DecryptedTransaction, SAPLING_SHARD_HEIGHT, ScannedBlock, TransactionStatus,
-        WalletCommitmentTrees, chain::ChainState, ll::ReceivedShieldedOutput,
+        DecryptedTransaction, NoteCommitmentTree, SAPLING_SHARD_HEIGHT, ScannedBlock,
+        TransactionStatus, WalletCommitmentTrees, chain::ChainState, ll::ReceivedShieldedOutput,
     },
     wallet::{Recipient, WalletTransparentOutput},
 };
 
-use super::{LowLevelWalletRead, LowLevelWalletWrite, TxMeta};
+use super::{LowLevelWalletRead, LowLevelWalletWrite, SentOutput, TxMeta};
 
 #[cfg(feature = "transparent-inputs")]
 use {
@@ -129,20 +129,6 @@ pub enum PutBlocksError<SE, TE> {
     Storage(SE),
     /// Wraps an error produced by [`shardtree`] insertion.
     ShardTree(ShardTreeError<TE>),
-    /// Wraps an error produced by [`shardtree`] while inserting the note commitment data for a
-    /// range of scanned blocks into one of the wallet's note commitment trees. The `pool` and
-    /// `block_range` fields record the shielded pool whose note commitment tree was being updated
-    /// and the range of block heights (start-inclusive, end-exclusive) that were being added to
-    /// the wallet when the error occurred.
-    ShardTreeForBlockRange {
-        /// The shielded pool whose note commitment tree was being updated when the error occurred.
-        pool: ShieldedProtocol,
-        /// The range of block heights that were being added to the wallet when the error
-        /// occurred.
-        block_range: Range<BlockHeight>,
-        /// The underlying error produced by [`shardtree`] insertion.
-        error: ShardTreeError<TE>,
-    },
     #[cfg(feature = "transparent-inputs")]
     GapAddresses(GapAddressesError<SE>),
 }
@@ -237,6 +223,12 @@ where
             + u64::try_from(initial_block.orchard().commitments().len()).unwrap()
             == u64::from(initial_block.orchard().final_tree_size());
     }
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    {
+        initial_block_sequential &= from_state.final_ironwood_tree().tree_size()
+            + u64::try_from(initial_block.ironwood().commitments().len()).unwrap()
+            == u64::from(initial_block.ironwood().final_tree_size());
+    }
     if !initial_block_sequential {
         return Err(PutBlocksError::NonSequentialBlocks {
             prev_height: from_state.block_height(),
@@ -247,6 +239,8 @@ where
     let mut sapling_commitments = vec![];
     #[cfg(feature = "orchard")]
     let mut orchard_commitments = vec![];
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let mut ironwood_commitments = vec![];
     let mut last_scanned_height = None;
     let mut note_positions = vec![];
 
@@ -276,6 +270,14 @@ where
                 block.orchard().final_tree_size(),
                 #[cfg(feature = "orchard")]
                 block.orchard().commitments().len().try_into().unwrap(),
+                #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+                block.ironwood().final_tree_size(),
+                #[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
+                0,
+                #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+                block.ironwood().commitments().len().try_into().unwrap(),
+                #[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
+                0,
             )
             .map_err(PutBlocksError::Storage)?;
 
@@ -300,6 +302,8 @@ where
                 tx.sapling_spends().iter().map(|spend| spend.nf()),
                 #[cfg(feature = "orchard")]
                 tx.orchard_spends().iter().map(|spend| spend.nf()),
+                #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+                std::iter::empty(),
             )
             .map_err(PutBlocksError::Storage)?;
 
@@ -371,18 +375,22 @@ where
         wallet_db
             .track_block_orchard_nullifiers(block.height(), block.orchard().nullifier_map())
             .map_err(PutBlocksError::Storage)?;
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        wallet_db
+            .track_block_orchard_nullifiers(block.height(), block.ironwood().nullifier_map())
+            .map_err(PutBlocksError::Storage)?;
 
         note_positions.extend(block.transactions().iter().flat_map(|wtx| {
             let iter = wtx.sapling_outputs().iter().map(|out| {
                 (
-                    ShieldedProtocol::Sapling,
+                    NoteCommitmentTree::Sapling,
                     out.note_commitment_tree_position(),
                 )
             });
             #[cfg(feature = "orchard")]
             let iter = iter.chain(wtx.orchard_outputs().iter().map(|out| {
                 (
-                    ShieldedProtocol::Orchard,
+                    out.note_commitment_tree(),
                     out.note_commitment_tree_position(),
                 )
             }));
@@ -411,10 +419,22 @@ where
                 .map(|(_, r)| *r)
                 .collect::<Vec<_>>()
         );
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        trace!(
+            "Ironwood commitments for {:?}: {:?}",
+            last_scanned_height,
+            block_commitments
+                .ironwood
+                .iter()
+                .map(|(_, r)| *r)
+                .collect::<Vec<_>>()
+        );
 
         sapling_commitments.extend(block_commitments.sapling.into_iter().map(Some));
         #[cfg(feature = "orchard")]
         orchard_commitments.extend(block_commitments.orchard.into_iter().map(Some));
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        ironwood_commitments.extend(block_commitments.ironwood.into_iter().map(Some));
     }
 
     #[cfg(feature = "transparent-inputs")]
@@ -457,9 +477,48 @@ where
             &mut orchard_commitments,
             CHUNK_SIZE,
         );
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let ironwood_subtrees = build_subtrees::<_, ORCHARD_SHARD_HEIGHT>(
+            Position::from(from_state.final_ironwood_tree().tree_size()),
+            &mut ironwood_commitments,
+            CHUNK_SIZE,
+        );
 
         // Ensure that we have the same set of checkpoints across all trees.
-        #[cfg(feature = "orchard")]
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let (
+            missing_sapling_checkpoints,
+            missing_orchard_checkpoints,
+            missing_ironwood_checkpoints,
+        ) = {
+            let sapling_checkpoint_positions = checkpoint_positions(&sapling_subtrees);
+            let orchard_checkpoint_positions = checkpoint_positions(&orchard_subtrees);
+            let ironwood_checkpoint_positions = checkpoint_positions(&ironwood_subtrees);
+            (
+                ensure_checkpoints(
+                    orchard_checkpoint_positions
+                        .keys()
+                        .chain(ironwood_checkpoint_positions.keys()),
+                    &sapling_checkpoint_positions,
+                    from_state.final_sapling_tree(),
+                ),
+                ensure_checkpoints(
+                    sapling_checkpoint_positions
+                        .keys()
+                        .chain(ironwood_checkpoint_positions.keys()),
+                    &orchard_checkpoint_positions,
+                    from_state.final_orchard_tree(),
+                ),
+                ensure_checkpoints(
+                    sapling_checkpoint_positions
+                        .keys()
+                        .chain(orchard_checkpoint_positions.keys()),
+                    &ironwood_checkpoint_positions,
+                    from_state.final_ironwood_tree(),
+                ),
+            )
+        };
+        #[cfg(all(feature = "orchard", not(zcash_unstable = "nu6.3")))]
         let (missing_sapling_checkpoints, missing_orchard_checkpoints) = {
             let sapling_checkpoint_positions = checkpoint_positions(&sapling_subtrees);
             let orchard_checkpoint_positions = checkpoint_positions(&orchard_subtrees);
@@ -492,11 +551,7 @@ where
                     #[cfg(feature = "orchard")]
                     &mut missing_checkpoints,
                 )
-                .map_err(|error| PutBlocksError::ShardTreeForBlockRange {
-                    pool: ShieldedProtocol::Sapling,
-                    block_range: from_state.block_height()..(last_scanned_height + 1),
-                    error,
-                })
+                .map_err(PutBlocksError::ShardTree)
             })?;
         }
 
@@ -514,11 +569,25 @@ where
                     &mut orchard_subtrees,
                     &mut missing_checkpoints,
                 )
-                .map_err(|error| PutBlocksError::ShardTreeForBlockRange {
-                    pool: ShieldedProtocol::Orchard,
-                    block_range: from_state.block_height()..(last_scanned_height + 1),
-                    error,
-                })
+                .map_err(PutBlocksError::ShardTree)
+            })?;
+        }
+
+        // Update the Ironwood note commitment tree with all newly read note commitments
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        {
+            let mut ironwood_subtrees = ironwood_subtrees.into_iter();
+            let mut missing_checkpoints = missing_ironwood_checkpoints.into_iter();
+            wallet_db.with_ironwood_tree_mut(|ironwood_tree| {
+                update_tree(
+                    "Ironwood",
+                    from_state.final_ironwood_tree(),
+                    from_state.block_height(),
+                    ironwood_tree,
+                    &mut ironwood_subtrees,
+                    &mut missing_checkpoints,
+                )
+                .map_err(PutBlocksError::ShardTree)
             })?;
         }
 
@@ -680,6 +749,12 @@ where
             .iter()
             .flat_map(|b| b.actions().iter())
             .map(|action| action.nullifier()),
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        d_tx.tx()
+            .ironwood_bundle()
+            .iter()
+            .flat_map(|b| b.actions().iter())
+            .map(|action| action.nullifier()),
     )?;
 
     // A flag used to determine whether it is necessary to query for transactions that
@@ -797,6 +872,9 @@ where
         #[cfg(feature = "orchard")]
         let detectable_via_scanning =
             detectable_via_scanning | d_tx.tx().orchard_bundle().is_some();
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let detectable_via_scanning =
+            detectable_via_scanning | d_tx.tx().ironwood_bundle().is_some();
 
         if d_tx.mined_height().is_none() && !detectable_via_scanning {
             wallet_db.queue_tx_retrieval(std::iter::once(d_tx.tx().txid()), None)?
@@ -917,6 +995,9 @@ fn mark_notes_spent<'a, DbT>(
     >,
     sapling_nfs: impl Iterator<Item = &'a sapling::Nullifier>,
     #[cfg(feature = "orchard")] orchard_nfs: impl Iterator<Item = &'a orchard::note::Nullifier>,
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))] ironwood_nfs: impl Iterator<
+        Item = &'a orchard::note::Nullifier,
+    >,
 ) -> Result<(), <DbT as LowLevelWalletRead>::Error>
 where
     DbT: LowLevelWalletWrite,
@@ -935,6 +1016,12 @@ where
     // Mark Orchard notes as spent when we observe their nullifiers.
     #[cfg(feature = "orchard")]
     for nf in orchard_nfs {
+        wallet_db.mark_orchard_note_spent(nf, tx_ref)?;
+    }
+
+    // Mark Ironwood notes as spent when we observe their nullifiers.
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    for nf in ironwood_nfs {
         wallet_db.mark_orchard_note_spent(nf, tx_ref)?;
     }
 
@@ -984,7 +1071,7 @@ where
                     output_pool: Output::POOL_TYPE,
                 };
 
-                Some((output.account_id(), recipient, note.value()))
+                Some((output.account_id(), recipient, note.value(), Some(note)))
             }
             TransferType::AccountInternal => {
                 let spent_in = detect_note_spent_in(wallet_db, output)?;
@@ -999,7 +1086,7 @@ where
                     note: Box::new(note),
                 };
 
-                Some((output.account_id(), recipient, value))
+                Some((output.account_id(), recipient, value, None))
             }
             TransferType::Incoming => {
                 let spent_in = detect_note_spent_in(wallet_db, output)?;
@@ -1024,7 +1111,7 @@ where
                         note: Box::new(note),
                     };
 
-                    Some((account_id, recipient, value))
+                    Some((account_id, recipient, value, None))
                 } else {
                     None
                 }
@@ -1034,14 +1121,17 @@ where
             ),
         };
 
-        if let Some((from_account_uuid, recipient, value)) = sent_output {
+        if let Some((from_account_uuid, recipient, value, output_note)) = sent_output {
             wallet_db.put_sent_output(
                 from_account_uuid,
                 tx_ref,
-                output.index(),
-                &recipient,
-                value,
-                output.memo(),
+                SentOutput {
+                    output_index: output.index(),
+                    recipient: &recipient,
+                    value,
+                    memo: output.memo(),
+                    note: output_note.as_ref(),
+                },
             )?;
         }
     }
@@ -1140,10 +1230,13 @@ where
             wallet_db.put_sent_output(
                 from_account,
                 tx_ref,
-                output.index(),
-                &recipient,
-                output.value(),
-                None,
+                SentOutput {
+                    output_index: output.index(),
+                    recipient: &recipient,
+                    value: output.value(),
+                    memo: None,
+                    note: None,
+                },
             )?;
         }
     }

@@ -57,14 +57,14 @@ use zcash_client_backend::{
     TransferType,
     data_api::{
         self, Account, AccountBirthday, AccountMeta, AccountPurpose, AccountSource, AddressInfo,
-        BlockMetadata, DecryptedTransaction, InputSource, NoteFilter, NullifierQuery,
-        ReceivedNotes, ReceivedTransactionOutput, SAPLING_SHARD_HEIGHT, ScannedBlock,
-        SeedRelevance, SentTransaction, TargetValue, TransactionDataRequest, WalletCommitmentTrees,
-        WalletRead, WalletSummary, WalletWrite, Zip32Derivation,
+        BlockMetadata, DecryptedTransaction, InputSource, NoteCommitmentTree, NoteFilter,
+        NullifierQuery, ReceivedNotes, ReceivedTransactionOutput, SAPLING_SHARD_HEIGHT,
+        ScannedBlock, SeedRelevance, SentTransaction, TargetValue, TransactionDataRequest,
+        WalletCommitmentTrees, WalletRead, WalletSummary, WalletWrite, Zip32Derivation,
         chain::{BlockSource, ChainState, CommitmentTreeRoot},
         error::{FindAccountForAddressError, RewindError},
         ll::{
-            self, LowLevelWalletRead, LowLevelWalletWrite, ReceivedSaplingOutput,
+            self, LowLevelWalletRead, LowLevelWalletWrite, ReceivedSaplingOutput, SentOutput,
             wallet::store_decrypted_tx,
         },
         scanning::{ScanPriority, ScanRange},
@@ -95,7 +95,7 @@ use crate::{
 use wallet::{
     SubtreeProgressEstimator,
     commitment_tree::{self, put_shard_roots},
-    common::{TableConstants, unspent_notes_meta},
+    common::unspent_notes_meta,
     scanning::replace_queue_entries,
     upsert_address,
 };
@@ -167,6 +167,9 @@ pub(crate) const SAPLING_TABLES_PREFIX: &str = "sapling";
 
 #[cfg(feature = "orchard")]
 pub(crate) const ORCHARD_TABLES_PREFIX: &str = "orchard";
+
+#[cfg(feature = "orchard")]
+pub(crate) const IRONWOOD_TABLES_PREFIX: &str = "ironwood";
 
 #[cfg(not(feature = "orchard"))]
 pub(crate) const UA_ORCHARD: ReceiverRequirement = ReceiverRequirement::Omit;
@@ -1008,14 +1011,20 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
         txid: &TxId,
         protocol: ShieldedProtocol,
     ) -> Result<Vec<NoteId>, <Self as WalletRead>::Error> {
-        use crate::wallet::encoding::pool_code;
+        use crate::wallet::encoding::{IRONWOOD_POOL_CODE, ORCHARD_POOL_CODE, pool_code};
 
         let mut stmt_sent_notes = self.conn.borrow().prepare(
             "SELECT output_index
              FROM sent_notes
              JOIN transactions ON transactions.id_tx = sent_notes.transaction_id
              WHERE transactions.txid = :txid
-             AND sent_notes.output_pool = :pool_code",
+             AND (
+                sent_notes.output_pool = :pool_code
+                OR (
+                    :pool_code = :orchard_pool_code
+                    AND sent_notes.output_pool = :ironwood_pool_code
+                )
+             )",
         )?;
 
         let note_ids = stmt_sent_notes
@@ -1023,6 +1032,8 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
                 named_params! {
                     ":txid": txid.as_ref(),
                     ":pool_code": pool_code(PoolType::Shielded(protocol)),
+                    ":orchard_pool_code": ORCHARD_POOL_CODE,
+                    ":ironwood_pool_code": IRONWOOD_POOL_CODE,
                 },
                 |row| Ok(NoteId::new(*txid, protocol, row.get(0)?)),
             )?
@@ -1134,7 +1145,7 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletTes
             .get_target_and_anchor_heights(NonZeroU32::MIN)?
             .ok_or(SqliteClientError::ChainHeightUnknown)?;
 
-        let TableConstants {
+        let wallet::common::TableConstants {
             table_prefix,
             output_index_col,
             ..
@@ -1936,6 +1947,8 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         sapling_output_count: u32,
         #[cfg(feature = "orchard")] orchard_commitment_tree_size: u32,
         #[cfg(feature = "orchard")] orchard_action_count: u32,
+        #[cfg(feature = "orchard")] ironwood_commitment_tree_size: u32,
+        #[cfg(feature = "orchard")] ironwood_action_count: u32,
     ) -> Result<(), Self::Error> {
         wallet::put_block(
             self.conn.borrow(),
@@ -1948,6 +1961,10 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
             orchard_commitment_tree_size,
             #[cfg(feature = "orchard")]
             orchard_action_count,
+            #[cfg(feature = "orchard")]
+            ironwood_commitment_tree_size,
+            #[cfg(feature = "orchard")]
+            ironwood_action_count,
         )
     }
 
@@ -2092,20 +2109,18 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
         &mut self,
         from_account_uuid: Self::AccountId,
         tx_ref: Self::TxRef,
-        output_index: usize,
-        recipient: &zcash_client_backend::wallet::Recipient<Self::AccountId>,
-        value: zcash_protocol::value::Zatoshis,
-        memo: Option<&zcash_protocol::memo::MemoBytes>,
+        output: SentOutput<'_, Self::AccountId>,
     ) -> Result<(), Self::Error> {
         wallet::put_sent_output(
             self.conn.borrow(),
             &self.params,
             from_account_uuid,
             tx_ref,
-            output_index,
-            recipient,
-            value,
-            memo,
+            output.output_index,
+            output.recipient,
+            output.value,
+            output.memo,
+            output.note,
         )
     }
 
@@ -2196,7 +2211,7 @@ impl<'a, C: Borrow<rusqlite::Transaction<'a>>, P: consensus::Parameters, CL: Clo
     fn notify_scan_complete(
         &mut self,
         range: Range<BlockHeight>,
-        wallet_note_positions: &[(ShieldedProtocol, Position)],
+        wallet_note_positions: &[(NoteCommitmentTree, Position)],
     ) -> Result<(), Self::Error> {
         wallet::scanning::scan_complete(
             self.conn.borrow(),
@@ -2261,6 +2276,32 @@ where
 {
     Ok(ShardTree::new(
         SqliteShardStore::from_connection(conn, ORCHARD_TABLES_PREFIX)
+            .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?,
+        PRUNING_DEPTH.try_into().unwrap(),
+    ))
+}
+
+#[cfg(feature = "orchard")]
+pub(crate) type IronwoodShardStore<C> =
+    SqliteShardStore<C, orchard::tree::MerkleHashOrchard, ORCHARD_SHARD_HEIGHT>;
+
+#[cfg(feature = "orchard")]
+pub(crate) type IronwoodCommitmentTree<C> = ShardTree<
+    IronwoodShardStore<C>,
+    { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+    ORCHARD_SHARD_HEIGHT,
+>;
+
+#[cfg(feature = "orchard")]
+pub(crate) fn ironwood_tree<C>(
+    conn: C,
+) -> Result<IronwoodCommitmentTree<C>, ShardTreeError<commitment_tree::Error>>
+where
+    IronwoodShardStore<C>:
+        ShardStore<H = orchard::tree::MerkleHashOrchard, CheckpointId = BlockHeight>,
+{
+    Ok(ShardTree::new(
+        SqliteShardStore::from_connection(conn, IRONWOOD_TABLES_PREFIX)
             .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?,
         PRUNING_DEPTH.try_into().unwrap(),
     ))
@@ -2364,6 +2405,57 @@ impl<C: BorrowMut<rusqlite::Connection>, P: consensus::Parameters, CL, R> Wallet
             .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?;
         Ok(())
     }
+
+    #[cfg(feature = "orchard")]
+    type IronwoodShardStore<'a> = SqliteShardStore<
+        &'a rusqlite::Transaction<'a>,
+        orchard::tree::MerkleHashOrchard,
+        ORCHARD_SHARD_HEIGHT,
+    >;
+
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F:
+            FnMut(&'a mut IronwoodCommitmentTree<&'a rusqlite::Transaction<'a>>) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        let tx = self
+            .conn
+            .borrow_mut()
+            .transaction()
+            .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?;
+        let result = {
+            let mut shardtree = ironwood_tree(&tx)?;
+            callback(&mut shardtree)?
+        };
+
+        tx.commit()
+            .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?;
+        Ok(result)
+    }
+
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        let tx = self
+            .conn
+            .borrow_mut()
+            .transaction()
+            .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?;
+        put_shard_roots::<_, { ORCHARD_SHARD_HEIGHT * 2 }, ORCHARD_SHARD_HEIGHT>(
+            &tx,
+            IRONWOOD_TABLES_PREFIX,
+            start_index,
+            roots,
+        )?;
+        tx.commit()
+            .map_err(|e| ShardTreeError::Storage(commitment_tree::Error::Query(e)))?;
+        Ok(())
+    }
 }
 
 impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
@@ -2422,6 +2514,36 @@ impl<P: consensus::Parameters, CL, R> WalletCommitmentTrees
         put_shard_roots::<_, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }, ORCHARD_SHARD_HEIGHT>(
             self.conn.0,
             ORCHARD_TABLES_PREFIX,
+            start_index,
+            roots,
+        )
+    }
+
+    #[cfg(feature = "orchard")]
+    type IronwoodShardStore<'a> = crate::IronwoodShardStore<&'a rusqlite::Transaction<'a>>;
+
+    #[cfg(feature = "orchard")]
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F:
+            FnMut(&'a mut IronwoodCommitmentTree<&'a rusqlite::Transaction<'a>>) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        let mut shardtree = ironwood_tree(self.conn.0)?;
+        let result = callback(&mut shardtree)?;
+
+        Ok(result)
+    }
+
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        put_shard_roots::<_, { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 }, ORCHARD_SHARD_HEIGHT>(
+            self.conn.0,
+            IRONWOOD_TABLES_PREFIX,
             start_index,
             roots,
         )
@@ -2529,6 +2651,53 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> WalletDb<
         SqliteClientError,
     > {
         wallet::commitment_tree::generate_orchard_witnesses_at_historical_height(
+            self.conn.borrow(),
+            note_positions,
+            frontier_at_height,
+            height,
+        )
+    }
+
+    /// Generates Ironwood Merkle witnesses at a historical height.
+    ///
+    /// Loads the wallet's Ironwood shard data into an ephemeral in-memory
+    /// `ShardStore`, inserts the provided frontier at `height` as a checkpoint,
+    /// and generates a witness for each of the given note positions.
+    ///
+    /// The caller must provide the valid frontier at the given height. The wallet DB
+    /// is strictly read-only; shard data is read but not modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`SqliteClientError::CommitmentTree`] if reading the wallet's shard
+    ///   or cap data fails, or if the shard data reconstructed from the
+    ///   wallet is internally inconsistent at a node the computation
+    ///   requires.
+    /// - [`SqliteClientError::HistoricalFrontierInvalid`] if
+    ///   `frontier_at_height` is inconsistent with the shard data
+    ///   reconstructed from the wallet at `height`.
+    /// - [`SqliteClientError::HistoricalWitnessUnavailable`] if a witness
+    ///   cannot be generated for one of `note_positions` at `height` (most
+    ///   commonly because the wallet has not yet synced through that
+    ///   height).
+    pub fn generate_ironwood_witnesses_at_historical_height(
+        &self,
+        note_positions: &[Position],
+        frontier_at_height: incrementalmerkletree::frontier::NonEmptyFrontier<
+            orchard::tree::MerkleHashOrchard,
+        >,
+        height: BlockHeight,
+    ) -> Result<
+        Vec<
+            incrementalmerkletree::MerklePath<
+                orchard::tree::MerkleHashOrchard,
+                { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
+            >,
+        >,
+        SqliteClientError,
+    > {
+        wallet::commitment_tree::generate_ironwood_witnesses_at_historical_height(
             self.conn.borrow(),
             note_positions,
             frontier_at_height,

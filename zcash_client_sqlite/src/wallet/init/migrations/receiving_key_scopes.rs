@@ -362,7 +362,7 @@ mod tests {
             BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
                 orchard_anchor: None,
-                #[cfg(any(zcash_unstable = "nu6.3", zcash_unstable = "nu7"))]
+                #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
             },
         );
@@ -671,6 +671,8 @@ mod tests {
             Some(&BlockMetadata::from_parts(
                 height - 1,
                 prev_hash,
+                Some(0),
+                #[cfg(feature = "orchard")]
                 Some(0),
                 #[cfg(feature = "orchard")]
                 Some(0),

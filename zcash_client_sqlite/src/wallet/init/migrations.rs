@@ -23,8 +23,11 @@ mod fix_transparent_received_outputs;
 mod fix_v_transactions_expired_unmined;
 mod full_account_ids;
 mod initial_setup;
+mod ironwood_pool_code_views;
+mod ironwood_shardtree;
 mod ivk_item_cache;
 mod nullifier_map;
+mod orchard_note_version_uniqueness;
 mod orchard_received_notes;
 mod orchard_shardtree;
 mod received_notes_nullable_nf;
@@ -80,65 +83,21 @@ pub(super) fn all_migrations<
     rng: R,
     seed: Option<Rc<SecretVec<u8>>>,
 ) -> Vec<Box<dyn RusqliteMigration<Error = WalletMigrationError>>> {
-    //                                   initial_setup
-    //                                   /           \
-    //                          utxos_table         ufvk_support
-    //                             |                 /         \
-    //                             |    addresses_table   sent_notes_to_internal
-    //                             |          /                /
-    //                           add_utxo_account             /
-    //                                        \              /
-    //                                     add_transaction_views
-    //                                               |
-    //                                       v_transactions_net
-    //                                               |
-    //                                            received_notes_nullable_nf---------------------.
-    //                                            /           |                                   \
-    //                                           /            |                                    \
-    //           ,-------------- shardtree_support    sapling_memo_consistency                    nullifier_map
-    //          /                     /           \                       \                                  |
-    // orchard_shardtree   add_account_birthdays   receiving_key_scopes   v_transactions_transparent_history |
-    //   |                    |                 \            |                     |                         |
-    //   |   v_sapling_shard_unscanned_ranges    \           |       v_tx_outputs_use_legacy_false           |
-    //   |                    |                   \          |                     |                         |
-    //   |            wallet_summaries             \         |      v_transactions_shielding_balance         /
-    //   \                    \                     \        |                     |                        /
-    //    \                    \                     \       |      v_transactions_note_uniqueness         /
-    //     \                    \                     \      |        /                                   /
-    //      \                    `------------------- full_account_ids                                   /
-    //       \                                        /               \                                 /
-    //        \                         orchard_received_notes        spend_key_available              /
-    //         \                            /          \                      /                       /
-    //          \     ensure_orchard_ua_receiver     utxos_to_txos           /                       /
-    //           \                          \              |                /                       /
-    //            \                          \     ephemeral_addresses     /                       /
-    //             \                          \            |              /                       /
-    //              `----------------------------- tx_retrieval_queue ---------------------------'
-    //                                                  /    \
-    //                              support_legacy_sqlite    tx_retrieval_queue_expiry ----------------.
-    //                                 /              \                                                 \
-    //            fix_broken_commitment_trees         add_account_uuids                                  \
-    //                       /                                /        \                                  \
-    //    fix_bad_change_flagging      transparent_gap_limit_handling   v_transactions_additional_totals   \
-    //                       \                       |                      /                               \
-    //                        \      ensure_default_transparent_address    /                                 \
-    //                         \                     |                    /                                   \
-    //                          `---- fix_transparent_received_outputs --'                                     \
-    //                                  /         /               \                                            |
-    //           support_zcashd_wallet_import    /             fix_v_transactions_expired_unmined              |
-    //                \                         /                    /        |         \                      |
-    //                 \      tx_observation_height                 /         |          \                     |
-    //                  \                       \                  /          |           \                    /
-    //                   \                   add_transaction_trust_marker     |  v_tx_outputs_return_addrs    /
-    //                    \                       \                           |                     /        /
-    //                     \                       \         v_received_output_spends_account      /        /
-    //                      \                       \               /                             /        /
-    //                       `------------------- account_delete_cascade ---------------------------------'
-    //                                        /               |              \
-    //                       v_tx_outputs_key_scopes    standalone_p2sh    witness_stabilized_notes
-    //                                                        |
-    //                                                  ivk_item_cache
+    // Each migration module's `dependencies()` implementation is the
+    // authoritative migration DAG. This list is ordered topologically.
     //
+    // The current post-0.19 tail is:
+    //
+    // account_delete_cascade
+    //   |-- v_tx_outputs_key_scopes ---------------------.
+    //   |                                                |
+    //   |-- witness_stabilized_notes                     |
+    //   |     `-- orchard_note_version_uniqueness        |
+    //   |           `-- ironwood_shardtree               |
+    //   |                 `-- ironwood_pool_code_views <-'
+    //   |
+    //   `-- standalone_p2sh
+    //         `-- ivk_item_cache
     let rng = Rc::new(Mutex::new(rng));
     vec![
         Box::new(initial_setup::Migration {}),
@@ -229,6 +188,13 @@ pub(super) fn all_migrations<
             params: params.clone(),
         }),
         Box::new(witness_stabilized_notes::Migration {
+            params: params.clone(),
+        }),
+        Box::new(orchard_note_version_uniqueness::Migration),
+        Box::new(ironwood_shardtree::Migration {
+            params: params.clone(),
+        }),
+        Box::new(ironwood_pool_code_views::Migration {
             params: params.clone(),
         }),
     ]
@@ -372,9 +338,8 @@ pub const V_0_19_0: &[Uuid] = &[account_delete_cascade::MIGRATION_ID];
 
 /// Leaf migrations as of the current repository state.
 pub const CURRENT_LEAF_MIGRATIONS: &[Uuid] = &[
-    v_tx_outputs_key_scopes::MIGRATION_ID,
     ivk_item_cache::MIGRATION_ID,
-    witness_stabilized_notes::MIGRATION_ID,
+    ironwood_pool_code_views::MIGRATION_ID,
 ];
 
 pub(super) fn verify_network_compatibility<P: consensus::Parameters>(

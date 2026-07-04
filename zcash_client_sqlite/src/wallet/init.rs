@@ -199,8 +199,6 @@ fn sqlite_client_error_to_wallet_migration_error(e: SqliteClientError) -> Wallet
         SqliteClientError::TableNotEmpty => unreachable!("wallet already initialized"),
         SqliteClientError::BlockConflict(_)
         | SqliteClientError::NonSequentialBlocks
-        | SqliteClientError::PutBlocksCommitmentTree { .. }
-        | SqliteClientError::TruncateCommitmentTree { .. }
         | SqliteClientError::RequestedRewindInvalid { .. }
         | SqliteClientError::KeyDerivationError(_)
         | SqliteClientError::Zip32AccountIndexOutOfRange
@@ -755,7 +753,10 @@ mod tests {
         zip32::DiversifierIndex,
     };
 
-    #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+    #[cfg(all(
+        any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
+        feature = "zip-233"
+    ))]
     use zcash_protocol::value::Zatoshis;
 
     pub(crate) fn describe_tables(conn: &Connection) -> Result<Vec<String>, rusqlite::Error> {
@@ -790,6 +791,10 @@ mod tests {
             db::TABLE_ACCOUNTS,
             db::TABLE_ADDRESSES,
             db::TABLE_BLOCKS,
+            db::TABLE_IRONWOOD_TREE_CAP,
+            db::TABLE_IRONWOOD_TREE_CHECKPOINT_MARKS_REMOVED,
+            db::TABLE_IRONWOOD_TREE_CHECKPOINTS,
+            db::TABLE_IRONWOOD_TREE_SHARDS,
             db::TABLE_NULLIFIER_MAP,
             db::TABLE_ORCHARD_RECEIVED_NOTE_SPENDS,
             db::TABLE_ORCHARD_RECEIVED_NOTES,
@@ -880,6 +885,9 @@ mod tests {
         let expected_views = vec![
             db::VIEW_ADDRESS_FIRST_USE.to_owned(),
             db::VIEW_ADDRESS_USES.to_owned(),
+            db::view_ironwood_shard_scan_ranges(st.network()),
+            db::view_ironwood_shard_unscanned_ranges(),
+            db::VIEW_IRONWOOD_SHARDS_SCAN_STATE.to_owned(),
             db::view_orchard_shard_scan_ranges(st.network()),
             db::view_orchard_shard_unscanned_ranges(),
             db::VIEW_ORCHARD_SHARDS_SCAN_STATE.to_owned(),
@@ -1185,7 +1193,10 @@ mod tests {
                 BranchId::Canopy,
                 0,
                 BlockHeight::from(0),
-                #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+                #[cfg(all(
+                    any(zcash_unstable = "nu7", zcash_unstable = "zfuture"),
+                    feature = "zip-233"
+                ))]
                 Zatoshis::ZERO,
                 None,
                 None,

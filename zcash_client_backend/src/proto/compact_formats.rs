@@ -8,6 +8,9 @@ pub struct ChainMetadata {
     /// the size of the Orchard note commitment tree as of the end of this block
     #[prost(uint32, tag = "2")]
     pub orchard_commitment_tree_size: u32,
+    /// the size of the Ironwood note commitment tree as of the end of this block
+    #[prost(uint32, tag = "3")]
+    pub ironwood_commitment_tree_size: u32,
 }
 /// A compact representation of a Zcash block.
 ///
@@ -70,7 +73,8 @@ pub struct CompactTx {
     /// stateless server and a transaction with transparent inputs, this will be
     /// unset because the calculation requires reference to prior transactions.
     /// If there are no transparent inputs, the fee will be calculable as:
-    ///     valueBalanceSapling + valueBalanceOrchard + sum(vPubNew) - sum(vPubOld) - sum(tOut)
+    ///     valueBalanceSapling + valueBalanceOrchard + valueBalanceIronwood
+    ///     + sum(vPubNew) - sum(vPubOld) - sum(tOut)
     #[prost(uint32, tag = "3")]
     pub fee: u32,
     #[prost(message, repeated, tag = "4")]
@@ -90,6 +94,8 @@ pub struct CompactTx {
     /// A sequence of transparent outputs being created by the transaction.
     #[prost(message, repeated, tag = "8")]
     pub vout: ::prost::alloc::vec::Vec<TxOut>,
+    #[prost(message, repeated, tag = "9")]
+    pub ironwood_actions: ::prost::alloc::vec::Vec<CompactOrchardAction>,
 }
 /// A compact representation of a transparent transaction input.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

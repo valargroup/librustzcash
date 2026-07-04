@@ -22,7 +22,7 @@ use zcash_protocol::{
 use zcash_script::script;
 use zip32::Scope;
 
-use crate::{TransferType, fees::sapling as sapling_fees};
+use crate::{TransferType, data_api::NoteCommitmentTree, fees::sapling as sapling_fees};
 
 #[cfg(feature = "orchard")]
 use crate::fees::orchard as orchard_fees;
@@ -60,6 +60,11 @@ impl NoteId {
 
     /// Returns the index of this note within its transaction's corresponding list of
     /// shielded outputs.
+    ///
+    /// Ironwood uses Orchard note plaintexts and is currently represented by
+    /// [`ShieldedProtocol::Orchard`] at this API boundary. To keep note IDs unique for
+    /// transactions that contain both Orchard and Ironwood bundles, Ironwood V3 notes use a
+    /// combined Orchard-shaped action index: `orchard_action_count + ironwood_action_index`.
     pub fn output_index(&self) -> u16 {
         self.output_index
     }
@@ -448,6 +453,7 @@ pub type WalletOrchardSpend<AccountId> = WalletSpend<orchard::note::Nullifier, A
 #[derive(Clone)]
 pub struct WalletOutput<Note, Nullifier, AccountId> {
     index: usize,
+    note_commitment_tree: Option<NoteCommitmentTree>,
     ephemeral_key: EphemeralKeyBytes,
     note: Note,
     is_change: bool,
@@ -472,6 +478,33 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
     ) -> Self {
         Self {
             index,
+            note_commitment_tree: None,
+            ephemeral_key,
+            note,
+            is_change,
+            note_commitment_tree_position,
+            nf,
+            account_id,
+            recipient_key_scope,
+        }
+    }
+
+    /// Constructs a new `WalletOutput` value with explicit commitment tree metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts_in_tree(
+        note_commitment_tree: NoteCommitmentTree,
+        index: usize,
+        ephemeral_key: EphemeralKeyBytes,
+        note: Note,
+        is_change: bool,
+        note_commitment_tree_position: Position,
+        nf: Option<Nullifier>,
+        account_id: AccountId,
+        recipient_key_scope: Option<zip32::Scope>,
+    ) -> Self {
+        Self {
+            index,
+            note_commitment_tree: Some(note_commitment_tree),
             ephemeral_key,
             note,
             is_change,
@@ -515,6 +548,23 @@ impl<Note, Nullifier, AccountId> WalletOutput<Note, Nullifier, AccountId> {
     /// known.
     pub fn recipient_key_scope(&self) -> Option<zip32::Scope> {
         self.recipient_key_scope
+    }
+}
+
+impl<Nullifier, AccountId> WalletOutput<sapling::Note, Nullifier, AccountId> {
+    /// Returns the note commitment tree to which this output belongs.
+    pub fn note_commitment_tree(&self) -> NoteCommitmentTree {
+        self.note_commitment_tree
+            .unwrap_or(NoteCommitmentTree::Sapling)
+    }
+}
+
+#[cfg(feature = "orchard")]
+impl<Nullifier, AccountId> WalletOutput<orchard::note::Note, Nullifier, AccountId> {
+    /// Returns the note commitment tree to which this output belongs.
+    pub fn note_commitment_tree(&self) -> NoteCommitmentTree {
+        self.note_commitment_tree
+            .unwrap_or(NoteCommitmentTree::Orchard)
     }
 }
 
@@ -782,6 +832,11 @@ impl<NoteRef> orchard_fees::InputView<NoteRef> for ReceivedNote<NoteRef, orchard
             .inner()
             .try_into()
             .expect("Orchard note values are indirectly checked by consensus.")
+    }
+
+    #[cfg(zcash_unstable = "nu6.3")]
+    fn is_ironwood(&self) -> bool {
+        self.note.version() == orchard::note::NoteVersion::V3
     }
 }
 

@@ -10,9 +10,13 @@ use std::{
 use transparent::bundle::TxOut;
 use zcash_address::{ConversionError, ZcashAddress};
 use zcash_keys::address::{Address, UnifiedAddress};
+#[cfg(feature = "unstable")]
+use zcash_primitives::transaction::TxVersion;
+#[cfg(feature = "transparent-inputs")]
+use zcash_primitives::transaction::fees::transparent as transparent_fees;
 use zcash_primitives::transaction::fees::{
     FeeRule,
-    transparent::{self as transparent_fees, InputSize},
+    transparent::InputSize,
     zip317::{P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE},
 };
 use zcash_protocol::{
@@ -50,9 +54,6 @@ use {
 
 #[cfg(feature = "orchard")]
 use crate::fees::orchard as orchard_fees;
-
-#[cfg(feature = "unstable")]
-use zcash_primitives::transaction::TxVersion;
 
 /// The type of errors that may be produced in input selection.
 #[derive(Debug)]
@@ -341,6 +342,9 @@ pub enum GreedyInputSelectorError {
     UnsupportedAddress(Box<UnifiedAddress>),
     /// Support for transparent-source-only (TEX) addresses requires the transparent-inputs feature.
     UnsupportedTexAddress,
+    /// A legacy v5 Orchard proposal cannot spend Ironwood notes.
+    #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
+    UnsupportedLegacyOrchardNoteVersion,
 }
 
 impl fmt::Display for GreedyInputSelectorError {
@@ -359,6 +363,13 @@ impl fmt::Display for GreedyInputSelectorError {
                 write!(
                     f,
                     "Support for transparent-source-only (TEX) addresses requires the transparent-inputs feature."
+                )
+            }
+            #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
+            GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion => {
+                write!(
+                    f,
+                    "Legacy v5 Orchard transactions cannot spend Ironwood notes."
                 )
             }
         }
@@ -622,19 +633,23 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
 
             #[cfg(feature = "orchard")]
             let orchard_inputs = if use_orchard {
-                shielded_inputs
-                    .orchard()
-                    .iter()
-                    .map(|i| (*i.internal_note_id(), i.note().value()))
-                    .collect()
+                shielded_inputs.orchard().to_vec()
             } else {
                 vec![]
             };
+            #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu6.3"))]
+            if super::legacy_orchard_bundle_requested(proposed_version)
+                && orchard_inputs
+                    .iter()
+                    .any(|note| note.note().version() == orchard::note::NoteVersion::V3)
+            {
+                return Err(GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion.into());
+            }
 
             let selected_input_ids = sapling_inputs.iter().map(|(id, _)| id);
             #[cfg(feature = "orchard")]
             let selected_input_ids =
-                selected_input_ids.chain(orchard_inputs.iter().map(|(id, _)| id));
+                selected_input_ids.chain(orchard_inputs.iter().map(|i| i.internal_note_id()));
 
             let selected_input_ids = selected_input_ids.cloned().collect::<Vec<_>>();
 
@@ -709,15 +724,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                     &sapling_outputs[..],
                 ),
                 #[cfg(feature = "orchard")]
-                &(
-                    // Preserve the legacy Orchard action-count estimate here.
-                    // If this path targets restrictions that disable
-                    // cross-address transfers, thread the target-height-selected
-                    // `BundleVersion` through this call.
-                    crate::ANY_ORCHARD_BUNDLE_VERSION,
-                    &orchard_inputs[..],
-                    &orchard_outputs[..],
-                ),
+                &(&orchard_inputs[..], &orchard_outputs[..]),
                 ephemeral_output_value.map(EphemeralBalance::Output),
                 &wallet_meta,
             );
@@ -820,15 +827,31 @@ pub(crate) fn propose_send_max<ParamsT, InputSourceT, FeeRuleT>(
     confirmations_policy: ConfirmationsPolicy,
     recipient: ZcashAddress,
     memo: Option<MemoBytes>,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
 ) -> Result<
     Proposal<FeeRuleT, InputSourceT::NoteRef>,
-    InputSelectorError<InputSourceT::Error, BalanceError, FeeRuleT::Error, InputSourceT::NoteRef>,
+    InputSelectorError<
+        InputSourceT::Error,
+        GreedyInputSelectorError,
+        FeeRuleT::Error,
+        InputSourceT::NoteRef,
+    >,
 >
 where
     ParamsT: consensus::Parameters,
     InputSourceT: InputSource,
     FeeRuleT: FeeRule + Clone,
 {
+    #[cfg(feature = "unstable")]
+    if let Some(version) = proposed_version {
+        let branch_id = consensus::BranchId::for_height(params, BlockHeight::from(target_height));
+        if !version.valid_in_branch(branch_id) {
+            return Err(InputSelectorError::Proposal(
+                ProposalError::IncompatibleTxVersion(branch_id),
+            ));
+        }
+    }
+
     let spendable_notes = wallet_db
         .select_spendable_notes(
             source_account,
@@ -842,7 +865,24 @@ where
 
     let input_total = spendable_notes
         .total_value()
-        .map_err(InputSelectorError::Selection)?;
+        .map_err(|e| InputSelectorError::Selection(GreedyInputSelectorError::Balance(e)))?;
+
+    #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu6.3"))]
+    let legacy_v5_orchard = super::legacy_orchard_bundle_requested(
+        #[cfg(feature = "unstable")]
+        proposed_version,
+    );
+    #[cfg(all(feature = "orchard", feature = "unstable", zcash_unstable = "nu6.3"))]
+    if legacy_v5_orchard
+        && spendable_notes
+            .orchard()
+            .iter()
+            .any(|note| note.note().version() == orchard::note::NoteVersion::V3)
+    {
+        return Err(InputSelectorError::Selection(
+            GreedyInputSelectorError::UnsupportedLegacyOrchardNoteVersion,
+        ));
+    }
 
     let mut payment_pools = BTreeMap::new();
 
@@ -866,33 +906,72 @@ where
     let use_sapling = !spendable_notes.sapling().is_empty() || sapling_output_count > 0;
 
     #[cfg(feature = "orchard")]
-    let orchard_action_count = {
-        let requested_orchard_actions: usize = if recipient.can_receive_as(PoolType::ORCHARD) {
+    let (orchard_action_count, ironwood_action_count) = {
+        let orchard_pool_restrictions = orchard_fees::bundle_pool_restrictions_for_target_height(
+            params,
+            BlockHeight::from(target_height),
+        );
+        let requested_orchard_output: usize = if recipient.can_receive_as(PoolType::ORCHARD) {
             payment_pools.insert(0, PoolType::ORCHARD);
             1
         } else {
             0
         };
-        orchard_fees::transactional_action_count(
-            // Preserve the legacy Orchard action-count estimate here. If this
-            // path targets restrictions that disable cross-address transfers,
-            // thread the target-height-selected `BundleVersion`
-            // through this call.
-            crate::ANY_ORCHARD_BUNDLE_VERSION,
-            spendable_notes.orchard.len(),
+        #[cfg(zcash_unstable = "nu6.3")]
+        let orchard_outputs_are_ironwood = super::orchard_outputs_to_ironwood(
+            params,
+            target_height,
+            #[cfg(feature = "unstable")]
+            proposed_version,
+        );
+        #[cfg(zcash_unstable = "nu6.3")]
+        let (requested_orchard_actions, requested_ironwood_actions) =
+            if orchard_outputs_are_ironwood {
+                (0, requested_orchard_output)
+            } else {
+                (requested_orchard_output, 0)
+            };
+        #[cfg(not(zcash_unstable = "nu6.3"))]
+        let requested_orchard_actions = requested_orchard_output;
+
+        #[cfg(zcash_unstable = "nu6.3")]
+        let ironwood_input_count = spendable_notes
+            .orchard()
+            .iter()
+            .filter(|note| note.note().version() == orchard::note::NoteVersion::V3)
+            .count();
+        #[cfg(not(zcash_unstable = "nu6.3"))]
+        let ironwood_input_count = 0usize;
+
+        let orchard_input_count = spendable_notes.orchard().len() - ironwood_input_count;
+        let orchard_actions = orchard_fees::transactional_action_count(
+            orchard_pool_restrictions,
+            orchard_input_count,
             requested_orchard_actions,
         )
-        .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?
+        .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?;
+
+        #[cfg(zcash_unstable = "nu6.3")]
+        {
+            let ironwood_actions = orchard_fees::transactional_action_count(
+                orchard::bundle::BundleVersion::ironwood_v3(),
+                ironwood_input_count,
+                requested_ironwood_actions,
+            )
+            .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?;
+            (orchard_actions, ironwood_actions)
+        }
+
+        #[cfg(not(zcash_unstable = "nu6.3"))]
+        {
+            (orchard_actions, 0)
+        }
     };
     #[cfg(not(feature = "orchard"))]
-    let orchard_action_count: usize = 0;
+    let (orchard_action_count, ironwood_action_count) = (0, 0);
 
     #[cfg(feature = "orchard")]
     let use_orchard = orchard_action_count > 0;
-
-    // The wallet does not yet construct Ironwood bundles, so they contribute no
-    // actions to the fee.
-    let ironwood_action_count: usize = 0;
 
     let recipient_address: Address = recipient
         .clone()
@@ -1284,14 +1363,14 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             #[cfg(feature = "orchard")]
             PoolType::ORCHARD => {
                 let count = orchard_fees::transactional_action_count(
-                    // With no Orchard spends and one requested output, the
-                    // padded action count is independent of the Orchard pool
-                    // restriction.
-                    crate::ANY_ORCHARD_BUNDLE_VERSION,
+                    orchard_fees::bundle_pool_restrictions_for_target_height(
+                        params,
+                        BlockHeight::from(target_height),
+                    ),
                     0,
                     1,
                 )
-                .expect("legacy Orchard protocol permits any transactional spend and output count");
+                .expect("Orchard protocol permits a single transactional output");
                 (0usize, count)
             }
             // Unreachable: `resolve_shielded_destination` rejects transparent
@@ -1302,10 +1381,6 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
                 ));
             }
         };
-
-        // The wallet does not yet construct Ironwood bundles, so they contribute
-        // no actions to the fee.
-        let ironwood_action_count = 0;
 
         let fee = fee_rule
             .fee_required(
@@ -1318,7 +1393,7 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
                 0,
                 sapling_output_count,
                 orchard_action_count,
-                ironwood_action_count,
+                0,
             )
             // The `InputSelectorError::Change` variant is the only existing
             // carrier capable of holding an arbitrary fee-rule error
