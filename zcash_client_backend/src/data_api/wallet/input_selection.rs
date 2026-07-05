@@ -887,20 +887,31 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             };
 
             #[cfg(feature = "orchard")]
-            let orchard_inputs = if use_orchard {
-                shielded_inputs
-                    .orchard()
-                    .iter()
-                    .map(|i| (*i.internal_note_id(), i.note().value()))
-                    .collect()
+            let (orchard_inputs, ironwood_inputs) = if use_orchard {
+                let mut orchard_inputs = vec![];
+                let mut ironwood_inputs = vec![];
+
+                for input in shielded_inputs.orchard() {
+                    let fee_input = (*input.internal_note_id(), input.note().value());
+                    if input.note().version() == ::orchard::note::NoteVersion::V3 {
+                        ironwood_inputs.push(fee_input);
+                    } else {
+                        orchard_inputs.push(fee_input);
+                    }
+                }
+
+                (orchard_inputs, ironwood_inputs)
             } else {
-                vec![]
+                (vec![], vec![])
             };
 
             let selected_input_ids = sapling_inputs.iter().map(|(id, _)| id);
             #[cfg(feature = "orchard")]
             let selected_input_ids =
                 selected_input_ids.chain(orchard_inputs.iter().map(|(id, _)| id));
+            #[cfg(feature = "orchard")]
+            let selected_input_ids =
+                selected_input_ids.chain(ironwood_inputs.iter().map(|(id, _)| id));
 
             let selected_input_ids = selected_input_ids.cloned().collect::<Vec<_>>();
 
@@ -983,10 +994,9 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
                 proposed_version,
             );
 
-            // The Orchard bundle keeps the Orchard spends; its outputs move to the
-            // Ironwood bundle when routing is active. Ironwood has no spends yet
-            // (the wallet does not select Ironwood notes until note detection lands),
-            // so `&orchard_inputs[..0]` is an empty slice of the correct type.
+            // The Orchard bundle keeps V2 spends; its outputs move to the Ironwood
+            // bundle when routing is active. V3 spends are represented in the
+            // Ironwood bundle.
             #[cfg(feature = "orchard")]
             let orchard_view = (
                 orchard_bundle_version_for_height(params, target_height),
@@ -1000,7 +1010,7 @@ impl<DbT: InputSource> InputSelector for GreedyInputSelector<DbT> {
             #[cfg(feature = "orchard")]
             let ironwood_view = (
                 ::orchard::bundle::BundleVersion::ironwood_v3(),
-                &orchard_inputs[..0],
+                &ironwood_inputs[..],
                 if orchard_outputs_are_ironwood {
                     &orchard_outputs[..]
                 } else {
@@ -1259,16 +1269,49 @@ where
     let use_sapling = !spendable_notes.sapling().is_empty() || sapling_output_count > 0;
 
     #[cfg(feature = "orchard")]
-    let orchard_action_count = {
-        let requested_orchard_actions: usize = if recipient.can_receive_as(PoolType::ORCHARD) {
+    let orchard_outputs_are_ironwood = super::orchard_outputs_to_ironwood(
+        params,
+        target_height,
+        #[cfg(feature = "unstable")]
+        None,
+    );
+
+    #[cfg(feature = "orchard")]
+    let orchard_input_count = spendable_notes
+        .orchard()
+        .iter()
+        .filter(|note| note.note().version() != ::orchard::note::NoteVersion::V3)
+        .count();
+    #[cfg(feature = "orchard")]
+    let ironwood_input_count = spendable_notes
+        .orchard()
+        .iter()
+        .filter(|note| note.note().version() == ::orchard::note::NoteVersion::V3)
+        .count();
+
+    #[cfg(feature = "orchard")]
+    let requested_orchard_actions: usize =
+        if recipient.can_receive_as(PoolType::ORCHARD) && !orchard_outputs_are_ironwood {
             payment_pools.insert(0, PoolType::ORCHARD);
             1
         } else {
             0
         };
+
+    #[cfg(feature = "orchard")]
+    let requested_ironwood_actions: usize =
+        if recipient.can_receive_as(PoolType::ORCHARD) && orchard_outputs_are_ironwood {
+            payment_pools.insert(0, PoolType::ORCHARD);
+            1
+        } else {
+            0
+        };
+
+    #[cfg(feature = "orchard")]
+    let orchard_action_count = {
         orchard_fees::transactional_action_count(
             orchard_bundle_version_for_height(params, target_height),
-            spendable_notes.orchard.len(),
+            orchard_input_count,
             requested_orchard_actions,
         )
         .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?
@@ -1277,11 +1320,17 @@ where
     let orchard_action_count: usize = 0;
 
     #[cfg(feature = "orchard")]
-    let use_orchard = orchard_action_count > 0;
-
-    // The wallet does not yet construct Ironwood bundles, so they contribute no
-    // actions to the fee.
+    let ironwood_action_count = orchard_fees::transactional_action_count(
+        ::orchard::bundle::BundleVersion::ironwood_v3(),
+        ironwood_input_count,
+        requested_ironwood_actions,
+    )
+    .map_err(|e| InputSelectorError::Change(ChangeError::BundleError(e)))?;
+    #[cfg(not(feature = "orchard"))]
     let ironwood_action_count: usize = 0;
+
+    #[cfg(feature = "orchard")]
+    let use_orchard = orchard_action_count > 0 || ironwood_action_count > 0;
 
     let recipient_address: Address = recipient
         .clone()

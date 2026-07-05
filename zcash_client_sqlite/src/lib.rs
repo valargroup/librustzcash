@@ -566,15 +566,13 @@ impl<C: Borrow<rusqlite::Connection>, P: consensus::Parameters, CL, R> InputSour
             },
             #[cfg(feature = "orchard")]
             if sources.contains(&ShieldedPool::Orchard) {
-                wallet::common::select_unspent_notes(
+                wallet::orchard::select_unspent_orchard_notes(
                     self.conn.borrow(),
                     &self.params,
                     account,
                     target_height,
                     ConfirmationsPolicy::MIN,
                     exclude,
-                    ShieldedPool::Orchard,
-                    wallet::orchard::to_received_note,
                     wallet::common::NoteRequest::Unspent,
                 )?
             } else {

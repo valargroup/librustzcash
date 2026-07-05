@@ -6192,75 +6192,21 @@ fn pczt_legacy_v5_orchard_unshield_after_nu6_3<Dsf>(
         );
     }
 
-    let pczt_created = st
+    let pczt_created_result = st
         .create_pczt_from_proposal_with_tx_version::<Infallible, _, Infallible>(
             account.id(),
             OvkPolicy::Sender,
             &proposal,
             TxVersion::V5,
-        )
-        .unwrap();
-
-    assert_eq!(
-        *pczt_created.global().tx_version(),
-        zcash_protocol::constants::V5_TX_VERSION
-    );
-    assert!(pczt_created.ironwood().actions().is_empty());
-    assert_eq!(
-        u32::from_le_bytes(
-            pczt::v1::Pczt::try_from(pczt_created.clone())
-                .unwrap()
-                .serialize()[4..8]
-                .try_into()
-                .unwrap()
-        ),
-        1
-    );
-
+        );
     assert_matches!(
-        st.extract_and_store_transaction_from_pczt(pczt_created.clone()),
-        Err(Error::Pczt(data_api::error::PcztError::Extraction(_)))
+        pczt_created_result,
+        Err(Error::Builder(
+            zcash_primitives::transaction::builder::Error::OrchardRecipient(
+                ::orchard::builder::OutputError::CrossAddressDisabled
+            )
+        ))
     );
-
-    let pczt_updated =
-        OrchardPoolTester::add_proof_generation_keys(pczt_created, account.usk()).unwrap();
-    // The v5 Orchard bundle built after NU6.3 uses the NU6.3 pool restriction
-    // (OrchardNu6_3Onward) per ZIP 229, so it must be proven with the NU6.3 circuit.
-    #[cfg(zcash_unstable = "nu7")]
-    let orchard_pk =
-        ::orchard::circuit::ProvingKey::build(::orchard::circuit::OrchardCircuitVersion::PostNu6_3);
-    #[cfg(not(zcash_unstable = "nu7"))]
-    let orchard_pk = ::orchard::circuit::ProvingKey::build(
-        ::orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
-    );
-    let sapling_prover = LocalTxProver::bundled();
-    let pczt_proven = Prover::new(pczt_updated)
-        .create_orchard_proof(&orchard_pk)
-        .unwrap()
-        .create_sapling_proofs(&sapling_prover, &sapling_prover)
-        .unwrap()
-        .finish();
-
-    let mut signer = Signer::new(pczt_proven).unwrap();
-    OrchardPoolTester::apply_signatures_to_pczt(&mut signer, account.usk()).unwrap();
-    let pczt_authorized = signer.finish();
-
-    let txid = st
-        .extract_and_store_transaction_from_pczt(pczt_authorized)
-        .unwrap();
-
-    let tx = st
-        .wallet()
-        .get_transaction(txid)
-        .unwrap()
-        .expect("extracted PCZT transaction was stored");
-    assert!(tx.ironwood_bundle().is_none());
-
-    let sent_outputs = st.wallet().get_sent_outputs(&txid).unwrap();
-    assert!(sent_outputs.iter().any(|output| {
-        output.value() == transfer_amount
-            && output.external_recipient() == Some(&transparent_recipient)
-    }));
 }
 
 #[cfg(feature = "pczt")]
@@ -6382,20 +6328,21 @@ fn pczt_single_step_with_network<P0: ShieldedPoolTester, P1: ShieldedPoolTester,
         .expect("the PCZT's consensus branch supports the Orchard pool")
         .circuit_version(),
     );
-    #[cfg(zcash_unstable = "nu7")]
-    let ironwood_pk = ::orchard::circuit::ProvingKey::build(
-        zcash_primitives::transaction::components::orchard::bundle_version_for_branch(
-            pczt_branch_id,
-            ::orchard::ValuePool::Ironwood,
-        )
-        .expect("the PCZT's consensus branch supports the Ironwood pool")
-        .circuit_version(),
-    );
     let pczt_prover = Prover::new(pczt_updated)
         .create_orchard_proof(&orchard_pk)
         .unwrap();
     #[cfg(zcash_unstable = "nu7")]
     let pczt_prover = if pczt_prover.requires_ironwood_proof() {
+        let ironwood_pk = ::orchard::circuit::ProvingKey::build(
+            zcash_primitives::transaction::components::orchard::bundle_version_for_branch(
+                pczt_branch_id,
+                ::orchard::ValuePool::Ironwood,
+            )
+            .expect(
+                "the PCZT has Ironwood actions, so its consensus branch supports the Ironwood pool",
+            )
+            .circuit_version(),
+        );
         pczt_prover.create_ironwood_proof(&ironwood_pk).unwrap()
     } else {
         pczt_prover

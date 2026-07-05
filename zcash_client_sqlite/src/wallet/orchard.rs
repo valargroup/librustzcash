@@ -17,6 +17,8 @@ use zcash_client_backend::{
 };
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
 use zcash_primitives::transaction::TxId;
+#[cfg(zcash_unstable = "nu7")]
+use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::{
     ShieldedPool,
     consensus::{self, BlockHeight},
@@ -49,7 +51,23 @@ pub(crate) fn to_received_note<P: consensus::Parameters>(
     params: &P,
     row: &Row,
 ) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
-    let note_id = ReceivedNoteId(ShieldedPool::Orchard, row.get("id")?);
+    to_received_note_for_pool(params, row, ShieldedPool::Orchard)
+}
+
+#[cfg(zcash_unstable = "nu7")]
+pub(crate) fn to_received_ironwood_note<P: consensus::Parameters>(
+    params: &P,
+    row: &Row,
+) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
+    to_received_note_for_pool(params, row, ShieldedPool::Ironwood)
+}
+
+fn to_received_note_for_pool<P: consensus::Parameters>(
+    params: &P,
+    row: &Row,
+    pool: ShieldedPool,
+) -> Result<Option<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
+    let note_id = ReceivedNoteId(pool, row.get("id")?);
     let txid = row.get::<_, [u8; 32]>("txid").map(TxId::from_bytes)?;
     let action_index = row.get("action_index")?;
     let diversifier = {
@@ -172,7 +190,7 @@ pub(crate) fn select_spendable_orchard_notes<P: consensus::Parameters>(
     confirmations_policy: ConfirmationsPolicy,
     exclude: &[ReceivedNoteId],
 ) -> Result<Vec<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
-    super::common::select_spendable_notes(
+    let notes = super::common::select_spendable_notes(
         conn,
         params,
         account,
@@ -182,7 +200,97 @@ pub(crate) fn select_spendable_orchard_notes<P: consensus::Parameters>(
         exclude,
         ShieldedPool::Orchard,
         to_received_note,
-    )
+    )?;
+
+    #[cfg(zcash_unstable = "nu7")]
+    let notes = {
+        let mut notes = notes;
+        if let Some(ironwood_target_value) = ironwood_target_value(target_value, &notes)? {
+            notes.extend(super::common::select_spendable_notes(
+                conn,
+                params,
+                account,
+                ironwood_target_value,
+                target_height,
+                confirmations_policy,
+                exclude,
+                ShieldedPool::Ironwood,
+                to_received_ironwood_note,
+            )?);
+        }
+        notes
+    };
+
+    Ok(notes)
+}
+
+#[cfg(zcash_unstable = "nu7")]
+fn ironwood_target_value(
+    target_value: TargetValue,
+    selected_orchard_notes: &[ReceivedNote<ReceivedNoteId, Note>],
+) -> Result<Option<TargetValue>, SqliteClientError> {
+    match target_value {
+        TargetValue::AllFunds(mode) => Ok(Some(TargetValue::AllFunds(mode))),
+        TargetValue::AtLeast(target) => {
+            let selected = selected_orchard_notes.iter().try_fold(
+                Zatoshis::ZERO,
+                |total, note| -> Result<_, SqliteClientError> {
+                    (total + note.note_value()?)
+                        .ok_or(BalanceError::Overflow)
+                        .map_err(Into::into)
+                },
+            )?;
+
+            if selected >= target {
+                Ok(None)
+            } else {
+                Ok(Some(TargetValue::AtLeast(
+                    (target - selected).ok_or(BalanceError::Underflow)?,
+                )))
+            }
+        }
+    }
+}
+
+pub(crate) fn select_unspent_orchard_notes<P: consensus::Parameters>(
+    conn: &Connection,
+    params: &P,
+    account: AccountUuid,
+    target_height: TargetHeight,
+    confirmations_policy: ConfirmationsPolicy,
+    exclude: &[ReceivedNoteId],
+    note_request: super::common::NoteRequest,
+) -> Result<Vec<ReceivedNote<ReceivedNoteId, Note>>, SqliteClientError> {
+    let notes = super::common::select_unspent_notes(
+        conn,
+        params,
+        account,
+        target_height,
+        confirmations_policy,
+        exclude,
+        ShieldedPool::Orchard,
+        to_received_note,
+        note_request,
+    )?;
+
+    #[cfg(zcash_unstable = "nu7")]
+    let notes = {
+        let mut notes = notes;
+        notes.extend(super::common::select_unspent_notes(
+            conn,
+            params,
+            account,
+            target_height,
+            confirmations_policy,
+            exclude,
+            ShieldedPool::Ironwood,
+            to_received_ironwood_note,
+            note_request,
+        )?);
+        notes
+    };
+
+    Ok(notes)
 }
 
 /// Return all Orchard notes that were received at or before `height`
@@ -314,12 +422,25 @@ pub(crate) fn select_unspent_ironwood_note_meta(
     wallet_birthday: BlockHeight,
     anchor_height: BlockHeight,
 ) -> Result<Vec<UnspentNoteMeta>, SqliteClientError> {
-    super::common::select_unspent_note_meta(
+    let mut legacy_v3_meta = super::common::select_unspent_note_meta_for_tree(
+        conn,
+        ShieldedPool::Ironwood,
+        ORCHARD_TABLES_PREFIX,
+        IRONWOOD_TABLES_PREFIX,
+        "action_index",
+        "AND rn.note_version = 3",
+        wallet_birthday,
+        anchor_height,
+    )?;
+
+    legacy_v3_meta.extend(super::common::select_unspent_note_meta(
         conn,
         ShieldedPool::Ironwood,
         wallet_birthday,
         anchor_height,
-    )
+    )?);
+
+    Ok(legacy_v3_meta)
 }
 
 /// Decodes a note plaintext version from its `note_version` column encoding, returning `None` if
@@ -502,6 +623,14 @@ pub(crate) fn mark_orchard_note_spent(
             WHERE n.nf = :nf
             AND t.id_tx != :transaction_id
             AND t.mined_height IS NOT NULL
+            UNION ALL
+            SELECT s.transaction_id
+            FROM ironwood_received_notes n
+            JOIN ironwood_received_note_spends s ON s.ironwood_received_note_id = n.id
+            JOIN transactions t ON t.id_tx = s.transaction_id
+            WHERE n.nf = :nf
+            AND t.id_tx != :transaction_id
+            AND t.mined_height IS NOT NULL
         ),
         mined_tx AS (
             SELECT t.id_tx AS transaction_id
@@ -526,11 +655,21 @@ pub(crate) fn mark_orchard_note_spent(
          SELECT id, :transaction_id FROM orchard_received_notes WHERE nf = :nf
          ON CONFLICT (orchard_received_note_id, transaction_id) DO NOTHING",
     )?;
+    let mut stmt_mark_ironwood_note_spent = conn.prepare_cached(
+        "INSERT INTO ironwood_received_note_spends (ironwood_received_note_id, transaction_id)
+         SELECT id, :transaction_id FROM ironwood_received_notes WHERE nf = :nf
+         ON CONFLICT (ironwood_received_note_id, transaction_id) DO NOTHING",
+    )?;
 
-    match stmt_mark_orchard_note_spent.execute(sql_params)? {
+    match stmt_mark_orchard_note_spent.execute(sql_params)?
+        + stmt_mark_ironwood_note_spent.execute(sql_params)?
+    {
         0 => Ok(false),
         1 => Ok(true),
-        _ => unreachable!("nf column is marked as UNIQUE"),
+        _ => Err(SqliteClientError::CorruptedData(format!(
+            "Orchard nullifier {} matched multiple received notes",
+            hex::encode(nf.to_bytes())
+        ))),
     }
 }
 
@@ -625,14 +764,22 @@ pub(crate) mod tests {
     #[cfg(zcash_unstable = "nu7")]
     fn ironwood_received_rows(conn: &rusqlite::Connection, txid: &[u8]) -> IronwoodReceivedRows {
         conn.query_row(
-            "SELECT COUNT(*),
+            "WITH ironwood_notes AS (
+                 SELECT transaction_id, action_index, value, note_version
+                 FROM orchard_received_notes
+                 WHERE note_version = 3
+                 UNION ALL
+                 SELECT transaction_id, action_index, value, note_version
+                 FROM ironwood_received_notes
+             )
+             SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN rn.note_version = 3 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN sn.id IS NOT NULL THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN sn.output_pool = 4 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN vto.output_pool = 4 THEN 1 ELSE 0 END), 0),
-                    COALESCE(MIN(rn.action_index), -1),
-                    COALESCE(SUM(rn.value), 0)
-             FROM orchard_received_notes rn
+                     COALESCE(MIN(rn.action_index), -1),
+                     COALESCE(SUM(rn.value), 0)
+             FROM ironwood_notes rn
              JOIN transactions t ON t.id_tx = rn.transaction_id
              LEFT JOIN sent_notes sn
                ON (sn.transaction_id, sn.output_pool, sn.output_index) =
@@ -1107,12 +1254,12 @@ pub(crate) mod tests {
         let step = proposal.steps().first();
         assert_eq!(
             step.balance().fee_required(),
-            Zatoshis::const_from_u64(10000)
+            Zatoshis::const_from_u64(20000)
         );
         assert!(step.balance().proposed_change().is_empty());
         assert_eq!(
             step.transaction_request().payments()[&0].amount(),
-            Some(Zatoshis::const_from_u64(90000))
+            Some(Zatoshis::const_from_u64(80000))
         );
 
         // Per ZIP 229, the NU6.3 Orchard cross-address restriction applies regardless of

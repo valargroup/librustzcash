@@ -1208,9 +1208,8 @@ impl MigrationTransaction {
 /// Orchard receiver. The `amount` argument is a minimum migration amount; the transaction migrates
 /// the full selected Orchard value minus fees so that no Orchard change output is created.
 ///
-/// The Ironwood output is inserted as a wallet-internal received note using
-/// the wallet's existing Orchard note storage. It is distinguished from
-/// Orchard notes by its `V3` note version.
+/// The Ironwood output is inserted as a wallet-internal received note with
+/// note plaintext version `V3`.
 ///
 /// # Errors
 ///
@@ -2841,10 +2840,6 @@ where
 
     // Build the transaction with the specified fee rule
     let build_result = build_state.builder.build_for_pczt(OsRng, fee_rule)?;
-
-    if build_result.pczt_parts.ironwood.is_some() {
-        return Err(Error::ProposalNotSupported);
-    }
 
     let created = Creator::build_from_parts(build_result.pczt_parts).ok_or(PcztError::Build)?;
     #[cfg(feature = "unstable")]
