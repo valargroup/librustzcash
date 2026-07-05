@@ -2563,14 +2563,21 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         })
         .collect::<Result<HashMap<AccountUuid, AccountBalance>, _>>()?;
 
-    fn with_pool_balances<F>(
+    struct BalanceSource {
+        protocol: ShieldedPool,
+        table_prefix: &'static str,
+        scan_table_prefix: &'static str,
+        note_version_clause: &'static str,
+    }
+
+    fn with_pool_balances_from_table<F>(
         tx: &rusqlite::Transaction,
         target_height: TargetHeight,
         anchor_height: Option<BlockHeight>,
         confirmations_policy: ConfirmationsPolicy,
         account_balances: &mut HashMap<AccountUuid, AccountBalance>,
-        protocol: ShieldedPool,
-        with_pool_balance: F,
+        source: BalanceSource,
+        with_pool_balance: &F,
     ) -> Result<(), SqliteClientError>
     where
         F: Fn(
@@ -2581,7 +2588,10 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             Zatoshis,
         ) -> Result<(), SqliteClientError>,
     {
-        let TableConstants { table_prefix, .. } = table_constants::<SqliteClientError>(protocol)?;
+        let protocol = source.protocol;
+        let table_prefix = source.table_prefix;
+        let scan_table_prefix = source.scan_table_prefix;
+        let note_version_clause = source.note_version_clause;
 
         // If the shard containing the anchor height contains any unscanned ranges that start
         // below or including that height, none of our shielded balance is currently spendable.
@@ -2611,7 +2621,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             target_height.saturating_sub(u32::from(confirmations_policy.trusted()));
 
         let any_spendable =
-            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, table_prefix))?;
+            anchor_height.map_or(Ok(false), |h| is_any_spendable(tx, h, scan_table_prefix))?;
 
         let mut stmt_select_notes = tx.prepare_cached(&format!(
             "SELECT accounts.uuid, rn.id, rn.value, rn.is_change, rn.recipient_key_scope,
@@ -2624,7 +2634,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
              FROM {table_prefix}_received_notes rn
              INNER JOIN accounts ON accounts.id = rn.account_id
              INNER JOIN transactions t ON t.id_tx = rn.transaction_id
-            LEFT OUTER JOIN v_{table_prefix}_shards_scan_state scan_state
+            LEFT OUTER JOIN v_{scan_table_prefix}_shards_scan_state scan_state
                 ON rn.commitment_tree_position >= scan_state.start_position
                 AND rn.commitment_tree_position < scan_state.end_position_exclusive
              LEFT OUTER JOIN transparent_received_output_spends ros
@@ -2636,6 +2646,7 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
                 ON tt.id_tx = tro.transaction_id
              WHERE ({}) -- the transaction is unexpired
              AND rn.id NOT IN ({}) -- and the received note is unspent
+             {note_version_clause}
              GROUP BY rn.id",
             common::tx_unexpired_condition("t"),
             common::spent_notes_clause(table_prefix)
@@ -2742,6 +2753,107 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             }
         }
         Ok(())
+    }
+
+    fn with_pool_balances<F>(
+        tx: &rusqlite::Transaction,
+        target_height: TargetHeight,
+        anchor_height: Option<BlockHeight>,
+        confirmations_policy: ConfirmationsPolicy,
+        account_balances: &mut HashMap<AccountUuid, AccountBalance>,
+        protocol: ShieldedPool,
+        with_pool_balance: F,
+    ) -> Result<(), SqliteClientError>
+    where
+        F: Fn(
+            &mut AccountBalance,
+            Zatoshis,
+            Zatoshis,
+            Zatoshis,
+            Zatoshis,
+        ) -> Result<(), SqliteClientError>,
+    {
+        match protocol {
+            ShieldedPool::Sapling => {
+                let TableConstants { table_prefix, .. } =
+                    table_constants::<SqliteClientError>(protocol)?;
+                with_pool_balances_from_table(
+                    tx,
+                    target_height,
+                    anchor_height,
+                    confirmations_policy,
+                    account_balances,
+                    BalanceSource {
+                        protocol,
+                        table_prefix,
+                        scan_table_prefix: table_prefix,
+                        note_version_clause: "",
+                    },
+                    &with_pool_balance,
+                )
+            }
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Orchard => with_pool_balances_from_table(
+                tx,
+                target_height,
+                anchor_height,
+                confirmations_policy,
+                account_balances,
+                BalanceSource {
+                    protocol,
+                    table_prefix: crate::ORCHARD_TABLES_PREFIX,
+                    scan_table_prefix: crate::ORCHARD_TABLES_PREFIX,
+                    note_version_clause: "AND rn.note_version = 2",
+                },
+                &with_pool_balance,
+            ),
+            #[cfg(not(feature = "orchard"))]
+            ShieldedPool::Orchard => Err(SqliteClientError::UnsupportedPoolType(PoolType::ORCHARD)),
+            #[cfg(feature = "orchard")]
+            ShieldedPool::Ironwood => {
+                #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+                let legacy_scan_table_prefix = crate::IRONWOOD_TABLES_PREFIX;
+                #[cfg(not(all(feature = "orchard", zcash_unstable = "nu7")))]
+                let legacy_scan_table_prefix = crate::ORCHARD_TABLES_PREFIX;
+
+                with_pool_balances_from_table(
+                    tx,
+                    target_height,
+                    anchor_height,
+                    confirmations_policy,
+                    account_balances,
+                    BalanceSource {
+                        protocol,
+                        table_prefix: crate::ORCHARD_TABLES_PREFIX,
+                        scan_table_prefix: legacy_scan_table_prefix,
+                        note_version_clause: "AND rn.note_version = 3",
+                    },
+                    &with_pool_balance,
+                )?;
+
+                #[cfg(all(feature = "orchard", zcash_unstable = "nu7"))]
+                with_pool_balances_from_table(
+                    tx,
+                    target_height,
+                    anchor_height,
+                    confirmations_policy,
+                    account_balances,
+                    BalanceSource {
+                        protocol,
+                        table_prefix: crate::IRONWOOD_TABLES_PREFIX,
+                        scan_table_prefix: crate::IRONWOOD_TABLES_PREFIX,
+                        note_version_clause: "",
+                    },
+                    &with_pool_balance,
+                )?;
+
+                Ok(())
+            }
+            #[cfg(not(feature = "orchard"))]
+            ShieldedPool::Ironwood => {
+                Err(SqliteClientError::UnsupportedPoolType(PoolType::IRONWOOD))
+            }
+        }
     }
 
     #[cfg(feature = "orchard")]
