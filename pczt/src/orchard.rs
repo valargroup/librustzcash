@@ -1046,7 +1046,16 @@ impl Bundle {
             },
         }
 
-        if !merge_optional(&mut self.anchor, anchor) {
+        let self_zkproof_present = self.zkproof.is_some();
+        let other_zkproof_present = zkproof.is_some();
+        if !merge_anchor(
+            &mut self.anchor,
+            anchor,
+            self_global,
+            other_global,
+            self_zkproof_present,
+            other_zkproof_present,
+        ) {
             return None;
         }
 
@@ -1135,6 +1144,44 @@ impl Bundle {
         }
 
         Some(self)
+    }
+}
+
+fn merge_anchor(
+    lhs: &mut Option<[u8; 32]>,
+    rhs: Option<[u8; 32]>,
+    self_global: &Global,
+    other_global: &Global,
+    lhs_has_zkproof: bool,
+    rhs_has_zkproof: bool,
+) -> bool {
+    let Some(rhs) = rhs else {
+        return true;
+    };
+
+    let Some(lhs_anchor) = lhs.as_mut() else {
+        *lhs = Some(rhs);
+        return true;
+    };
+
+    if lhs_anchor == &rhs {
+        return true;
+    }
+
+    let empty_tree = orchard::Anchor::empty_tree().to_bytes();
+    let v6_anchor_placeholder_merge = self_global.tx_version
+        == zcash_protocol::constants::V6_TX_VERSION
+        && other_global.tx_version == zcash_protocol::constants::V6_TX_VERSION
+        && ((*lhs_anchor == empty_tree && !lhs_has_zkproof)
+            || (rhs == empty_tree && !rhs_has_zkproof));
+
+    if v6_anchor_placeholder_merge {
+        if *lhs_anchor == empty_tree && !lhs_has_zkproof {
+            *lhs_anchor = rhs;
+        }
+        true
+    } else {
+        false
     }
 }
 

@@ -11,8 +11,8 @@ use serde_with::serde_as;
 
 use crate::{Pczt, common, orchard, sapling, transparent};
 
-pub const COMPACT_MIGRATION_CHILD_MAGIC: &[u8; 4] = b"MCC2";
-pub const COMPACT_MIGRATION_BATCH_MAGIC: &[u8; 4] = b"MCB2";
+pub const COMPACT_MIGRATION_CHILD_MAGIC: &[u8; 4] = b"MCC1";
+pub const COMPACT_MIGRATION_BATCH_MAGIC: &[u8; 4] = b"MCB1";
 
 #[derive(Debug)]
 pub enum Error {
@@ -43,7 +43,6 @@ struct CompactMigrationChild {
     address: [u8; 43],
     orchard_flags: u8,
     orchard_value_sum: (u64, bool),
-    orchard_anchor: Option<[u8; 32]>,
     orchard_spend_value: u64,
     orchard_spend_rho: [u8; 32],
     orchard_spend_rseed: [u8; 32],
@@ -54,7 +53,6 @@ struct CompactMigrationChild {
     orchard_output_rseed: [u8; 32],
     ironwood_flags: u8,
     ironwood_value_sum: (u64, bool),
-    ironwood_anchor: Option<[u8; 32]>,
     ironwood_spend_nullifier: [u8; 32],
     ironwood_spend_rk: [u8; 32],
     ironwood_spend_value: u64,
@@ -68,7 +66,6 @@ struct CompactMigrationChild {
 struct CompactMigrationBatchChild {
     orchard_flags: u8,
     orchard_value_sum: (u64, bool),
-    orchard_anchor: Option<[u8; 32]>,
     orchard_spend_value: u64,
     orchard_spend_rho: [u8; 32],
     orchard_spend_rseed: [u8; 32],
@@ -78,7 +75,6 @@ struct CompactMigrationBatchChild {
     orchard_output_rseed: [u8; 32],
     ironwood_flags: u8,
     ironwood_value_sum: (u64, bool),
-    ironwood_anchor: Option<[u8; 32]>,
     ironwood_spend_nullifier: [u8; 32],
     ironwood_spend_rk: [u8; 32],
     ironwood_spend_value: u64,
@@ -104,7 +100,6 @@ impl CompactMigrationBatchChild {
         Self {
             orchard_flags: child.orchard_flags,
             orchard_value_sum: child.orchard_value_sum,
-            orchard_anchor: child.orchard_anchor,
             orchard_spend_value: child.orchard_spend_value,
             orchard_spend_rho: child.orchard_spend_rho,
             orchard_spend_rseed: child.orchard_spend_rseed,
@@ -114,7 +109,6 @@ impl CompactMigrationBatchChild {
             orchard_output_rseed: child.orchard_output_rseed,
             ironwood_flags: child.ironwood_flags,
             ironwood_value_sum: child.ironwood_value_sum,
-            ironwood_anchor: child.ironwood_anchor,
             ironwood_spend_nullifier: child.ironwood_spend_nullifier,
             ironwood_spend_rk: child.ironwood_spend_rk,
             ironwood_spend_value: child.ironwood_spend_value,
@@ -136,7 +130,6 @@ impl CompactMigrationBatchChild {
             address,
             orchard_flags: self.orchard_flags,
             orchard_value_sum: self.orchard_value_sum,
-            orchard_anchor: self.orchard_anchor,
             orchard_spend_value: self.orchard_spend_value,
             orchard_spend_rho: self.orchard_spend_rho,
             orchard_spend_rseed: self.orchard_spend_rseed,
@@ -147,7 +140,6 @@ impl CompactMigrationBatchChild {
             orchard_output_rseed: self.orchard_output_rseed,
             ironwood_flags: self.ironwood_flags,
             ironwood_value_sum: self.ironwood_value_sum,
-            ironwood_anchor: self.ironwood_anchor,
             ironwood_spend_nullifier: self.ironwood_spend_nullifier,
             ironwood_spend_rk: self.ironwood_spend_rk,
             ironwood_spend_value: self.ironwood_spend_value,
@@ -234,7 +226,6 @@ fn compact_child_from_pczt(pczt: &Pczt) -> Result<CompactMigrationChild, Error> 
         address,
         orchard_flags: *pczt.orchard().flags(),
         orchard_value_sum: *pczt.orchard().value_sum(),
-        orchard_anchor: *pczt.orchard().anchor(),
         orchard_spend_value: orchard_action
             .spend()
             .value()
@@ -262,7 +253,6 @@ fn compact_child_from_pczt(pczt: &Pczt) -> Result<CompactMigrationChild, Error> 
             .ok_or(Error::InvalidShape("missing Orchard output rseed"))?,
         ironwood_flags: *pczt.ironwood().flags(),
         ironwood_value_sum: *pczt.ironwood().value_sum(),
-        ironwood_anchor: *pczt.ironwood().anchor(),
         ironwood_spend_nullifier: ironwood_action
             .spend()
             .nullifier()
@@ -519,7 +509,7 @@ fn pczt_from_compact_child(compact: CompactMigrationChild) -> Result<Pczt, Error
             vec![orchard_action],
             compact.orchard_flags,
             compact.orchard_value_sum,
-            compact.orchard_anchor,
+            None,
             orchard::NoteVersion::V2,
             None,
             None,
@@ -528,7 +518,7 @@ fn pczt_from_compact_child(compact: CompactMigrationChild) -> Result<Pczt, Error
             vec![ironwood_action],
             compact.ironwood_flags,
             compact.ironwood_value_sum,
-            compact.ironwood_anchor,
+            None,
             orchard::NoteVersion::V3,
             None,
             None,
