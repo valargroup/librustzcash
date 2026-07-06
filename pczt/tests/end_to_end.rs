@@ -1018,6 +1018,19 @@ fn compact_migration_child_pczt_with_zip32() -> (
     Vec<u32>,
     usize,
 ) {
+    compact_migration_child_pczt_with_zip32_at_scope(orchard::keys::Scope::Internal)
+}
+
+fn compact_migration_child_pczt_with_zip32_at_scope(
+    scope: orchard::keys::Scope,
+) -> (
+    Pczt,
+    orchard::keys::SpendAuthorizingKey,
+    [u8; 96],
+    [u8; 32],
+    Vec<u32>,
+    usize,
+) {
     let mut rng = OsRng;
     let seed = [7u8; 32];
     let seed_fingerprint = [8u8; 32];
@@ -1026,9 +1039,9 @@ fn compact_migration_child_pczt_with_zip32() -> (
         .expect("valid Orchard ZIP 32 spending key");
     let orchard_ask = orchard::keys::SpendAuthorizingKey::from(&orchard_sk);
     let orchard_fvk = orchard::keys::FullViewingKey::from(&orchard_sk);
-    let orchard_ivk = orchard_fvk.to_ivk(orchard::keys::Scope::External);
-    let orchard_ovk = orchard_fvk.to_ovk(orchard::keys::Scope::External);
-    let recipient = orchard_fvk.address_at(0u32, orchard::keys::Scope::External);
+    let orchard_ivk = orchard_fvk.to_ivk(scope);
+    let orchard_ovk = orchard_fvk.to_ovk(scope);
+    let recipient = orchard_fvk.address_at(0u32, scope);
 
     let value = orchard::value::NoteValue::from_raw(1_000_000);
     let note = {
@@ -1334,6 +1347,16 @@ fn compact_migration_child_decodes_to_signable_pczt() {
     let mut decoded = pczt::compact_migration::decode_child(&payload).unwrap();
     assert_eq!(decoded.orchard().actions().len(), 1);
     assert_eq!(decoded.ironwood().actions().len(), 1);
+    assert!(
+        decoded.orchard().actions()[0]
+            .output()
+            .enc_ciphertext()
+            .is_none()
+    );
+    assert_eq!(
+        *decoded.orchard().actions()[0].output().memo_kind(),
+        Some(MemoKind::Zero)
+    );
     assert_eq!(
         decoded.fill_missing_spend_fvks_for_zip32_path(
             &seed_fingerprint,
@@ -1399,6 +1422,19 @@ fn compact_migration_child_decodes_to_signable_pczt() {
             .is_some(),
         "combining must retain the compact child's spend authorization signature"
     );
+}
+
+#[test]
+fn compact_migration_child_rejects_external_orchard_dummy_ciphertext() {
+    let (full, ..) =
+        compact_migration_child_pczt_with_zip32_at_scope(orchard::keys::Scope::External);
+
+    match pczt::compact_migration::encode_child(&full) {
+        Err(pczt::compact_migration::Error::InvalidShape(
+            "compact migration child Orchard output enc_ciphertext is not recomputable",
+        )) => {}
+        other => panic!("expected non-recomputable Orchard dummy ciphertext error, got {other:?}"),
+    }
 }
 
 #[test]

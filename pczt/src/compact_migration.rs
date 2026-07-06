@@ -11,8 +11,8 @@ use serde_with::serde_as;
 
 use crate::{Pczt, common, orchard, sapling, transparent};
 
-pub const COMPACT_MIGRATION_CHILD_MAGIC: &[u8; 4] = b"MCC1";
-pub const COMPACT_MIGRATION_BATCH_MAGIC: &[u8; 4] = b"MCB1";
+pub const COMPACT_MIGRATION_CHILD_MAGIC: &[u8; 4] = b"MCC2";
+pub const COMPACT_MIGRATION_BATCH_MAGIC: &[u8; 4] = b"MCB2";
 
 #[derive(Debug)]
 pub enum Error {
@@ -50,7 +50,6 @@ struct CompactMigrationChild {
     orchard_spend_alpha: [u8; 32],
     orchard_spend_zip32_derivation: Option<common::Zip32Derivation>,
     orchard_rcv: [u8; 32],
-    orchard_output_enc_ciphertext: Vec<u8>,
     orchard_output_out_ciphertext: Vec<u8>,
     orchard_output_rseed: [u8; 32],
     ironwood_flags: u8,
@@ -75,7 +74,6 @@ struct CompactMigrationBatchChild {
     orchard_spend_rseed: [u8; 32],
     orchard_spend_alpha: [u8; 32],
     orchard_rcv: [u8; 32],
-    orchard_output_enc_ciphertext: Vec<u8>,
     orchard_output_out_ciphertext: Vec<u8>,
     orchard_output_rseed: [u8; 32],
     ironwood_flags: u8,
@@ -112,7 +110,6 @@ impl CompactMigrationBatchChild {
             orchard_spend_rseed: child.orchard_spend_rseed,
             orchard_spend_alpha: child.orchard_spend_alpha,
             orchard_rcv: child.orchard_rcv,
-            orchard_output_enc_ciphertext: child.orchard_output_enc_ciphertext,
             orchard_output_out_ciphertext: child.orchard_output_out_ciphertext,
             orchard_output_rseed: child.orchard_output_rseed,
             ironwood_flags: child.ironwood_flags,
@@ -146,7 +143,6 @@ impl CompactMigrationBatchChild {
             orchard_spend_alpha: self.orchard_spend_alpha,
             orchard_spend_zip32_derivation,
             orchard_rcv: self.orchard_rcv,
-            orchard_output_enc_ciphertext: self.orchard_output_enc_ciphertext,
             orchard_output_out_ciphertext: self.orchard_output_out_ciphertext,
             orchard_output_rseed: self.orchard_output_rseed,
             ironwood_flags: self.ironwood_flags,
@@ -259,12 +255,6 @@ fn compact_child_from_pczt(pczt: &Pczt) -> Result<CompactMigrationChild, Error> 
         orchard_rcv: orchard_action
             .raw_rcv()
             .ok_or(Error::InvalidShape("missing Orchard rcv"))?,
-        orchard_output_enc_ciphertext: orchard_action
-            .output()
-            .enc_ciphertext()
-            .as_ref()
-            .ok_or(Error::InvalidShape("missing Orchard output enc_ciphertext"))?
-            .clone(),
         orchard_output_out_ciphertext: orchard_action.output().out_ciphertext().clone(),
         orchard_output_rseed: orchard_action
             .output()
@@ -295,6 +285,8 @@ fn compact_child_from_pczt(pczt: &Pczt) -> Result<CompactMigrationChild, Error> 
             .ok_or(Error::InvalidShape("missing Ironwood output rseed"))?,
         ironwood_output_out_ciphertext: ironwood_action.output().out_ciphertext().clone(),
     };
+
+    validate_compact_child_recomputes_orchard_dummy_ciphertext(pczt)?;
 
     Ok(compact)
 }
@@ -403,6 +395,49 @@ fn parse_batch_payload(payload: &[u8]) -> Result<CompactMigrationBatch, Error> {
     Ok(batch)
 }
 
+fn validate_compact_child_recomputes_orchard_dummy_ciphertext(
+    original: &Pczt,
+) -> Result<(), Error> {
+    let original_orchard_action_idx = match original.orchard().actions().as_slice() {
+        [_] => 0,
+        [] => return Err(Error::InvalidShape("Orchard")),
+        _ => {
+            return Err(Error::InvalidShape(
+                "compact migration child has multiple actions",
+            ));
+        }
+    };
+    let original_enc_ciphertext = single_action(original.orchard(), "Orchard")?
+        .output()
+        .enc_ciphertext()
+        .as_ref()
+        .ok_or(Error::InvalidShape("missing Orchard output enc_ciphertext"))?;
+
+    let mut candidate = original.clone();
+    let candidate_output = &mut candidate.orchard.actions[original_orchard_action_idx].output;
+    candidate_output.enc_ciphertext = None;
+    candidate_output.memo_kind = Some(orchard::MemoKind::Zero);
+    candidate.fill_derived_fields().map_err(|_| {
+        Error::InvalidShape("compact migration child Orchard output enc_ciphertext did not fill")
+    })?;
+
+    let reconstructed_enc_ciphertext = single_action(candidate.orchard(), "Orchard")?
+        .output()
+        .enc_ciphertext()
+        .as_ref()
+        .ok_or(Error::InvalidShape(
+            "missing reconstructed Orchard output enc_ciphertext",
+        ))?;
+
+    if reconstructed_enc_ciphertext != original_enc_ciphertext {
+        return Err(Error::InvalidShape(
+            "compact migration child Orchard output enc_ciphertext is not recomputable",
+        ));
+    }
+
+    Ok(())
+}
+
 fn pczt_from_compact_child(compact: CompactMigrationChild) -> Result<Pczt, Error> {
     let orchard_spend = orchard::Spend::from_raw_parts(
         None,
@@ -422,8 +457,8 @@ fn pczt_from_compact_child(compact: CompactMigrationChild) -> Result<Pczt, Error
     let orchard_output = orchard::Output::from_raw_parts(
         None,
         None,
-        Some(compact.orchard_output_enc_ciphertext),
         None,
+        Some(orchard::MemoKind::Zero),
         compact.orchard_output_out_ciphertext,
         Some(compact.address),
         Some(0),
