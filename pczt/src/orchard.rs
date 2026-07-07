@@ -1147,6 +1147,16 @@ impl Bundle {
     }
 }
 
+/// The root of the empty Orchard note commitment tree, as anchor bytes — the
+/// placeholder an elided v6 anchor refills as. Written out as a constant so the
+/// wire-level Combiner behaves identically whether or not the optional
+/// `orchard` dependency is enabled; `empty_tree_anchor_matches_orchard` pins it
+/// to `orchard::Anchor::empty_tree()`.
+const EMPTY_TREE_ANCHOR: [u8; 32] = [
+    174, 41, 53, 241, 223, 216, 162, 74, 237, 124, 112, 223, 125, 227, 166, 104, 235, 122, 73,
+    177, 49, 152, 128, 221, 226, 187, 217, 3, 26, 229, 216, 47,
+];
+
 fn merge_anchor(
     lhs: &mut Option<[u8; 32]>,
     rhs: Option<[u8; 32]>,
@@ -1168,7 +1178,7 @@ fn merge_anchor(
         return true;
     }
 
-    let empty_tree = orchard::Anchor::empty_tree().to_bytes();
+    let empty_tree = EMPTY_TREE_ANCHOR;
     let v6_anchor_placeholder_merge = self_global.tx_version
         == zcash_protocol::constants::V6_TX_VERSION
         && other_global.tx_version == zcash_protocol::constants::V6_TX_VERSION
@@ -1187,6 +1197,15 @@ fn merge_anchor(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "orchard")]
+    #[test]
+    fn empty_tree_anchor_matches_orchard() {
+        assert_eq!(
+            super::EMPTY_TREE_ANCHOR,
+            orchard::Anchor::empty_tree().to_bytes()
+        );
+    }
+
     use alloc::{collections::BTreeMap, vec::Vec};
 
     use crate::common::Zip32Derivation;
