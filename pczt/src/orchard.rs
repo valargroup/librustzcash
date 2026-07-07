@@ -1340,6 +1340,11 @@ pub enum FillError {
     /// An output's `enc_ciphertext` was elided without the [`MemoKind`] tag needed to
     /// reconstruct it.
     MissingMemoKind,
+    /// A pre-v6 PCZT elided its Orchard bundle anchor. Pre-v6 signatures commit to
+    /// the anchor, and it is not recomputable, so the empty-tree placeholder refill
+    /// (sound for v6, whose sighash omits the anchor) would sign over the wrong
+    /// anchor.
+    MissingPreV6Anchor,
 }
 
 #[cfg(feature = "orchard")]
@@ -1358,6 +1363,9 @@ impl FillError {
             // An elided ciphertext without its memo-kind tag cannot be reconstructed,
             // so to a parsing consumer the action's `enc_ciphertext` data is unusable.
             FillError::MissingMemoKind => orchard::pczt::ParseError::InvalidEncCiphertext,
+            // A pre-v6 anchor is not recomputable (and the placeholder refill is
+            // unsound pre-v6), so to a parsing consumer the anchor data is unusable.
+            FillError::MissingPreV6Anchor => orchard::pczt::ParseError::InvalidAnchor,
         }
     }
 }

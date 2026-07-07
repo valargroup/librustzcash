@@ -394,8 +394,20 @@ impl Pczt {
     /// Orchard and Ironwood bundles; see
     /// [`orchard::Bundle::fill_derived_fields`](crate::orchard::Bundle::fill_derived_fields)
     /// for the per-bundle contract. On error the PCZT may be left partially filled.
+    ///
+    /// A missing bundle anchor refills as the empty-tree placeholder, which is only
+    /// sound for v6 transactions (their signatures do not commit to the anchor). A
+    /// pre-v6 Orchard signature does commit to it, so a v5 PCZT whose non-empty
+    /// Orchard bundle elided the anchor is rejected rather than signed over the
+    /// wrong anchor.
     #[cfg(feature = "orchard")]
     pub fn fill_derived_fields(&mut self) -> Result<(), crate::orchard::FillError> {
+        if self.global.tx_version != zcash_protocol::constants::V6_TX_VERSION
+            && !self.orchard.actions().is_empty()
+            && self.orchard.anchor().is_none()
+        {
+            return Err(crate::orchard::FillError::MissingPreV6Anchor);
+        }
         self.orchard.fill_derived_fields()?;
         self.ironwood.fill_derived_fields()
     }

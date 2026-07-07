@@ -1970,3 +1970,23 @@ fn combiner_restores_elided_fields_from_a_full_copy() {
     merged.fill_derived_fields().unwrap();
     assert_eq!(merged.serialize().unwrap(), full_bytes);
 }
+
+/// A pre-v6 signature commits to the Orchard bundle anchor and the anchor is not
+/// recomputable, so `fill_derived_fields` must reject an anchor-elided pre-v6 PCZT
+/// instead of refilling the v6 empty-tree placeholder and signing over the wrong
+/// anchor.
+#[test]
+fn fill_rejects_anchor_elided_pre_v6_orchard() {
+    let (full, _, _, output_indices) = orchard_pczt_with_migration_memos();
+    assert_ne!(
+        *full.global().tx_version(),
+        zcash_protocol::constants::V6_TX_VERSION,
+        "fixture must be a pre-v6 transaction for this test"
+    );
+
+    let mut redacted = redact_derived_fields(full, false, output_indices, true);
+    assert!(matches!(
+        redacted.fill_derived_fields(),
+        Err(pczt::orchard::FillError::MissingPreV6Anchor)
+    ));
+}
