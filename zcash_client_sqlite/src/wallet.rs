@@ -2793,6 +2793,25 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
             .unwrap_or(0)
     };
 
+    #[cfg(feature = "orchard")]
+    let next_ironwood_subtree_index = {
+        let shard_store = SqliteShardStore::<
+            _,
+            ::orchard::tree::MerkleHashOrchard,
+            ORCHARD_SHARD_HEIGHT,
+        >::from_connection(tx, crate::IRONWOOD_TABLES_PREFIX)?;
+
+        // See `next_orchard_subtree_index`: overlap with the last complete shard.
+        shard_store
+            .get_shard_roots()
+            .map_err(ShardTreeError::Storage)?
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|addr| addr.index())
+            .unwrap_or(0)
+    };
+
     let summary = WalletSummary::new(
         account_balances,
         chain_tip_height,
@@ -2801,6 +2820,8 @@ pub(crate) fn get_wallet_summary<P: consensus::Parameters>(
         next_sapling_subtree_index,
         #[cfg(feature = "orchard")]
         next_orchard_subtree_index,
+        #[cfg(feature = "orchard")]
+        next_ironwood_subtree_index,
     );
 
     Ok(Some(summary))
