@@ -2352,8 +2352,10 @@ where
 /// version. For standard transfers, pass the same `TxVersion` to
 /// [`propose_standard_transfer_to_address`] before calling this function.
 ///
-/// See [`create_pczt_from_proposal`] for the shared behavior; this variant uses the
-/// builder-derived expiry height and the padded default bundle type.
+/// See [`create_pczt_from_proposal`] for the shared behavior, including the
+/// `orchard_pool_bundle_type` contract; this variant uses the builder-derived
+/// expiry height.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 #[cfg(all(feature = "pczt", feature = "unstable"))]
 pub fn create_pczt_from_proposal_with_tx_version<
@@ -2370,6 +2372,7 @@ pub fn create_pczt_from_proposal_with_tx_version<
     ovk_policy: OvkPolicy,
     proposal: &Proposal<FeeRuleT, N>,
     proposed_version: TxVersion,
+    orchard_pool_bundle_type: BundleType,
 ) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
 where
     DbT: WalletWrite + WalletCommitmentTrees,
@@ -2384,7 +2387,7 @@ where
         ovk_policy,
         proposal,
         None,
-        BundleType::DEFAULT,
+        orchard_pool_bundle_type,
         Some(proposed_version),
     )
 }
