@@ -34,6 +34,7 @@ impl Signer {
 
         let mut tx_modifiable = pczt.global.tx_modifiable;
 
+        let anchor = pczt.ironwood.anchor;
         let fvk_snapshot = snapshot_spend_fvks(&pczt.ironwood);
         let mut bundle = pczt
             .ironwood
@@ -44,7 +45,7 @@ impl Signer {
         f(&pczt, &mut bundle, &mut tx_modifiable)?;
 
         pczt.global.tx_modifiable = tx_modifiable;
-        pczt.ironwood = crate::orchard::Bundle::serialize_from(bundle);
+        pczt.ironwood = crate::orchard::Bundle::serialize_from_preserving_anchor(bundle, anchor);
         restore_spend_fvks(&mut pczt.ironwood, &fvk_snapshot).map_err(E::from)?;
 
         Ok(Self { pczt })
@@ -74,17 +75,21 @@ impl Signer {
 
         let bundle_version = crate::orchard::orchard_bundle_version(&pczt.global)
             .ok_or(OrchardParseError::UnsupportedConsensusBranchId)?;
+        let anchor = pczt.orchard.anchor;
         let fvk_snapshot = snapshot_spend_fvks(&pczt.orchard);
         let mut bundle = pczt
             .orchard
             .clone()
-            .into_parsed_with_version_preverified_for_signing(bundle_version)
+            .into_parsed_with_version_preverified_for_signing(
+                bundle_version,
+                pczt.global.tx_version,
+            )
             .map_err(OrchardParseError::Parse)?;
 
         f(&pczt, &mut bundle, &mut tx_modifiable)?;
 
         pczt.global.tx_modifiable = tx_modifiable;
-        pczt.orchard = crate::orchard::Bundle::serialize_from(bundle);
+        pczt.orchard = crate::orchard::Bundle::serialize_from_preserving_anchor(bundle, anchor);
         restore_spend_fvks(&mut pczt.orchard, &fvk_snapshot).map_err(E::from)?;
 
         Ok(Self { pczt })
@@ -214,7 +219,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use crate::orchard::{Action, Bundle, NoteVersion, Output, Spend};
+    use crate::orchard::{Action, Bundle, EncCiphertext, NoteVersion, Output, Spend};
 
     use super::{OrchardParseError, restore_spend_fvks, snapshot_spend_fvks};
 
@@ -265,7 +270,7 @@ mod tests {
                 // Distinct `rk` per action (`[10; 32]`, `[11; 32]`), shared
                 // nullifier `[3; 32]`.
                 .map(|(i, fvk)| Action {
-                    cv_net: [0; 32],
+                    cv_net: Some([0; 32]),
                     spend: Spend {
                         nullifier: [3u8; 32],
                         rk: [10 + i as u8; 32],
@@ -284,7 +289,7 @@ mod tests {
                     output: Output {
                         cmx: [0; 32],
                         ephemeral_key: [0; 32],
-                        enc_ciphertext: Vec::new(),
+                        enc_ciphertext: EncCiphertext::Encrypted(Vec::new()),
                         out_ciphertext: Vec::new(),
                         recipient: None,
                         value: None,
@@ -299,7 +304,7 @@ mod tests {
                 .collect(),
             flags: 0,
             value_sum: (0, false),
-            anchor: [0; 32],
+            anchor: Some([0; 32]),
             note_version: NoteVersion::V2,
             zkproof: None,
             bsk: None,
