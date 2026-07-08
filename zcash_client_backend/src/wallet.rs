@@ -833,7 +833,6 @@ impl<NoteRef> orchard_fees::InputView<NoteRef> for ReceivedNote<NoteRef, orchard
             .try_into()
             .expect("Orchard note values are indirectly checked by consensus.")
     }
-
 }
 
 /// Describes a policy for which outgoing viewing key should be able to decrypt

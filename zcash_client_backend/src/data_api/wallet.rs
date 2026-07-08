@@ -2328,6 +2328,111 @@ where
     FeeRuleT: FeeRule,
     DbT::AccountId: serde::Serialize,
 {
+    create_pczt_from_proposal_internal(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        target_expiry_height,
+        orchard_pool_bundle_type,
+        #[cfg(feature = "unstable")]
+        Some(TxVersion::V5),
+    )
+}
+
+/// Uses the provided proposal to construct a partially-created Zcash transaction for
+/// the explicitly requested transaction version.
+///
+/// This can be used to create a version 5 PCZT after NU6.3 for compatibility with
+/// signers that cannot parse version 6 or Ironwood bundle data, or to request a
+/// version 6 PCZT that carries an Ironwood bundle.
+///
+/// The supplied proposal must have been created for the same requested transaction
+/// version. For standard transfers, pass the same `TxVersion` to
+/// [`propose_standard_transfer_to_address`] before calling this function.
+///
+/// See [`create_pczt_from_proposal`] for the shared behavior; this variant uses the
+/// builder-derived expiry height and the padded default bundle type.
+#[allow(clippy::type_complexity)]
+#[cfg(all(feature = "pczt", feature = "unstable"))]
+pub fn create_pczt_from_proposal_with_tx_version<
+    DbT,
+    ParamsT,
+    InputsErrT,
+    FeeRuleT,
+    ChangeErrT,
+    N,
+>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    proposed_version: TxVersion,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
+    create_pczt_from_proposal_internal(
+        wallet_db,
+        params,
+        account_id,
+        ovk_policy,
+        proposal,
+        None,
+        BundleType::DEFAULT,
+        Some(proposed_version),
+    )
+}
+
+/// Checks that the PCZT produced by the builder actually carries the transaction
+/// version the caller requested.
+#[cfg(all(feature = "pczt", feature = "unstable"))]
+fn ensure_created_pczt_matches_requested_version(
+    pczt: &pczt::Pczt,
+    requested_version: TxVersion,
+) -> Result<(), PcztError> {
+    let requested_tx_version = requested_version.header() & 0x7fff_ffff;
+    let global = pczt.global();
+
+    if *global.tx_version() != requested_tx_version
+        || *global.version_group_id() != requested_version.version_group_id()
+    {
+        return Err(PcztError::Invalid(format!(
+            "requested transaction version {requested_version:?} produced PCZT version {} with version group ID {}",
+            global.tx_version(),
+            global.version_group_id()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Single-step proposal-to-PCZT conversion shared by [`create_pczt_from_proposal`]
+/// and [`create_pczt_from_proposal_with_tx_version`].
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[cfg(feature = "pczt")]
+fn create_pczt_from_proposal_internal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    account_id: <DbT as WalletRead>::AccountId,
+    ovk_policy: OvkPolicy,
+    proposal: &Proposal<FeeRuleT, N>,
+    target_expiry_height: Option<BlockHeight>,
+    orchard_pool_bundle_type: BundleType,
+    #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
+where
+    DbT: WalletWrite + WalletCommitmentTrees,
+    ParamsT: consensus::Parameters + Clone,
+    FeeRuleT: FeeRule,
+    DbT::AccountId: serde::Serialize,
+{
     use std::collections::HashSet;
 
     let account = wallet_db
@@ -2357,8 +2462,6 @@ where
     let prior_step_results = &[];
     let proposal_step = proposal.steps().first();
     let unused_transparent_outputs = &mut HashMap::new();
-    #[cfg(feature = "unstable")]
-    let proposed_version = Some(TxVersion::V5);
 
     let build_state = build_proposed_transaction::<_, _, _, FeeRuleT, _, _>(
         wallet_db,
@@ -2383,11 +2486,20 @@ where
         build_result.pczt_parts.expiry_height = target;
     }
 
-    if build_result.pczt_parts.ironwood.is_some() {
+    // Only an explicitly requested V6 transaction may carry an Ironwood bundle.
+    #[cfg(feature = "unstable")]
+    let reject_ironwood = !matches!(proposed_version, Some(TxVersion::V6));
+    #[cfg(not(feature = "unstable"))]
+    let reject_ironwood = true;
+    if reject_ironwood && build_result.pczt_parts.ironwood.is_some() {
         return Err(Error::ProposalNotSupported);
     }
 
     let created = Creator::build_from_parts(build_result.pczt_parts).ok_or(PcztError::Build)?;
+    #[cfg(feature = "unstable")]
+    if let Some(proposed_version) = proposed_version {
+        ensure_created_pczt_matches_requested_version(&created, proposed_version)?;
+    }
 
     let io_finalized = IoFinalizer::new(created).finalize_io()?;
 
@@ -2409,6 +2521,28 @@ where
     #[cfg(feature = "orchard")]
     let orchard_spends = (0..)
         .map(|i| build_result.orchard_meta.spend_action_index(i))
+        .take_while(|item| item.is_some())
+        .flatten()
+        .collect::<HashSet<_>>();
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let ironwood_outputs = build_state
+        .ironwood_output_meta
+        .into_iter()
+        .enumerate()
+        .map(|(i, (recipient, _, _))| {
+            let output_index = build_result
+                .ironwood_meta
+                .output_action_index(i)
+                .expect("An action should exist in the transaction for each Ironwood output.");
+
+            (output_index, PcztRecipient::from_recipient(recipient))
+        })
+        .collect::<HashMap<_, _>>();
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let ironwood_spends = (0..)
+        .map(|i| build_result.ironwood_meta.spend_action_index(i))
         .take_while(|item| item.is_some())
         .flatten()
         .collect::<HashSet<_>>();
@@ -2483,7 +2617,62 @@ where
                 })?;
             }
             Ok(())
+        })?;
+
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    let pczt = if ironwood_spends.is_empty() && ironwood_outputs.is_empty() {
+        pczt
+    } else {
+        pczt.update_ironwood_with(|mut updater| {
+            for index in 0..updater.bundle().actions().len() {
+                updater.update_action_with(index, |mut action_updater| {
+                    // If the account has a known derivation, add the Ironwood key path to the
+                    // PCZT.
+                    if let Some(derivation) = account_derivation {
+                        // ironwood_spends will only contain action indices for the real spends,
+                        // and not the dummy inputs
+                        if ironwood_spends.contains(&index) {
+                            // All spent notes are from the same account.
+                            action_updater.set_spend_zip32_derivation(
+                                orchard::pczt::Zip32Derivation::parse(
+                                    derivation.seed_fingerprint().to_bytes(),
+                                    vec![
+                                        zip32::ChildIndex::hardened(32).index(),
+                                        zip32::ChildIndex::hardened(
+                                            params.network_type().coin_type(),
+                                        )
+                                        .index(),
+                                        zip32::ChildIndex::hardened(u32::from(
+                                            derivation.account_index(),
+                                        ))
+                                        .index(),
+                                    ],
+                                )
+                                .expect("valid"),
+                            );
+                        }
+                    }
+
+                    if let Some((pczt_recipient, external_address)) = ironwood_outputs.get(&index) {
+                        if let Some(user_address) = external_address {
+                            action_updater.set_output_user_address(user_address.encode());
+                        }
+                        action_updater.set_output_proprietary(
+                            PROPRIETARY_OUTPUT_INFO.into(),
+                            postcard::to_allocvec(pczt_recipient).expect(
+                                "postcard encoding of PCZT recipient metadata should not fail",
+                            ),
+                        );
+                    }
+
+                    Ok(())
+                })?;
+            }
+            Ok(())
         })?
+    };
+
+    let pczt = pczt
         .update_sapling_with(|mut updater| {
             // If the account has a known derivation, add the Sapling key path to the PCZT.
             if let Some(derivation) = account_derivation {
