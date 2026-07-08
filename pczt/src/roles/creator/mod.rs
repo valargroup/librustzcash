@@ -203,6 +203,8 @@ impl Creator {
     }
 
     pub fn build(self) -> Pczt {
+        let optional_anchor = |anchor| (anchor != [0; 32]).then_some(anchor);
+
         Pczt {
             global: crate::common::Global {
                 tx_version: self.tx_version,
@@ -229,7 +231,7 @@ impl Creator {
                 actions: vec![],
                 flags: self.orchard_flags,
                 value_sum: (0, false),
-                anchor: Some(self.orchard_anchor),
+                anchor: optional_anchor(self.orchard_anchor),
                 // The note-plaintext version is determined by the Orchard bundle version.
                 #[cfg(feature = "orchard")]
                 note_version: self
@@ -243,7 +245,7 @@ impl Creator {
             },
             ironwood: OrchardBundle {
                 flags: self.ironwood_flags,
-                anchor: Some(self.ironwood_anchor),
+                anchor: optional_anchor(self.ironwood_anchor),
                 ..crate::orchard::EMPTY_IRONWOOD
             },
         }
