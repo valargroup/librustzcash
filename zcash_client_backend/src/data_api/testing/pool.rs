@@ -6211,7 +6211,9 @@ fn pczt_legacy_v5_orchard_unshield_after_nu6_3<Dsf>(
     assert!(pczt_created.ironwood().actions().is_empty());
     assert_eq!(
         u32::from_le_bytes(
-            pczt_created.serialize_legacy_v1().unwrap()[4..8]
+            ::pczt::v1::Pczt::try_from(pczt_created.clone())
+                .unwrap()
+                .serialize()[4..8]
                 .try_into()
                 .unwrap()
         ),

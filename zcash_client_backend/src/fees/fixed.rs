@@ -113,6 +113,9 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
             0,
             #[cfg(zcash_unstable = "nu6.3")]
             self.force_legacy_orchard_change,
+            // The fixed-fee strategy has no unpadded opt-in; keep the padded default.
+            #[cfg(feature = "orchard")]
+            ::orchard::builder::BundleType::DEFAULT,
         );
 
         single_pool_output_balance(

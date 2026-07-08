@@ -1359,6 +1359,8 @@ where
             spend_from_account,
             ovk_policy,
             proposal,
+            // Test wrappers exercise the default (padded) path.
+            zcash_primitives::orchard::builder::BundleType::DEFAULT,
         )
     }
 
@@ -1392,6 +1394,8 @@ where
             ovk_policy,
             proposal,
             proposed_version,
+            // Test wrappers exercise the default (padded) path.
+            zcash_primitives::orchard::builder::BundleType::DEFAULT,
         )
     }
 

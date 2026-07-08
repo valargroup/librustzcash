@@ -944,7 +944,10 @@ where
         let ironwood_input_count = 0usize;
 
         let orchard_input_count = spendable_notes.orchard().len() - ironwood_input_count;
+        // Input selection estimates conservatively with the padded default; the
+        // change strategy owns the per-proposal bundle-type choice.
         let orchard_actions = orchard_fees::transactional_action_count(
+            ::orchard::builder::BundleType::DEFAULT,
             orchard_pool_restrictions,
             orchard_input_count,
             requested_orchard_actions,
@@ -954,6 +957,7 @@ where
         #[cfg(zcash_unstable = "nu6.3")]
         {
             let ironwood_actions = orchard_fees::transactional_action_count(
+                ::orchard::builder::BundleType::DEFAULT,
                 orchard::bundle::BundleVersion::ironwood_v3(),
                 ironwood_input_count,
                 requested_ironwood_actions,
@@ -1358,6 +1362,7 @@ impl<DbT: InputSource> ShieldingSelector for GreedyInputSelector<DbT> {
             #[cfg(feature = "orchard")]
             PoolType::ORCHARD => {
                 let count = orchard_fees::transactional_action_count(
+                    ::orchard::builder::BundleType::DEFAULT,
                     orchard_fees::bundle_pool_restrictions_for_target_height(
                         params,
                         BlockHeight::from(target_height),

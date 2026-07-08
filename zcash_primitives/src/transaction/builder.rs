@@ -293,6 +293,11 @@ pub enum BuildConfig {
         orchard_anchor: Option<orchard::Anchor>,
         #[cfg(zcash_unstable = "nu6.3")]
         ironwood_anchor: Option<orchard::Anchor>,
+        /// The [`BundleType`](orchard::builder::BundleType) for the transactional
+        /// Orchard and Ironwood bundles. Use `BundleType::DEFAULT` unless the
+        /// transaction's shape is already public (see
+        /// `BundleType::DEFAULT_UNPADDED`).
+        orchard_pool_bundle_type: orchard::builder::BundleType,
     },
     Coinbase {
         miner_data: Option<PushValue>,
@@ -321,9 +326,13 @@ impl BuildConfig {
         bundle_version: orchard::bundle::BundleVersion,
     ) -> Option<orchard::builder::Builder> {
         match self {
-            BuildConfig::Standard { orchard_anchor, .. } => orchard_anchor.as_ref().map(|a| {
+            BuildConfig::Standard {
+                orchard_anchor,
+                orchard_pool_bundle_type,
+                ..
+            } => orchard_anchor.as_ref().map(|a| {
                 orchard::builder::Builder::new(
-                    orchard::builder::BundleType::DEFAULT,
+                    *orchard_pool_bundle_type,
                     bundle_version,
                     orchard_builder_flags(bundle_version, false),
                     *a,
@@ -356,10 +365,12 @@ impl BuildConfig {
         let bundle_version = orchard::bundle::BundleVersion::ironwood_v3();
         match self {
             BuildConfig::Standard {
-                ironwood_anchor, ..
+                ironwood_anchor,
+                orchard_pool_bundle_type,
+                ..
             } => ironwood_anchor.as_ref().map(|a| {
                 orchard::builder::Builder::new(
-                    orchard::builder::BundleType::DEFAULT,
+                    *orchard_pool_bundle_type,
                     bundle_version,
                     orchard_builder_flags(bundle_version, false),
                     *a,
@@ -423,13 +434,10 @@ fn orchard_action_count(
         .checked_add(builder.changes().len())
         .ok_or("num_outputs + num_changes overflowed")?;
 
-    // The bundle type must match the one the builder constructs for each configuration
-    // (see `orchard_builder` / `ironwood_builder`).
-    let bundle_type = if is_coinbase {
-        orchard::builder::BundleType::Coinbase
-    } else {
-        orchard::builder::BundleType::DEFAULT
-    };
+    // The bundle type must match the one the builder was constructed with (see
+    // `orchard_builder` / `ironwood_builder`); read it back from the builder so
+    // the two cannot drift.
+    let bundle_type = builder.bundle_type();
 
     let flags = orchard_builder_flags(bundle_version, is_coinbase);
     bundle_type.num_actions(flags, num_spends, num_outputs)
@@ -2018,6 +2026,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
 
@@ -2038,6 +2047,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
 
@@ -2085,6 +2095,52 @@ mod tests {
         assert!(builder.orchard_builder.is_none());
     }
 
+    /// `BuildConfig::Standard`'s `orchard_pool_bundle_type` controls padding: the
+    /// padded default counts a single-output bundle as 2 actions, while
+    /// `DEFAULT_UNPADDED` counts exactly the requested single action.
+    #[test]
+    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
+    fn orchard_pool_bundle_type_controls_padding() {
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+
+        let config_with = |bundle_type| BuildConfig::Standard {
+            sapling_anchor: None,
+            orchard_anchor: Some(orchard::Anchor::empty_tree()),
+            #[cfg(zcash_unstable = "nu6.3")]
+            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+            orchard_pool_bundle_type: bundle_type,
+        };
+
+        // `orchard_v2` here: the NU6.3 `orchard_v3` version disables cross-address
+        // transfers, so a bare output cannot be added.
+        let count_for = |bundle_type| {
+            let config = config_with(bundle_type);
+            let mut builder = config
+                .orchard_builder(orchard::bundle::BundleVersion::orchard_v2())
+                .unwrap();
+            builder
+                .add_output(
+                    None,
+                    recipient,
+                    orchard::value::NoteValue::from_raw(10_000),
+                    [0u8; 512],
+                )
+                .unwrap();
+            super::orchard_action_count(
+                &builder,
+                false,
+                orchard::bundle::BundleVersion::orchard_v2(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(count_for(orchard::builder::BundleType::DEFAULT), 2);
+        assert_eq!(count_for(orchard::builder::BundleType::DEFAULT_UNPADDED), 1);
+    }
+
     #[test]
     #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
     fn orchard_action_count_includes_change_outputs() {
@@ -2117,66 +2173,6 @@ mod tests {
         );
     }
 
-    /// The default transactional bundle type is unpadded, so both a single-output
-    /// Orchard bundle and the single-output Orchard→Ironwood migration shape count
-    /// as exactly one action.
-    #[test]
-    #[cfg(all(feature = "circuits", zcash_unstable = "nu6.3"))]
-    fn default_transactional_bundles_are_unpadded() {
-        let recipient = orchard::keys::FullViewingKey::from(
-            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
-        )
-        .address_at(0u32, orchard::keys::Scope::External);
-
-        let config = BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: Some(orchard::Anchor::empty_tree()),
-            ironwood_anchor: Some(orchard::Anchor::empty_tree()),
-        };
-
-        // `orchard_v2` here: the NU6.3 `orchard_v3` version disables cross-address
-        // transfers, so a bare output cannot be added.
-        let mut orchard_builder = config
-            .orchard_builder(orchard::bundle::BundleVersion::orchard_v2())
-            .unwrap();
-        orchard_builder
-            .add_output(
-                None,
-                recipient,
-                orchard::value::NoteValue::from_raw(10_000),
-                [0u8; 512],
-            )
-            .unwrap();
-        assert_eq!(
-            super::orchard_action_count(
-                &orchard_builder,
-                false,
-                orchard::bundle::BundleVersion::orchard_v2(),
-            )
-            .unwrap(),
-            1
-        );
-
-        let mut ironwood_builder = config.ironwood_builder().unwrap();
-        ironwood_builder
-            .add_output(
-                None,
-                recipient,
-                orchard::value::NoteValue::from_raw(10_000),
-                [0u8; 512],
-            )
-            .unwrap();
-        assert_eq!(
-            super::orchard_action_count(
-                &ironwood_builder,
-                false,
-                orchard::bundle::BundleVersion::ironwood_v3(),
-            )
-            .unwrap(),
-            1
-        );
-    }
-
     // This test only works with the transparent_inputs feature because we have to
     // be able to create a tx with a valid balance, without using Sapling inputs.
     #[test]
@@ -2202,6 +2198,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
             target_height: sapling_activation_height,
             expiry_height: sapling_activation_height + DEFAULT_TX_EXPIRY_DELTA,
@@ -2285,6 +2282,7 @@ mod tests {
             orchard_anchor: None,
             #[cfg(zcash_unstable = "nu6.3")]
             ironwood_anchor: None,
+                    orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         };
         let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
 
@@ -2320,6 +2318,7 @@ mod tests {
             orchard_anchor: None,
             #[cfg(zcash_unstable = "nu6.3")]
             ironwood_anchor: None,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         };
         let mut builder =
             Builder::new(TEST_NETWORK, tx_height, build_config).with_expiry_height(0u32.into());
@@ -2443,6 +2442,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 ironwood_anchor: None,
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         builder
@@ -2486,6 +2486,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 ironwood_anchor: None,
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
 
@@ -2512,6 +2513,7 @@ mod tests {
             orchard_anchor: None,
             #[cfg(zcash_unstable = "nu6.3")]
             ironwood_anchor: None,
+            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
         };
         let builder =
             Builder::new(TEST_NETWORK, tx_height, build_config).with_expiry_height(0u32.into());
@@ -2541,6 +2543,7 @@ mod tests {
                 orchard_anchor: None,
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             assert_matches!(
@@ -2563,6 +2566,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -2588,6 +2592,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -2612,6 +2617,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder.set_zip233_amount(Zatoshis::const_from_u64(50000));
@@ -2640,6 +2646,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -2678,6 +2685,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -2725,6 +2733,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -2775,6 +2784,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             };
             let mut builder = Builder::new(TEST_NETWORK, tx_height, build_config);
             builder
@@ -2834,6 +2844,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 ironwood_anchor: None,
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
 
@@ -2895,6 +2906,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: None,
                 ironwood_anchor: None,
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         builder
@@ -2951,6 +2963,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: None,
                 ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         let fvk = orchard::keys::FullViewingKey::from(
@@ -2980,6 +2993,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: None,
                 ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         let recipient = orchard::keys::FullViewingKey::from(
@@ -3014,6 +3028,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: None,
                 ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         builder
@@ -3081,6 +3096,7 @@ mod tests {
                 orchard_anchor: Some(orchard::Anchor::empty_tree()),
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         let (fvk, note, merkle_path) = orchard_note_with_version(orchard::note::NoteVersion::V3);
@@ -3103,6 +3119,7 @@ mod tests {
                 sapling_anchor: None,
                 orchard_anchor: None,
                 ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         let (fvk, note, merkle_path) = orchard_note_with_version(orchard::note::NoteVersion::V2);

@@ -883,9 +883,11 @@ pub(crate) mod tests {
             Zatoshis::const_from_u64(10000)
         );
         assert_eq!(step.balance().proposed_change().len(), 1);
+        // The unpadded migration charges 2 logical actions (10000 zats), leaving a
+        // 90000-zat Ironwood note; this padded transfer then pays 10000 + a 10000 fee.
         assert_eq!(
             step.balance().proposed_change()[0].value(),
-            Zatoshis::const_from_u64(60000)
+            Zatoshis::const_from_u64(70000)
         );
 
         let create_proposed_result = st
@@ -927,7 +929,8 @@ pub(crate) mod tests {
                 received_rows.view_ironwood_count,
                 received_rows.value_sum
             ),
-            (2, 2, 2, 2, 2, 70000)
+            // 10000-zat self-payment + the 70000-zat change note.
+            (2, 2, 2, 2, 2, 80000)
         );
 
         let send_max_proposal = st
@@ -948,7 +951,7 @@ pub(crate) mod tests {
         assert!(step.balance().proposed_change().is_empty());
         assert_eq!(
             step.transaction_request().payments()[&0].amount(),
-            Some(Zatoshis::const_from_u64(60000))
+            Some(Zatoshis::const_from_u64(70000))
         );
         let send_max_result = st.create_proposed_transactions::<Infallible, _, Infallible, _>(
             account.usk(),

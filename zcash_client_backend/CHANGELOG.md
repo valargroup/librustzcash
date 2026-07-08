@@ -83,8 +83,19 @@ workspace.
   - `zcash_client_backend::data_api::WalletWrite::notify_output_verified_unspent`,
     which records that a transparent outpoint was confirmed unspent as of a given
     height.
+- `zcash_client_backend::fees::zip317::{SingleOutputChangeStrategy, MultiOutputChangeStrategy}`
+  gained `with_unpadded_orchard_pool_bundles`, which makes fee and change calculation
+  count Orchard and Ironwood bundles without the 2-action padding minimum. The default
+  behavior is unchanged (padded). Proposals created with this option must be executed
+  with a matching unpadded builder configuration.
 
 ### Changed
+- `zcash_client_backend::data_api::wallet::create_pczt_from_proposal` and
+  `create_pczt_from_proposal_with_tx_version` now take an `orchard_pool_bundle_type`
+  argument (behind the `pczt` feature flag) selecting the transactional bundle type
+  for the Orchard and Ironwood bundles; it must match the change strategy used to
+  create the proposal. Pass `orchard::builder::BundleType::DEFAULT` for the previous
+  (padded) behavior.
 - `zcash_client_backend::data_api::WalletCommitmentTrees::with_ironwood_tree_mut`,
   an optional accessor that wallet backends can override to provide Ironwood
   anchors and witnesses to the transaction builder.

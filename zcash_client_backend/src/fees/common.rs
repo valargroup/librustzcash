@@ -116,6 +116,11 @@ where
 
 #[cfg(feature = "orchard")]
 fn orchard_action_count_from_parts<E, NoteRefT>(
+    // The transactional bundle type the transaction builder will use for both the
+    // Orchard and Ironwood bundles; the action counts computed here must match it so
+    // the builder's exact-balance check succeeds (see
+    // `orchard_fees::transactional_action_count`).
+    orchard_pool_bundle_type: orchard::builder::BundleType,
     orchard_pool_restrictions: orchard::bundle::BundleVersion,
     orchard_inputs: usize,
     ironwood_inputs: usize,
@@ -123,6 +128,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     ironwood_outputs: usize,
 ) -> Result<usize, ChangeError<E, NoteRefT>> {
     let orchard_actions = orchard_fees::transactional_action_count(
+        orchard_pool_bundle_type,
         orchard_pool_restrictions,
         orchard_inputs,
         orchard_outputs,
@@ -132,6 +138,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
     #[cfg(zcash_unstable = "nu6.3")]
     {
         let ironwood_actions = orchard_fees::transactional_action_count(
+            orchard_pool_bundle_type,
             orchard::bundle::BundleVersion::ironwood_v3(),
             ironwood_inputs,
             ironwood_outputs,
@@ -153,6 +160,7 @@ fn orchard_action_count_from_parts<E, NoteRefT>(
 
 #[cfg(feature = "orchard")]
 fn orchard_action_count<NoteRefT: Clone, E>(
+    orchard_pool_bundle_type: orchard::builder::BundleType,
     orchard_pool_restrictions: orchard::bundle::BundleVersion,
     orchard: &impl orchard_fees::BundleView<NoteRefT>,
     orchard_output_count: usize,
@@ -168,6 +176,7 @@ fn orchard_action_count<NoteRefT: Clone, E>(
     let ironwood_inputs = 0usize;
 
     orchard_action_count_from_parts(
+        orchard_pool_bundle_type,
         orchard_pool_restrictions,
         orchard.inputs().len() - ironwood_inputs,
         ironwood_inputs,
@@ -290,6 +299,10 @@ pub(crate) struct SinglePoolBalanceConfig<'a, P, F> {
     grace_actions: usize,
     #[cfg(zcash_unstable = "nu6.3")]
     force_legacy_orchard_change: bool,
+    /// The transactional bundle type the transaction builder will use for the Orchard
+    /// and Ironwood bundles; see `orchard_action_count_from_parts`.
+    #[cfg(feature = "orchard")]
+    orchard_pool_bundle_type: orchard::builder::BundleType,
 }
 
 impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
@@ -304,6 +317,7 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
         marginal_fee: Zatoshis,
         grace_actions: usize,
         #[cfg(zcash_unstable = "nu6.3")] force_legacy_orchard_change: bool,
+        #[cfg(feature = "orchard")] orchard_pool_bundle_type: orchard::builder::BundleType,
     ) -> Self {
         Self {
             params,
@@ -316,6 +330,8 @@ impl<'a, P, F> SinglePoolBalanceConfig<'a, P, F> {
             grace_actions,
             #[cfg(zcash_unstable = "nu6.3")]
             force_legacy_orchard_change,
+            #[cfg(feature = "orchard")]
+            orchard_pool_bundle_type,
         }
     }
 }
@@ -407,6 +423,8 @@ where
             #[cfg(feature = "orchard")]
             orchard,
             #[cfg(feature = "orchard")]
+            cfg.orchard_pool_bundle_type,
+            #[cfg(feature = "orchard")]
             orchard_pool_restrictions,
             #[cfg(zcash_unstable = "nu6.3")]
             orchard_outputs_are_ironwood,
@@ -465,6 +483,7 @@ where
         let ironwood_output_count = 0;
 
         orchard_action_count::<NoteRefT, E>(
+            cfg.orchard_pool_bundle_type,
             orchard_pool_restrictions,
             orchard,
             orchard_output_count,
@@ -738,6 +757,9 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
     transparent_outputs: &[impl transparent::OutputView],
     sapling: &impl sapling_fees::BundleView<NoteRefT>,
     #[cfg(feature = "orchard")] orchard: &impl orchard_fees::BundleView<NoteRefT>,
+    // The Orchard-pool bundle type the builder will use; the action counts computed
+    // for the grace-input check must match it (see `single_pool_output_balance`).
+    #[cfg(feature = "orchard")] orchard_pool_bundle_type: orchard::builder::BundleType,
     #[cfg(feature = "orchard")] orchard_pool_restrictions: orchard::bundle::BundleVersion,
     #[cfg(zcash_unstable = "nu6.3")] orchard_outputs_are_ironwood: bool,
     marginal_fee: Zatoshis,
@@ -945,6 +967,7 @@ pub(crate) fn check_for_uneconomic_inputs<NoteRefT: Clone, E>(
 
             #[cfg(feature = "orchard")]
             let o_action_count = orchard_action_count_from_parts(
+                orchard_pool_bundle_type,
                 orchard_pool_restrictions,
                 o_req_orchard_inputs + usize::from(matches!(_o_extra, Some(false))),
                 o_req_ironwood_inputs + usize::from(matches!(_o_extra, Some(true))),

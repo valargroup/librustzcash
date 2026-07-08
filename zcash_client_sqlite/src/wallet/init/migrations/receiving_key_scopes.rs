@@ -364,6 +364,7 @@ mod tests {
                 orchard_anchor: None,
                 #[cfg(zcash_unstable = "nu6.3")]
                 ironwood_anchor: None,
+                orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT,
             },
         );
         let mut transparent_signing_set = TransparentSigningSet::new();

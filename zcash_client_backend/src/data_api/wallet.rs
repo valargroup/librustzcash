@@ -1326,6 +1326,10 @@ where
                     orchard_anchor: Some(orchard_anchor),
                     #[cfg(zcash_unstable = "nu6.3")]
                     ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                    // A migration's shape is already public via the per-pool value
+                    // balances, so build both bundles unpadded: exactly the requested
+                    // actions, minimizing size and ZIP 317 fee.
+                    orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT_UNPADDED,
                 },
             );
 
@@ -1657,6 +1661,10 @@ fn build_proposed_transaction<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>
         (TransparentAddress, OutPoint),
     >,
     #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+    // The transactional bundle type for the Orchard and Ironwood bundles; must match
+    // the change strategy used to create the proposal (see
+    // `crate::fees::zip317::SingleOutputChangeStrategy::with_unpadded_orchard_pool_bundles`).
+    orchard_pool_bundle_type: zcash_primitives::orchard::builder::BundleType,
 ) -> Result<
     BuildState<'static, ParamsT, DbT::AccountId>,
     CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>,
@@ -1907,6 +1915,7 @@ where
             orchard_anchor,
             #[cfg(zcash_unstable = "nu6.3")]
             ironwood_anchor,
+            orchard_pool_bundle_type,
         },
     );
 
@@ -2485,6 +2494,8 @@ where
         unused_transparent_outputs,
         #[cfg(feature = "unstable")]
         proposed_version,
+        // The plain transaction-creation path always uses the padded default.
+        zcash_primitives::orchard::builder::BundleType::DEFAULT,
     )?;
 
     // Build the transaction with the specified fee rule
@@ -2715,12 +2726,18 @@ where
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 #[cfg(feature = "pczt")]
+/// `orchard_pool_bundle_type` selects the transactional bundle type for the Orchard
+/// and Ironwood bundles, and must match the change strategy used to create
+/// `proposal` (see
+/// `zip317::SingleOutputChangeStrategy::with_unpadded_orchard_pool_bundles`); pass
+/// [`BundleType::DEFAULT`](zcash_primitives::orchard::builder::BundleType) otherwise.
 pub fn create_pczt_from_proposal<DbT, ParamsT, InputsErrT, FeeRuleT, ChangeErrT, N>(
     wallet_db: &mut DbT,
     params: &ParamsT,
     account_id: <DbT as WalletRead>::AccountId,
     ovk_policy: OvkPolicy,
     proposal: &Proposal<FeeRuleT, N>,
+    orchard_pool_bundle_type: zcash_primitives::orchard::builder::BundleType,
 ) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
 where
     DbT: WalletWrite + WalletCommitmentTrees,
@@ -2736,6 +2753,7 @@ where
         proposal,
         #[cfg(feature = "unstable")]
         None,
+        orchard_pool_bundle_type,
     )
 }
 
@@ -2747,6 +2765,9 @@ where
 /// The supplied proposal must have been created for the same requested
 /// transaction version. For standard transfers, pass the same `TxVersion` to
 /// [`propose_standard_transfer_to_address`] before calling this function.
+///
+/// `orchard_pool_bundle_type` has the same contract as on
+/// [`create_pczt_from_proposal`].
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 #[cfg(all(feature = "pczt", feature = "unstable"))]
@@ -2764,6 +2785,7 @@ pub fn create_pczt_from_proposal_with_tx_version<
     ovk_policy: OvkPolicy,
     proposal: &Proposal<FeeRuleT, N>,
     proposed_version: TxVersion,
+    orchard_pool_bundle_type: zcash_primitives::orchard::builder::BundleType,
 ) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
 where
     DbT: WalletWrite + WalletCommitmentTrees,
@@ -2778,6 +2800,7 @@ where
         ovk_policy,
         proposal,
         Some(proposed_version),
+        orchard_pool_bundle_type,
     )
 }
 
@@ -2812,6 +2835,7 @@ fn create_pczt_from_proposal_internal<DbT, ParamsT, InputsErrT, FeeRuleT, Change
     ovk_policy: OvkPolicy,
     proposal: &Proposal<FeeRuleT, N>,
     #[cfg(feature = "unstable")] proposed_version: Option<TxVersion>,
+    orchard_pool_bundle_type: zcash_primitives::orchard::builder::BundleType,
 ) -> Result<pczt::Pczt, CreateErrT<DbT, InputsErrT, FeeRuleT, ChangeErrT, N>>
 where
     DbT: WalletWrite + WalletCommitmentTrees,
@@ -2852,6 +2876,7 @@ where
         unused_transparent_outputs,
         #[cfg(feature = "unstable")]
         proposed_version,
+        orchard_pool_bundle_type,
     )?;
 
     // Build the transaction with the specified fee rule
@@ -3703,14 +3728,14 @@ mod tests {
     #[cfg(all(feature = "unstable", zcash_unstable = "nu6.3"))]
     #[test]
     fn requested_pczt_version_rejects_mismatched_created_pczt() {
-        let pczt = pczt::roles::creator::Creator::new_v6(
+        let pczt = pczt::roles::creator::Creator::new(
             BranchId::Nu6_3.into(),
             10_000_000,
             133,
             [0; 32],
             [0; 32],
-            [1; 32],
         )
+        .expect("NU6.3 branch id is supported")
         .build();
 
         match super::ensure_created_pczt_matches_requested_version(&pczt, TxVersion::V5) {

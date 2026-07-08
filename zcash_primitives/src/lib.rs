@@ -28,3 +28,8 @@ pub(crate) mod encoding;
 pub mod extensions;
 pub mod merkle_tree;
 pub mod transaction;
+
+/// Re-export of the `orchard` crate, whose types appear in this crate's public API
+/// (such as the bundle type carried by `BuildConfig::Standard`). This lets downstream
+/// crates that treat their own `orchard` dependency as optional still name those types.
+pub use orchard;

@@ -69,6 +69,8 @@ pub struct SingleOutputChangeStrategy<R, I> {
     dust_output_policy: DustOutputPolicy,
     #[cfg(zcash_unstable = "nu6.3")]
     force_legacy_orchard_change: bool,
+    #[cfg(feature = "orchard")]
+    unpadded_orchard_pool_bundles: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -91,6 +93,8 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
             dust_output_policy,
             #[cfg(zcash_unstable = "nu6.3")]
             force_legacy_orchard_change: false,
+            #[cfg(feature = "orchard")]
+            unpadded_orchard_pool_bundles: false,
             meta_source: PhantomData,
         }
     }
@@ -104,6 +108,32 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
     pub fn with_legacy_orchard_change(mut self) -> Self {
         self.force_legacy_orchard_change = true;
         self
+    }
+
+    /// Requests unpadded Orchard-pool (Orchard and Ironwood) bundles: fee and change
+    /// calculation will count exactly the requested actions instead of padding each
+    /// bundle to the 2-action minimum.
+    ///
+    /// The transaction executing the proposal must be built with the matching bundle
+    /// type ([`BundleType::DEFAULT_UNPADDED`](orchard::builder::BundleType)), or the
+    /// builder's balance check will fail. Intended for transactions whose shape is
+    /// already public (e.g. pool migrations); see the orchard `pad_to_minimum`
+    /// documentation for the privacy trade-off.
+    #[cfg(feature = "orchard")]
+    pub fn with_unpadded_orchard_pool_bundles(mut self) -> Self {
+        self.unpadded_orchard_pool_bundles = true;
+        self
+    }
+
+    /// The Orchard-pool bundle type matching this strategy's padding request; see
+    /// [`Self::with_unpadded_orchard_pool_bundles`].
+    #[cfg(feature = "orchard")]
+    fn orchard_pool_bundle_type(&self) -> ::orchard::builder::BundleType {
+        if self.unpadded_orchard_pool_bundles {
+            ::orchard::builder::BundleType::DEFAULT_UNPADDED
+        } else {
+            ::orchard::builder::BundleType::DEFAULT
+        }
     }
 }
 
@@ -155,6 +185,8 @@ where
             self.fee_rule.grace_actions(),
             #[cfg(zcash_unstable = "nu6.3")]
             self.force_legacy_orchard_change,
+            #[cfg(feature = "orchard")]
+            self.orchard_pool_bundle_type(),
         );
 
         single_pool_output_balance(
@@ -182,6 +214,8 @@ pub struct MultiOutputChangeStrategy<R, I> {
     split_policy: SplitPolicy,
     #[cfg(zcash_unstable = "nu6.3")]
     force_legacy_orchard_change: bool,
+    #[cfg(feature = "orchard")]
+    unpadded_orchard_pool_bundles: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -212,6 +246,8 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
             split_policy,
             #[cfg(zcash_unstable = "nu6.3")]
             force_legacy_orchard_change: false,
+            #[cfg(feature = "orchard")]
+            unpadded_orchard_pool_bundles: false,
             meta_source: PhantomData,
         }
     }
@@ -225,6 +261,32 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
     pub fn with_legacy_orchard_change(mut self) -> Self {
         self.force_legacy_orchard_change = true;
         self
+    }
+
+    /// Requests unpadded Orchard-pool (Orchard and Ironwood) bundles: fee and change
+    /// calculation will count exactly the requested actions instead of padding each
+    /// bundle to the 2-action minimum.
+    ///
+    /// The transaction executing the proposal must be built with the matching bundle
+    /// type ([`BundleType::DEFAULT_UNPADDED`](orchard::builder::BundleType)), or the
+    /// builder's balance check will fail. Intended for transactions whose shape is
+    /// already public (e.g. pool migrations); see the orchard `pad_to_minimum`
+    /// documentation for the privacy trade-off.
+    #[cfg(feature = "orchard")]
+    pub fn with_unpadded_orchard_pool_bundles(mut self) -> Self {
+        self.unpadded_orchard_pool_bundles = true;
+        self
+    }
+
+    /// The Orchard-pool bundle type matching this strategy's padding request; see
+    /// [`Self::with_unpadded_orchard_pool_bundles`].
+    #[cfg(feature = "orchard")]
+    fn orchard_pool_bundle_type(&self) -> ::orchard::builder::BundleType {
+        if self.unpadded_orchard_pool_bundles {
+            ::orchard::builder::BundleType::DEFAULT_UNPADDED
+        } else {
+            ::orchard::builder::BundleType::DEFAULT
+        }
     }
 }
 
@@ -281,6 +343,8 @@ where
             self.fee_rule.grace_actions(),
             #[cfg(zcash_unstable = "nu6.3")]
             self.force_legacy_orchard_change,
+            #[cfg(feature = "orchard")]
+            self.orchard_pool_bundle_type(),
         );
 
         single_pool_output_balance(
@@ -1054,6 +1118,64 @@ mod tests {
             Ok(balance) if
                 balance.proposed_change() == [ChangeValue::orchard(Zatoshis::const_from_u64(10000), None)] &&
                 balance.fee_required() == Zatoshis::const_from_u64(20000)
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+    fn unpadded_orchard_pool_bundles_lower_the_fee() {
+        // A single-spend Orchard bundle with a cross-pool Sapling payment: the only
+        // Orchard-pool actions are the spend and its change output, which share one
+        // action, so the padded default counts 2 actions while the unpadded opt-in
+        // counts 1, lowering the fee by exactly one 5000-zat marginal action.
+        let strategy = || {
+            SingleOutputChangeStrategy::<_, MockWalletDb>::new(
+                Zip317FeeRule::standard(),
+                None,
+                ShieldedProtocol::Orchard,
+                DustOutputPolicy::default(),
+            )
+        };
+        let balance_with = |change_strategy: SingleOutputChangeStrategy<_, MockWalletDb>| {
+            change_strategy
+                .compute_balance::<_, u32>(
+                    &Network::TestNetwork,
+                    Network::TestNetwork
+                        .activation_height(NetworkUpgrade::Nu5)
+                        .unwrap()
+                        .into(),
+                    &[] as &[TestTransparentInput],
+                    &[] as &[TxOut],
+                    &(
+                        sapling::builder::BundleType::DEFAULT,
+                        &[] as &[TestSaplingInput],
+                        &[SaplingPayment::new(Zatoshis::const_from_u64(30000))][..],
+                    ),
+                    &(
+                        &[TestOrchardInput {
+                            note_id: 0,
+                            value: Zatoshis::const_from_u64(100000),
+                            is_ironwood: false,
+                        }][..],
+                        &[] as &[OrchardPayment],
+                    ),
+                    None,
+                    &(),
+                )
+                .unwrap()
+        };
+
+        let padded = balance_with(strategy());
+        let unpadded = balance_with(strategy().with_unpadded_orchard_pool_bundles());
+
+        // Padded: sapling (payment padded to 2 outputs) + orchard (1 spend + 1 change,
+        // padded to 2 actions) = 4 logical actions = 20000 zats. Unpadded Orchard-pool:
+        // max(1 spend, 1 change output) = 1 action, so 3 logical actions = 15000 zats.
+        assert_eq!(padded.fee_required(), Zatoshis::const_from_u64(20000));
+        assert_eq!(unpadded.fee_required(), Zatoshis::const_from_u64(15000));
+        assert_eq!(
+            padded.fee_required(),
+            (unpadded.fee_required() + Zatoshis::const_from_u64(5000)).unwrap()
         );
     }
 
