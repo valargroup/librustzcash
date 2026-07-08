@@ -93,6 +93,8 @@ pub struct CompactTx {
     /// A sequence of transparent outputs being created by the transaction.
     #[prost(message, repeated, tag = "8")]
     pub vout: ::prost::alloc::vec::Vec<TxOut>,
+    #[prost(message, repeated, tag = "9")]
+    pub ironwood_actions: ::prost::alloc::vec::Vec<CompactOrchardAction>,
 }
 /// A compact representation of a transparent transaction input.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

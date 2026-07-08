@@ -26,6 +26,21 @@ and this library adheres to Rust's notion of
   number `1` and name `protoVersion` are now reserved. See
   [#25](https://github.com/zcash/lightwallet-protocol/issues/25).
 
+### Added
+- `compact_formats.ChainMetadata` has added field
+  `ironwoodCommitmentTreeSize`.
+- `compact_formats.CompactTx` has added field `ironwoodActions`.
+- `service.PoolType` has added variant `IRONWOOD`.
+- `service.TreeState` has added field `ironwoodTree`.
+- `service.ShieldedProtocol` has added variant `ironwood`.
+
+### Changed
+- Empty `poolTypes` requests for `service.BlockRange` and
+  `service.GetMempoolTxRequest` now default to Sapling, Orchard, and
+  Ironwood shielded data.
+- Clarify that `GetBlockNullifiers` and `GetBlockRangeNullifiers` include
+  Ironwood action nullifiers but omit full Ironwood action data.
+
 ## [v0.4.1] - 2026-02-20
 
 ### Added

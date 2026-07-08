@@ -83,6 +83,8 @@ message CompactTx {
 
     // A sequence of transparent outputs being created by the transaction.
     repeated TxOut vout = 8;
+
+    repeated CompactOrchardAction ironwoodActions = 9;
 }
 
 // A compact representation of a transparent transaction input.

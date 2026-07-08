@@ -683,6 +683,38 @@ pub(crate) fn pczt_single_step<P0: ShieldedPoolTester, P1: ShieldedPoolTester>(
     )
 }
 
+#[cfg(all(feature = "pczt-tests", feature = "orchard", zcash_unstable = "nu6.3"))]
+pub(crate) fn pczt_single_step_orchard_to_ironwood() {
+    zcash_client_backend::data_api::testing::pool::pczt_single_step_orchard_to_ironwood::<_>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(all(
+    feature = "pczt-tests",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu6.3"
+))]
+pub(crate) fn pczt_legacy_v5_orchard_partial_unshield_after_nu6_3() {
+    zcash_client_backend::data_api::testing::pool::pczt_legacy_v5_orchard_partial_unshield_after_nu6_3::<
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
+}
+
+#[cfg(all(
+    feature = "pczt-tests",
+    feature = "orchard",
+    feature = "unstable",
+    zcash_unstable = "nu6.3"
+))]
+pub(crate) fn pczt_legacy_v5_orchard_full_unshield_after_nu6_3() {
+    zcash_client_backend::data_api::testing::pool::pczt_legacy_v5_orchard_full_unshield_after_nu6_3::<
+        _,
+    >(TestDbFactory::default(), BlockCache::new())
+}
+
 #[cfg(feature = "transparent-inputs")]
 pub(crate) fn wallet_recovery_computes_fees<T: ShieldedPoolTester>() {
     use rusqlite::named_params;
