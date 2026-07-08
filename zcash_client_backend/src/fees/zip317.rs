@@ -115,7 +115,7 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
     /// bundle to the 2-action minimum.
     ///
     /// The transaction executing the proposal must be built with the matching bundle
-    /// type ([`BundleType::DEFAULT_UNPADDED`](orchard::builder::BundleType)), or the
+    /// type ([`BundleType::UNPADDED`](orchard::builder::BundleType)), or the
     /// builder's balance check will fail. Intended for transactions whose shape is
     /// already public (e.g. pool migrations); see the orchard `pad_to_minimum`
     /// documentation for the privacy trade-off.
@@ -130,7 +130,7 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
     #[cfg(feature = "orchard")]
     fn orchard_pool_bundle_type(&self) -> ::orchard::builder::BundleType {
         if self.unpadded_orchard_pool_bundles {
-            ::orchard::builder::BundleType::DEFAULT_UNPADDED
+            ::orchard::builder::BundleType::UNPADDED
         } else {
             ::orchard::builder::BundleType::DEFAULT
         }
@@ -268,7 +268,7 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
     /// bundle to the 2-action minimum.
     ///
     /// The transaction executing the proposal must be built with the matching bundle
-    /// type ([`BundleType::DEFAULT_UNPADDED`](orchard::builder::BundleType)), or the
+    /// type ([`BundleType::UNPADDED`](orchard::builder::BundleType)), or the
     /// builder's balance check will fail. Intended for transactions whose shape is
     /// already public (e.g. pool migrations); see the orchard `pad_to_minimum`
     /// documentation for the privacy trade-off.
@@ -283,7 +283,7 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
     #[cfg(feature = "orchard")]
     fn orchard_pool_bundle_type(&self) -> ::orchard::builder::BundleType {
         if self.unpadded_orchard_pool_bundles {
-            ::orchard::builder::BundleType::DEFAULT_UNPADDED
+            ::orchard::builder::BundleType::UNPADDED
         } else {
             ::orchard::builder::BundleType::DEFAULT
         }

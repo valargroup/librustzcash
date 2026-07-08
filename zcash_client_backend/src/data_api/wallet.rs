@@ -1329,7 +1329,7 @@ where
                     // A migration's shape is already public via the per-pool value
                     // balances, so build both bundles unpadded: exactly the requested
                     // actions, minimizing size and ZIP 317 fee.
-                    orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT_UNPADDED,
+                    orchard_pool_bundle_type: orchard::builder::BundleType::UNPADDED,
                 },
             );
 

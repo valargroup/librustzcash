@@ -1096,7 +1096,7 @@ fn compact_migration_child_pczt_with_zip32_at_scope(
             orchard_anchor: Some(anchor),
             ironwood_anchor: Some(orchard::Anchor::empty_tree()),
                     // Migration-shaped fixture: exactly the requested actions, no padding.
-            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT_UNPADDED,
+            orchard_pool_bundle_type: orchard::builder::BundleType::UNPADDED,
         },
     );
     builder
@@ -1559,7 +1559,7 @@ fn orchard_pczt_with_migration_memos()
             orchard_anchor: Some(anchor),
             ironwood_anchor: None,
                     // Migration-shaped fixture: exactly the requested actions, no padding.
-            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT_UNPADDED,
+            orchard_pool_bundle_type: orchard::builder::BundleType::UNPADDED,
         },
     );
     builder
@@ -1665,7 +1665,7 @@ fn ironwood_pczt_with_migration_memos()
             orchard_anchor: None,
             ironwood_anchor: Some(anchor),
                     // Migration-shaped fixture: exactly the requested actions, no padding.
-            orchard_pool_bundle_type: orchard::builder::BundleType::DEFAULT_UNPADDED,
+            orchard_pool_bundle_type: orchard::builder::BundleType::UNPADDED,
         },
     );
     builder
