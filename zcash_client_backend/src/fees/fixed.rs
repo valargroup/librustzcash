@@ -113,9 +113,12 @@ impl<I: InputSource> ChangeStrategy for SingleOutputChangeStrategy<I> {
             self.fallback_change_pool,
             Zatoshis::ZERO,
             0,
-            #[cfg(zcash_unstable = "nu6.3")]
-            self.force_legacy_orchard_change,
         );
+
+        // A requested legacy V5 build overrides the caller's Ironwood routing.
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let orchard_change_to_ironwood =
+            orchard_change_to_ironwood && !self.force_legacy_orchard_change;
 
         single_pool_output_balance(
             cfg,

@@ -3597,6 +3597,19 @@ pub trait WalletCommitmentTrees {
         Ok(None)
     }
 
+    /// Adds a sequence of Ironwood note commitment tree subtree roots to the data store.
+    ///
+    /// Each such value should be the Merkle root of a subtree of the Ironwood note commitment
+    /// tree containing 2^[`ORCHARD_SHARD_HEIGHT`] note commitments.
+    ///
+    /// Has no effect if the backend does not maintain an Ironwood note commitment tree.
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>>;
+
     /// Releases all retained ("anchor") checkpoints with height strictly less than `max_height`
     /// from the wallet's note commitment trees, allowing them to be pruned normally.
     ///

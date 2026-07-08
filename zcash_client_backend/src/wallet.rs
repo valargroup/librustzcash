@@ -834,10 +834,6 @@ impl<NoteRef> orchard_fees::InputView<NoteRef> for ReceivedNote<NoteRef, orchard
             .expect("Orchard note values are indirectly checked by consensus.")
     }
 
-    #[cfg(zcash_unstable = "nu6.3")]
-    fn is_ironwood(&self) -> bool {
-        self.note.version() == orchard::note::NoteVersion::V3
-    }
 }
 
 /// Describes a policy for which outgoing viewing key should be able to decrypt

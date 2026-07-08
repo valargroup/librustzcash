@@ -28,8 +28,6 @@ use crate::{
     },
 };
 
-#[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-use crate::IRONWOOD_TABLES_PREFIX;
 #[cfg(feature = "orchard")]
 use {
     crate::IRONWOOD_TABLES_PREFIX, crate::ORCHARD_TABLES_PREFIX,
@@ -92,7 +90,7 @@ pub(crate) fn table_constants<E: ErrUnsupportedPool>(
     }
 }
 
-fn spendable_note_version_clause(protocol: ShieldedProtocol) -> &'static str {
+fn spendable_note_version_clause(protocol: ShieldedPool) -> &'static str {
     #[cfg(zcash_unstable = "nu6.3")]
     {
         let _ = protocol;
@@ -101,8 +99,10 @@ fn spendable_note_version_clause(protocol: ShieldedProtocol) -> &'static str {
 
     #[cfg(not(zcash_unstable = "nu6.3"))]
     match protocol {
-        ShieldedProtocol::Sapling => "",
-        ShieldedProtocol::Orchard => "AND rn.note_version = 2",
+        ShieldedPool::Sapling => "",
+        ShieldedPool::Orchard => "AND rn.note_version = 2",
+        // Ironwood notes are not spendable without NU6.3 support.
+        ShieldedPool::Ironwood => "",
     }
 }
 
@@ -211,9 +211,9 @@ fn tip_scanned_sql(table_prefix: &'static str) -> String {
     tree_tip_scanned_sql(table_prefix)
 }
 
-fn witness_repair_note_version_clause(protocol: ShieldedProtocol) -> &'static str {
+fn witness_repair_note_version_clause(protocol: ShieldedPool) -> &'static str {
     #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
-    if protocol == ShieldedProtocol::Orchard {
+    if protocol == ShieldedPool::Orchard {
         return "AND rn.note_version = 2";
     }
 
@@ -838,7 +838,7 @@ pub(crate) fn select_unspent_note_meta(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn select_unspent_note_meta_for_tree(
     conn: &rusqlite::Connection,
-    protocol: ShieldedProtocol,
+    protocol: ShieldedPool,
     table_prefix: &'static str,
     tree_prefix: &'static str,
     output_index_col: &'static str,

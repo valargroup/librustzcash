@@ -336,6 +336,8 @@ impl CachedBlock {
                 sapling_final_tree,
                 #[cfg(feature = "orchard")]
                 orchard_final_tree,
+                #[cfg(feature = "orchard")]
+                ::incrementalmerkletree::frontier::Frontier::empty(),
             ),
             sapling_end_size,
             orchard_end_size,
@@ -690,6 +692,8 @@ where
                     final_sapling_tree,
                     #[cfg(feature = "orchard")]
                     final_orchard_tree,
+                    #[cfg(feature = "orchard")]
+                    ::incrementalmerkletree::frontier::Frontier::empty(),
                 ),
                 initial_sapling_tree_size,
                 initial_orchard_tree_size,
@@ -3230,6 +3234,29 @@ impl WalletCommitmentTrees for MockWalletDb {
         roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>> {
         self.with_orchard_tree_mut(|t| {
+            for (root, i) in roots.iter().zip(0u64..) {
+                let root_addr = incrementalmerkletree::Address::from_parts(
+                    ORCHARD_SHARD_HEIGHT.into(),
+                    start_index + i,
+                );
+                t.insert(root_addr, *root.root_hash())?;
+            }
+            Ok::<_, ShardTreeError<Self::Error>>(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Adds a sequence of note commitment tree subtree roots to the data store.
+    ///
+    /// Has no effect if the backend does not maintain an Ironwood note commitment tree.
+    #[cfg(feature = "orchard")]
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<::orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_ironwood_tree_mut(|t| {
             for (root, i) in roots.iter().zip(0u64..) {
                 let root_addr = incrementalmerkletree::Address::from_parts(
                     ORCHARD_SHARD_HEIGHT.into(),
