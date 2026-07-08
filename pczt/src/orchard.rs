@@ -63,7 +63,7 @@ pub struct Bundle {
     ///
     /// Set by the Creator.
     #[getset(get = "pub")]
-    pub(crate) anchor: [u8; 32],
+    pub(crate) anchor: Option<[u8; 32]>,
 
     /// The note plaintext version for notes in this bundle.
     pub(crate) note_version: NoteVersion,
@@ -93,6 +93,9 @@ pub(crate) const IRONWOOD_SPENDS_OUTPUTS_AND_CROSS_ADDRESS_ENABLED: u8 = 0b0000_
 /// The size in bytes of the memo portion of an Orchard note plaintext.
 pub(crate) const MEMO_SIZE: usize = 512;
 
+#[cfg(feature = "orchard")]
+const DEFAULT_ANCHOR: [u8; 32] = [0; 32];
+
 /// The canonical empty Orchard-pool bundle: the form the Orchard slot of a PCZT takes
 /// when it carries no Orchard-protocol data. The Creator, the v1 decoder, and the v2
 /// decoder all produce exactly this value for an absent bundle, so that copies of a
@@ -101,7 +104,7 @@ pub(crate) const EMPTY_ORCHARD: Bundle = Bundle {
     actions: Vec::new(),
     flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
     value_sum: (0, false),
-    anchor: [0; 32],
+    anchor: None,
     note_version: NoteVersion::V2,
     zkproof: None,
     bsk: None,
@@ -112,7 +115,7 @@ pub(crate) const EMPTY_IRONWOOD: Bundle = Bundle {
     actions: Vec::new(),
     flags: IRONWOOD_SPENDS_OUTPUTS_AND_CROSS_ADDRESS_ENABLED,
     value_sum: (0, false),
-    anchor: [0; 32],
+    anchor: None,
     note_version: NoteVersion::V3,
     zkproof: None,
     bsk: None,
@@ -350,11 +353,12 @@ pub struct Action {
     //
     // Action effecting data.
     //
-    // These are required fields that are part of the final transaction, and are filled in
-    // by the Constructor when adding an output.
+    // These fields describe the action as a whole. `cv_net` is part of the
+    // final transaction, but may be redacted in v2 and recomputed from the note
+    // values and `rcv`.
     //
     #[getset(get = "pub")]
-    pub(crate) cv_net: [u8; 32],
+    pub(crate) cv_net: Option<[u8; 32]>,
     #[getset(get = "pub")]
     pub(crate) spend: Spend,
     #[getset(get = "pub")]
@@ -620,7 +624,7 @@ pub mod v1 {
                     .collect::<Result<Vec<_>, _>>()?,
                 flags: bundle.flags,
                 value_sum: bundle.value_sum,
-                anchor: bundle.anchor,
+                anchor: bundle.anchor.ok_or(crate::EncodingError::RequiresV2)?,
                 zkproof: bundle.zkproof,
                 bsk: bundle.bsk,
             })
@@ -637,7 +641,7 @@ pub mod v1 {
                     .collect(),
                 flags: bundle.flags,
                 value_sum: bundle.value_sum,
-                anchor: bundle.anchor,
+                anchor: Some(bundle.anchor),
                 note_version: NoteVersion::V2,
                 zkproof: bundle.zkproof,
                 bsk: bundle.bsk,
@@ -650,7 +654,7 @@ pub mod v1 {
 
         fn try_from(action: super::Action) -> Result<Self, Self::Error> {
             Ok(Self {
-                cv_net: action.cv_net,
+                cv_net: action.cv_net.ok_or(crate::EncodingError::RequiresV2)?,
                 spend: Spend::from(action.spend),
                 output: Output::try_from(action.output)?,
                 rcv: action.rcv,
@@ -661,7 +665,7 @@ pub mod v1 {
     impl From<Action> for super::Action {
         fn from(action: Action) -> Self {
             Self {
-                cv_net: action.cv_net,
+                cv_net: Some(action.cv_net),
                 spend: super::Spend::from(action.spend),
                 output: super::Output::from(action.output),
                 rcv: action.rcv,
@@ -788,8 +792,6 @@ pub(crate) mod v2 {
         }
     }
 
-    const ZERO_BYTES_32: [u8; 32] = [0; 32];
-
     /// PCZT fields that are specific to producing the transaction's Orchard bundle.
     #[derive(Clone, Debug, Serialize, Deserialize, Getters)]
     pub struct Bundle {
@@ -841,7 +843,7 @@ pub(crate) mod v2 {
                     .collect::<Vec<_>>(),
                 flags: bundle.flags,
                 value_sum: bundle.value_sum,
-                anchor: (bundle.anchor != ZERO_BYTES_32).then_some(bundle.anchor),
+                anchor: bundle.anchor,
                 note_version: bundle.note_version.into(),
                 zkproof: bundle.zkproof,
                 bsk: bundle.bsk,
@@ -859,7 +861,7 @@ pub(crate) mod v2 {
                     .collect(),
                 flags: bundle.flags,
                 value_sum: bundle.value_sum,
-                anchor: bundle.anchor.unwrap_or(ZERO_BYTES_32),
+                anchor: bundle.anchor,
                 note_version: bundle.note_version.into(),
                 zkproof: bundle.zkproof,
                 bsk: bundle.bsk,
@@ -870,7 +872,7 @@ pub(crate) mod v2 {
     impl From<super::Action> for Action {
         fn from(action: super::Action) -> Self {
             Self {
-                cv_net: (action.cv_net != ZERO_BYTES_32).then_some(action.cv_net),
+                cv_net: action.cv_net,
                 spend: v1::Spend::from(action.spend),
                 output: Output::from(action.output),
                 rcv: action.rcv,
@@ -881,7 +883,7 @@ pub(crate) mod v2 {
     impl From<Action> for super::Action {
         fn from(action: Action) -> Self {
             Self {
-                cv_net: action.cv_net.unwrap_or(ZERO_BYTES_32),
+                cv_net: action.cv_net,
                 spend: super::Spend::from(action.spend),
                 output: super::Output::from(action.output),
                 rcv: action.rcv,
@@ -950,7 +952,7 @@ pub(crate) mod v2 {
             MemoPlaintext, NoteVersion, ORCHARD_SPENDS_AND_OUTPUTS_ENABLED, Output, Spend,
         };
 
-        fn logical_action(cv_net: [u8; 32]) -> LogicalAction {
+        fn logical_action(cv_net: Option<[u8; 32]>) -> LogicalAction {
             LogicalAction {
                 cv_net,
                 spend: Spend {
@@ -985,7 +987,7 @@ pub(crate) mod v2 {
             }
         }
 
-        fn logical_bundle(anchor: [u8; 32], cv_net: [u8; 32]) -> LogicalBundle {
+        fn logical_bundle(anchor: Option<[u8; 32]>, cv_net: Option<[u8; 32]>) -> LogicalBundle {
             LogicalBundle {
                 actions: vec![logical_action(cv_net)],
                 flags: ORCHARD_SPENDS_AND_OUTPUTS_ENABLED,
@@ -998,27 +1000,17 @@ pub(crate) mod v2 {
         }
 
         #[test]
-        fn zero_anchor_and_cv_net_encode_as_none() {
-            let bundle = logical_bundle([0; 32], [0; 32]);
+        fn anchor_and_cv_net_round_trip_optional_encoding() {
+            for (anchor, cv_net) in [(None, None), (Some([5; 32]), Some([6; 32]))] {
+                let bundle = logical_bundle(anchor, cv_net);
 
-            let encoded = super::Bundle::try_from(bundle.clone()).unwrap();
-            assert!(encoded.anchor.is_none());
-            assert!(encoded.actions[0].cv_net.is_none());
+                let encoded = super::Bundle::try_from(bundle.clone()).unwrap();
+                assert_eq!(encoded.anchor, anchor);
+                assert_eq!(encoded.actions[0].cv_net, cv_net);
 
-            let decoded = LogicalBundle::from(encoded);
-            assert_eq!(decoded, bundle);
-        }
-
-        #[test]
-        fn nonzero_anchor_and_cv_net_encode_as_some() {
-            let bundle = logical_bundle([5; 32], [6; 32]);
-
-            let encoded = super::Bundle::try_from(bundle.clone()).unwrap();
-            assert_eq!(encoded.anchor, Some([5; 32]));
-            assert_eq!(encoded.actions[0].cv_net, Some([6; 32]));
-
-            let decoded = LogicalBundle::from(encoded);
-            assert_eq!(decoded, bundle);
+                let decoded = LogicalBundle::from(encoded);
+                assert_eq!(decoded, bundle);
+            }
         }
 
         #[test]
@@ -1068,7 +1060,7 @@ pub(crate) mod v2 {
             let encryptor = OrchardNoteEncryption::new(None, note, memo);
 
             LogicalAction {
-                cv_net: [0; 32],
+                cv_net: Some([0; 32]),
                 spend: Spend {
                     nullifier,
                     rk: [2; 32],
@@ -1176,12 +1168,25 @@ pub(crate) mod v2 {
 
         #[test]
         fn v1_rejects_memo_plaintext_ciphertext_data() {
-            let mut bundle = logical_bundle([5; 32], [6; 32]);
+            let mut bundle = logical_bundle(Some([5; 32]), Some([6; 32]));
             bundle.actions[0].output.enc_ciphertext =
                 EncCiphertext::MemoPlaintext(MemoPlaintext::from_memo([0; MEMO_SIZE]));
 
             assert!(matches!(
                 crate::orchard::v1::Bundle::try_from(bundle),
+                Err(crate::EncodingError::RequiresV2)
+            ));
+        }
+
+        #[test]
+        fn v1_rejects_missing_anchor_and_cv_net() {
+            assert!(matches!(
+                crate::orchard::v1::Bundle::try_from(logical_bundle(None, Some([6; 32]))),
+                Err(crate::EncodingError::RequiresV2)
+            ));
+
+            assert!(matches!(
+                crate::orchard::v1::Bundle::try_from(logical_bundle(Some([5; 32]), None)),
                 Err(crate::EncodingError::RequiresV2)
             ));
         }
@@ -1246,7 +1251,7 @@ impl Bundle {
             },
         }
 
-        if self.anchor != anchor {
+        if !merge_optional(&mut self.anchor, anchor) {
             return None;
         }
 
@@ -1293,8 +1298,7 @@ impl Bundle {
                 rcv,
             } = rhs;
 
-            if lhs.cv_net != cv_net
-                || lhs.spend.nullifier != nullifier
+            if lhs.spend.nullifier != nullifier
                 || lhs.spend.rk != rk
                 || lhs.output.cmx != cmx
                 || lhs.output.ephemeral_key != ephemeral_key
@@ -1304,7 +1308,8 @@ impl Bundle {
                 return None;
             }
 
-            if !(merge_optional(&mut lhs.spend.spend_auth_sig, spend_auth_sig)
+            if !(merge_optional(&mut lhs.cv_net, cv_net)
+                && merge_optional(&mut lhs.spend.spend_auth_sig, spend_auth_sig)
                 && merge_optional(&mut lhs.spend.recipient, recipient)
                 && merge_optional(&mut lhs.spend.value, value)
                 && merge_optional(&mut lhs.spend.rho, rho)
@@ -1438,26 +1443,67 @@ impl Output {
 }
 
 #[cfg(feature = "orchard")]
+impl Action {
+    /// Recomputes `cv_net`, if this action carries it as an omitted field.
+    fn resolve_cv_net(&mut self) -> Result<(), ::orchard::pczt::ParseError> {
+        use ::orchard::{
+            pczt::ParseError,
+            value::{NoteValue, ValueCommitTrapdoor, ValueCommitment},
+        };
+
+        if self.cv_net.is_some() {
+            return Ok(());
+        }
+
+        let spend_value: NoteValue =
+            NoteValue::from_raw(self.spend.value.ok_or(ParseError::InvalidValueCommitment)?);
+        let output_value = NoteValue::from_raw(
+            self.output
+                .value
+                .ok_or(ParseError::InvalidValueCommitment)?,
+        );
+        let rcv =
+            ValueCommitTrapdoor::from_bytes(self.rcv.ok_or(ParseError::InvalidValueCommitment)?)
+                .into_option()
+                .ok_or(ParseError::InvalidValueCommitment)?;
+
+        self.cv_net = Some(ValueCommitment::derive(spend_value - output_value, rcv).to_bytes());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "orchard")]
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum AnchorParseMode {
+    Strict,
+    AllowMissing,
+}
+
+#[cfg(feature = "orchard")]
+fn anchor_parse_mode(tx_version: u32, has_actions: bool) -> AnchorParseMode {
+    if tx_version == zcash_protocol::constants::V6_TX_VERSION || !has_actions {
+        AnchorParseMode::AllowMissing
+    } else {
+        AnchorParseMode::Strict
+    }
+}
+
+#[cfg(feature = "orchard")]
 impl Bundle {
     /// Resolves fields that are optionally redacted in the PCZT but implied by
     /// other known fields.
     ///
-    /// This currently recomputes [`Output::enc_ciphertext`] when it is
-    /// represented by memo plaintext.
+    /// This currently recomputes:
+    /// - [`Action::cv_net`] if it is redacted.
+    /// - [`Output::enc_ciphertext`] if it is represented by memo plaintext.
     ///
     /// For improved efficiency, callers that will pass the same bundle through
     /// multiple roles should call this once up front, not in each role. Parsing
     /// also resolves fields defensively.
     pub fn resolve_fields(&mut self) -> Result<(), ::orchard::pczt::ParseError> {
-        self.resolve_memo_plaintexts()
-    }
-
-    /// Recomputes every [`Output::enc_ciphertext`] represented by memo
-    /// plaintext.
-    ///
-    /// This is a no-op for outputs that already carry encrypted ciphertext.
-    pub fn resolve_memo_plaintexts(&mut self) -> Result<(), ::orchard::pczt::ParseError> {
         for action in &mut self.actions {
+            action.resolve_cv_net()?;
             action
                 .output
                 .encrypt_ciphertext_from_memo(self.note_version, action.spend.nullifier)?;
@@ -1471,17 +1517,26 @@ impl Bundle {
     pub(crate) fn into_ironwood_parsed(
         self,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
-        self.into_parsed_with_version(BundleVersion::ironwood_v3())
+        self.into_parsed_inner(
+            BundleVersion::ironwood_v3(),
+            false,
+            AnchorParseMode::AllowMissing,
+        )
     }
 
-    /// Parses this bundle as an Ironwood-pool bundle for a preverified signing pass,
-    /// skipping each spend's `FullViewingKey` derivation. See
-    /// [`Bundle::into_parsed_with_version_preverified_for_signing`] for the invariant
-    /// callers must uphold.
+    /// Parses this bundle as an Ironwood-pool bundle for a preverified signing
+    /// pass, using a parse-only placeholder if the anchor has been redacted.
+    ///
+    /// Callers must preserve the logical anchor field when serializing back to
+    /// PCZT, because the placeholder is not the real anchor.
     pub(crate) fn into_ironwood_parsed_preverified_for_signing(
         self,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
-        self.into_parsed_with_version_preverified_for_signing(BundleVersion::ironwood_v3())
+        self.into_parsed_inner(
+            BundleVersion::ironwood_v3(),
+            true,
+            AnchorParseMode::AllowMissing,
+        )
     }
 
     /// Parses this bundle with the given bundle version, deriving each spend's
@@ -1490,11 +1545,14 @@ impl Bundle {
     /// Callers should prefer [`Bundle::resolve_fields`] before parsing, so
     /// derivations happen once for all uses. This method still resolves
     /// fields defensively for direct callers.
+    #[allow(dead_code)]
     pub(crate) fn into_parsed_with_version(
         self,
         bundle_version: BundleVersion,
+        tx_version: u32,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
-        self.into_parsed_inner(bundle_version, false)
+        let anchor_parse_mode = anchor_parse_mode(tx_version, !self.actions.is_empty());
+        self.into_parsed_inner(bundle_version, false, anchor_parse_mode)
     }
 
     /// Parses this bundle with the given bundle version for a preverified signing
@@ -1510,21 +1568,27 @@ impl Bundle {
     /// has `fvk: None`), so the result must not go to the Verifier check path or the
     /// Prover, and re-serializing it drops the wire `fvk`s (the low-level Signer
     /// restores them from a pre-parse snapshot).
+    #[allow(dead_code)]
     pub(crate) fn into_parsed_with_version_preverified_for_signing(
         self,
         bundle_version: BundleVersion,
+        tx_version: u32,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
-        self.into_parsed_inner(bundle_version, true)
+        let anchor_parse_mode = anchor_parse_mode(tx_version, !self.actions.is_empty());
+        self.into_parsed_inner(bundle_version, true, anchor_parse_mode)
     }
 
     /// The shared body of [`Bundle::into_parsed_with_version`] and
     /// [`Bundle::into_parsed_with_version_preverified_for_signing`]: `preverified`
     /// selects between the full parse and the preverified signing parse.
     fn into_parsed_inner(
-        self,
+        mut self,
         bundle_version: BundleVersion,
         preverified: bool,
+        anchor_parse_mode: AnchorParseMode,
     ) -> Result<orchard::pczt::Bundle, orchard::pczt::ParseError> {
+        self.resolve_fields()?;
+
         // We parse actions through a helper that is specifically `#[inline(never)]`.
         // This is because if this gets inlined in a loop (e.g. `.map(..).collect()`),
         // it could compile into a stack frame that is tens of KB deep.
@@ -1590,6 +1654,9 @@ impl Bundle {
                 .enc_ciphertext
                 .into_encrypted()
                 .ok_or(orchard::pczt::ParseError::InvalidEncCiphertext)?;
+            let cv_net = action
+                .cv_net
+                .ok_or(orchard::pczt::ParseError::InvalidValueCommitment)?;
 
             let output = orchard::pczt::Output::parse(
                 *spend.nullifier(),
@@ -1613,7 +1680,7 @@ impl Bundle {
                 action.output.proprietary,
             )?;
 
-            orchard::pczt::Action::parse(action.cv_net, spend, output, action.rcv)
+            orchard::pczt::Action::parse(cv_net, spend, output, action.rcv)
         }
 
         let note_version = self.note_version;
@@ -1621,19 +1688,41 @@ impl Bundle {
         for action in self.actions {
             actions.push(parse_action_inner(action, note_version, preverified)?);
         }
+        let anchor = match (self.anchor, anchor_parse_mode) {
+            (Some(anchor), _) => anchor,
+            (None, AnchorParseMode::Strict) => {
+                return Err(orchard::pczt::ParseError::InvalidAnchor);
+            }
+            (None, AnchorParseMode::AllowMissing) => DEFAULT_ANCHOR,
+        };
 
         orchard::pczt::Bundle::parse(
             actions,
             self.flags,
             bundle_version,
             self.value_sum,
-            self.anchor,
+            anchor,
             self.zkproof,
             self.bsk,
         )
     }
 
+    #[allow(dead_code)]
     pub(crate) fn serialize_from(bundle: orchard::pczt::Bundle) -> Self {
+        Self::serialize_from_with_anchor(bundle, None)
+    }
+
+    pub(crate) fn serialize_from_preserving_anchor(
+        bundle: orchard::pczt::Bundle,
+        anchor: Option<[u8; 32]>,
+    ) -> Self {
+        Self::serialize_from_with_anchor(bundle, Some(anchor))
+    }
+
+    fn serialize_from_with_anchor(
+        bundle: orchard::pczt::Bundle,
+        anchor_override: Option<Option<[u8; 32]>>,
+    ) -> Self {
         let note_version = bundle.bundle_version().note_version();
 
         assert!(
@@ -1652,7 +1741,7 @@ impl Bundle {
                 let output = action.output();
 
                 Action {
-                    cv_net: action.cv_net().to_bytes(),
+                    cv_net: Some(action.cv_net().to_bytes()),
                     spend: Spend {
                         nullifier: spend.nullifier().to_bytes(),
                         rk: spend.rk().into(),
@@ -1736,7 +1825,7 @@ impl Bundle {
             actions,
             flags: bundle.flag_byte(),
             value_sum,
-            anchor: bundle.anchor().to_bytes(),
+            anchor: anchor_override.unwrap_or_else(|| Some(bundle.anchor().to_bytes())),
             note_version,
             zkproof: bundle
                 .zkproof()
