@@ -69,6 +69,8 @@ pub struct SingleOutputChangeStrategy<R, I> {
     dust_output_policy: DustOutputPolicy,
     #[cfg(feature = "orchard")]
     unpadded_orchard_pool_bundles: bool,
+    #[cfg(zcash_unstable = "nu6.3")]
+    force_legacy_orchard_change: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -91,6 +93,8 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
             dust_output_policy,
             #[cfg(feature = "orchard")]
             unpadded_orchard_pool_bundles: false,
+            #[cfg(zcash_unstable = "nu6.3")]
+            force_legacy_orchard_change: false,
             meta_source: PhantomData,
         }
     }
@@ -107,6 +111,17 @@ impl<R, I> SingleOutputChangeStrategy<R, I> {
     #[cfg(feature = "orchard")]
     pub fn with_unpadded_orchard_pool_bundles(mut self) -> Self {
         self.unpadded_orchard_pool_bundles = true;
+        self
+    }
+
+    /// Requests legacy Orchard change instead of Ironwood change after NU6.3.
+    ///
+    /// This is intended for callers that explicitly build a transaction version
+    /// 5 PCZT for compatibility with signers that cannot parse v6 or Ironwood
+    /// bundle data.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn with_legacy_orchard_change(mut self) -> Self {
+        self.force_legacy_orchard_change = true;
         self
     }
 }
@@ -168,6 +183,11 @@ where
             ::orchard::builder::BundleType::DEFAULT
         };
 
+        // A requested legacy V5 build overrides the caller's Ironwood routing.
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let orchard_change_to_ironwood =
+            orchard_change_to_ironwood && !self.force_legacy_orchard_change;
+
         single_pool_output_balance(
             cfg,
             None,
@@ -199,6 +219,8 @@ pub struct MultiOutputChangeStrategy<R, I> {
     split_policy: SplitPolicy,
     #[cfg(feature = "orchard")]
     unpadded_orchard_pool_bundles: bool,
+    #[cfg(zcash_unstable = "nu6.3")]
+    force_legacy_orchard_change: bool,
     meta_source: PhantomData<I>,
 }
 
@@ -229,6 +251,8 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
             split_policy,
             #[cfg(feature = "orchard")]
             unpadded_orchard_pool_bundles: false,
+            #[cfg(zcash_unstable = "nu6.3")]
+            force_legacy_orchard_change: false,
             meta_source: PhantomData,
         }
     }
@@ -245,6 +269,17 @@ impl<R, I> MultiOutputChangeStrategy<R, I> {
     #[cfg(feature = "orchard")]
     pub fn with_unpadded_orchard_pool_bundles(mut self) -> Self {
         self.unpadded_orchard_pool_bundles = true;
+        self
+    }
+
+    /// Requests legacy Orchard change instead of Ironwood change after NU6.3.
+    ///
+    /// This is intended for callers that explicitly build a transaction version
+    /// 5 PCZT for compatibility with signers that cannot parse v6 or Ironwood
+    /// bundle data.
+    #[cfg(zcash_unstable = "nu6.3")]
+    pub fn with_legacy_orchard_change(mut self) -> Self {
+        self.force_legacy_orchard_change = true;
         self
     }
 }
@@ -310,6 +345,11 @@ where
         } else {
             ::orchard::builder::BundleType::DEFAULT
         };
+
+        // A requested legacy V5 build overrides the caller's Ironwood routing.
+        #[cfg(all(feature = "orchard", zcash_unstable = "nu6.3"))]
+        let orchard_change_to_ironwood =
+            orchard_change_to_ironwood && !self.force_legacy_orchard_change;
 
         single_pool_output_balance(
             cfg,
