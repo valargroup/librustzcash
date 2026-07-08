@@ -28,6 +28,7 @@ impl IoFinalizer {
     /// Finalizes the IO of the PCZT.
     pub fn finalize_io(self) -> Result<Pczt, Error> {
         let Self { pczt } = self;
+        let orig_ironwood = pczt.ironwood.clone();
 
         let has_orchard_actions = !pczt.orchard.actions.is_empty();
         let has_ironwood_actions = !pczt.ironwood.actions.is_empty();
@@ -108,7 +109,17 @@ impl IoFinalizer {
             transparent: crate::transparent::Bundle::serialize_from(transparent),
             sapling: crate::sapling::Bundle::serialize_from(sapling),
             orchard: crate::orchard::Bundle::serialize_from(orchard),
-            ironwood: crate::orchard::Bundle::serialize_from(ironwood),
+            // An action-less Ironwood bundle is skipped by shielded IO
+            // finalization above, so pass the original wire bundle through
+            // unchanged: re-serializing the parsed form would resolve its absent
+            // anchor to `Some([0; 32])`, breaking the canonical empty form that
+            // the v1 encoding and V5 extraction both require. Teststack-local
+            // carry until the upstream stack lands its own fix.
+            ironwood: if has_ironwood_actions {
+                crate::orchard::Bundle::serialize_from(ironwood)
+            } else {
+                orig_ironwood
+            },
         })
     }
 }
