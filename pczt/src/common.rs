@@ -57,6 +57,7 @@ pub struct Global {
     ///   for key identification) should check against this field for correctness.
     ///
     /// [SLIP 44]: https://github.com/satoshilabs/slips/blob/master/slip-0044.md
+    #[getset(get = "pub")]
     pub(crate) coin_type: u32,
 
     /// A bitfield for various transaction modification flags.
