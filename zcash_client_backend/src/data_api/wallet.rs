@@ -2817,7 +2817,9 @@ where
 /// The returned PCZT retains information that a general-purpose Signer may need,
 /// including full viewing keys, spend authorization randomizers, key derivation
 /// paths, output recovery keys, and user-facing addresses. Applications may apply
-/// additional redaction when they know their Signer's capabilities.
+/// additional redaction when they know their Signer's capabilities. In particular,
+/// [`redact_pczt_for_self_transfer_signer`] creates a smaller contribution view for
+/// Signers and wallet flows that satisfy its stricter contract.
 ///
 /// The caller must retain `pczt` and combine the Signer's contribution into that
 /// authoritative copy. The returned signer view omits wallet metadata and other
@@ -2875,6 +2877,153 @@ pub fn redact_pczt_for_signer(pczt: &pczt::Pczt) -> pczt::Pczt {
             redact_orchard_bundle(redactor, redact_v6_anchors);
         })
         .finish()
+}
+
+/// An error returned by [`redact_pczt_for_self_transfer_signer`].
+#[cfg(feature = "pczt")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SelfTransferSignerRedactionError {
+    /// A dummy spend still needs to be authorized by the IO Finalizer.
+    IoFinalizationRequired {
+        /// The pool containing the action.
+        pool: PoolType,
+        /// The action's index within its bundle.
+        action_index: usize,
+    },
+    /// An action has an existing spend authorization but is not known to be
+    /// zero-valued.
+    PreauthorizedSpendNotZeroValued {
+        /// The pool containing the action.
+        pool: PoolType,
+        /// The action's index within its bundle.
+        action_index: usize,
+        /// The input value carried by the PCZT, if present.
+        value: Option<u64>,
+    },
+}
+
+#[cfg(feature = "pczt")]
+impl std::fmt::Display for SelfTransferSignerRedactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SelfTransferSignerRedactionError::IoFinalizationRequired { pool, action_index } => {
+                write!(
+                    f,
+                    "{pool} action {action_index} must be authorized by the IO Finalizer before signer redaction"
+                )
+            }
+            SelfTransferSignerRedactionError::PreauthorizedSpendNotZeroValued {
+                pool,
+                action_index,
+                value,
+            } => write!(
+                f,
+                "{pool} action {action_index} has an existing spend authorization but is not known to be zero-valued (value: {value:?})"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "pczt")]
+impl std::error::Error for SelfTransferSignerRedactionError {}
+
+/// Creates a compact contribution view for a wallet self transfer Signer.
+///
+/// This starts with [`redact_pczt_for_signer`] and additionally removes every
+/// Orchard and Ironwood spend's full viewing key and existing authorization
+/// signature, and every output's outgoing cipher key (`ock`), ZIP 32 derivation,
+/// and user-facing address. It also removes `alpha` from zero-valued actions that
+/// were already authorized in `pczt`. Unsigned actions retain `alpha` so the Signer
+/// can authorize them.
+///
+/// This view is only suitable when the wallet has independently established that
+/// every Orchard and Ironwood output is controlled by the trusted account. In
+/// particular, no third-party payment intent may depend on the omitted user-facing
+/// address. The Signer must:
+///
+/// - derive and validate the relevant full viewing key from trusted account data;
+/// - reconstruct and authenticate self transfer outputs from trusted account keys
+///   and the retained note fields;
+/// - either derive the information needed to check `out_ciphertext` independently,
+///   or intentionally omit that check because the transported `ock` is unavailable;
+/// - treat actions without `alpha` as already authorized and not try to sign them;
+/// - resolve the fields compacted by [`redact_pczt_for_signer`]; and
+/// - return only the new Orchard-protocol spend authorization signatures it
+///   contributes.
+///
+/// This is intended for PCZTs returned by [`create_pczt_from_proposal`], which have
+/// already passed through [`pczt::roles::io_finalizer::IoFinalizer`]. The helper
+/// rejects a PCZT that still contains a dummy spending key. It also rejects an
+/// existing authorization for a spend that is not known to have value zero. This
+/// prevents a partially signed funded action from being treated as an
+/// already-authorized zero-valued action and having its `alpha` removed.
+///
+/// The caller must retain `pczt` and apply the Signer's returned signature
+/// contributions to that authoritative copy. Do not use this view with a
+/// general-purpose Signer that relies on any of the additionally omitted fields.
+#[cfg(feature = "pczt")]
+pub fn redact_pczt_for_self_transfer_signer(
+    pczt: &pczt::Pczt,
+) -> Result<pczt::Pczt, SelfTransferSignerRedactionError> {
+    fn authorized_zero_valued_action_indices(
+        bundle: &pczt::orchard::Bundle,
+        pool: PoolType,
+    ) -> Result<Vec<usize>, SelfTransferSignerRedactionError> {
+        let mut authorized_actions = vec![];
+        for (action_index, action) in bundle.actions().iter().enumerate() {
+            if action.spend().requires_io_finalization() {
+                return Err(SelfTransferSignerRedactionError::IoFinalizationRequired {
+                    pool,
+                    action_index,
+                });
+            }
+            if action.spend().spend_auth_sig().is_some() {
+                let value = *action.spend().value();
+                if value != Some(0) {
+                    return Err(
+                        SelfTransferSignerRedactionError::PreauthorizedSpendNotZeroValued {
+                            pool,
+                            action_index,
+                            value,
+                        },
+                    );
+                }
+                authorized_actions.push(action_index);
+            }
+        }
+        Ok(authorized_actions)
+    }
+
+    let orchard_authorized_actions =
+        authorized_zero_valued_action_indices(pczt.orchard(), PoolType::ORCHARD)?;
+    let ironwood_authorized_actions =
+        authorized_zero_valued_action_indices(pczt.ironwood(), PoolType::IRONWOOD)?;
+
+    fn redact_orchard_bundle(
+        mut redactor: pczt::roles::redactor::orchard::OrchardRedactor<'_>,
+        authorized_action_indices: &[usize],
+    ) {
+        redactor.redact_actions(|mut action| {
+            action.clear_spend_fvk();
+            action.clear_spend_auth_sig();
+            action.clear_output_ock();
+            action.clear_output_zip32_derivation();
+            action.clear_output_user_address();
+        });
+        for index in authorized_action_indices {
+            redactor.redact_action(*index, |mut action| action.clear_spend_alpha());
+        }
+    }
+
+    Ok(Redactor::new(redact_pczt_for_signer(pczt))
+        .redact_orchard_with(|redactor| {
+            redact_orchard_bundle(redactor, &orchard_authorized_actions);
+        })
+        .redact_ironwood_with(|redactor| {
+            redact_orchard_bundle(redactor, &ironwood_authorized_actions);
+        })
+        .finish())
 }
 
 /// Finalizes the given PCZT, and persists the transaction to the wallet database.

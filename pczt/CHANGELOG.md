@@ -14,6 +14,8 @@ workspace.
 - `pczt::roles::redactor::orchard::OrchardRedactor::redact_recomputable_fields`,
   behind the `orchard` feature, which removes the Orchard-protocol (Orchard and
   Ironwood) action fields that `pczt::orchard::Bundle::resolve_fields` can restore.
+- `pczt::orchard::Spend::value` and `Spend::requires_io_finalization`, which
+  expose the non-secret state needed for signer policy validation.
 
 ## [0.8.0-rc.1] - 2026-07-12
 
