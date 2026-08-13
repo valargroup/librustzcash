@@ -7,6 +7,12 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Added
+- Added a cancellable Tromp solver API with digit-boundary cancellation and pass counts.
+
+### Fixed
+- Reset all Tromp bucket counters before each pass so a cancelled pass cannot corrupt the next pass.
+
 ## [0.3.0] - 2026-04-23
 
 ### Changed
