@@ -7,6 +7,9 @@ and this library adheres to Rust's notion of
 
 ## [Unreleased]
 
+### Changed
+- Renamed the fork package to `cpu-equihash-solver`.
+
 ### Added
 - Added a cancellable Tromp solver API with digit-boundary cancellation and pass counts.
 
