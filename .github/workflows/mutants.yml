@@ -18,7 +18,7 @@ on:
         options:
           - all
           - eip681
-          - equihash
+          - cpu-equihash-solver
           - f4jumble
           - pczt
           - zcash_address
@@ -51,7 +51,7 @@ jobs:
       matrix:
         package:
           - eip681
-          - equihash
+          - cpu-equihash-solver
           - f4jumble
           - pczt
           - zcash_address
@@ -70,7 +70,7 @@ jobs:
         # For push/pull_request events, inputs.package is undefined, so default to 'all'
         exclude:
           - package: ${{ case((github.event.inputs.package || 'all') != 'all' && (github.event.inputs.package || 'all') != 'eip681',               'eip681',               'NONE') }}
-          - package: ${{ case((github.event.inputs.package || 'all') != 'all' && (github.event.inputs.package || 'all') != 'equihash',             'equihash',             'NONE') }}
+          - package: ${{ case((github.event.inputs.package || 'all') != 'all' && (github.event.inputs.package || 'all') != 'cpu-equihash-solver',  'cpu-equihash-solver',  'NONE') }}
           - package: ${{ case((github.event.inputs.package || 'all') != 'all' && (github.event.inputs.package || 'all') != 'f4jumble',             'f4jumble',             'NONE') }}
           - package: ${{ case((github.event.inputs.package || 'all') != 'all' && (github.event.inputs.package || 'all') != 'pczt',                 'pczt',                 'NONE') }}
           - package: ${{ case((github.event.inputs.package || 'all') != 'all' && (github.event.inputs.package || 'all') != 'zcash_address',        'zcash_address',        'NONE') }}
