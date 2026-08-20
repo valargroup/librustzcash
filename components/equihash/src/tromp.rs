@@ -631,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_panic_drops_the_solver() {
+    fn cancellation_callback_panic_drops_the_solver() {
         let live_solvers_before = LIVE_SOLVERS.with(std::cell::Cell::get);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
@@ -645,6 +645,30 @@ mod tests {
 
                     false
                 },
+            );
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(LIVE_SOLVERS.with(std::cell::Cell::get), live_solvers_before);
+    }
+
+    #[test]
+    fn nonce_callback_panic_drops_the_solver() {
+        let live_solvers_before = LIVE_SOLVERS.with(std::cell::Cell::get);
+        let mut nonce_calls = 0;
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = solve_200_9_cancellable(
+                b"Equihash is an asymmetric PoW based on the Generalised Birthday problem.",
+                || {
+                    nonce_calls += 1;
+                    if nonce_calls == 1 {
+                        Some([0; 32])
+                    } else {
+                        panic!("test nonce callback panic");
+                    }
+                },
+                |_| false,
             );
         }));
 
