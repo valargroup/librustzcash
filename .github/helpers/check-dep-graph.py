@@ -7,7 +7,7 @@ import sys
 CRATES_IN_GRAPH = set([
     # ./components
     'eip681',
-    'equihash',
+    'cpu-equihash-solver',
     'f4jumble',
     'zcash_address',
     'zcash_encoding',

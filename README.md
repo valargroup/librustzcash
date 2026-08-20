@@ -37,7 +37,7 @@ graph TB
         end
 
         subgraph standalone_components
-            equihash
+            cpu-equihash-solver
             f4jumble
             zcash_encoding
         end
@@ -111,7 +111,7 @@ graph TB
     %% zcash_address --> zcash_encoding
     zcash_protocol --> zcash_encoding
 
-    zcash_primitives --> equihash
+    zcash_primitives --> cpu-equihash-solver
     zcash_address --> f4jumble
 
     %% zcash_client_backend --> orchard
@@ -153,7 +153,7 @@ graph TB
     librustzcash --> shielded_protocols
     shielded_protocols --> protocol_components
 
-    click equihash "https://docs.rs/equihash/" _blank
+    click cpu-equihash-solver "https://docs.rs/cpu-equihash-solver/" _blank
     click f4jumble "https://docs.rs/f4jumble/" _blank
     click orchard "https://docs.rs/orchard/" _blank
     click pczt "https://docs.rs/pczt/" _blank
@@ -225,7 +225,7 @@ graph TB
 
 * `f4jumble`: Encoding for Unified addresses
 * `zcash_encoding`: Bitcoin-derived transaction encoding utilities for Zcash
-* `equihash`: Proof-of-work protocol implementation
+* `cpu-equihash-solver`: Proof-of-work protocol implementation
 
 
 ## Security Warnings

@@ -831,6 +831,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpu-equihash-solver"
+version = "0.3.0"
+dependencies = [
+ "blake2b_simd",
+ "cc",
+ "corez",
+ "document-features",
+ "hex",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1588,17 +1599,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
-]
-
-[[package]]
-name = "equihash"
-version = "0.3.0"
-dependencies = [
- "blake2b_simd",
- "cc",
- "corez",
- "document-features",
- "hex",
 ]
 
 [[package]]
@@ -7340,10 +7340,10 @@ dependencies = [
  "block-buffer 0.11.0-rc.3",
  "chacha20poly1305",
  "corez",
+ "cpu-equihash-solver",
  "criterion 0.5.1",
  "crypto-common 0.2.0-rc.1",
  "document-features",
- "equihash",
  "ff",
  "hex",
  "incrementalmerkletree",

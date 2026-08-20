@@ -1,5 +1,5 @@
 [package]
-name = "equihash"
+name = "cpu-equihash-solver"
 description = "The Equihash Proof-of-Work function"
 version = "0.3.0"
 authors = ["Jack Grigg <jack@z.cash>"]
