@@ -225,7 +225,6 @@ impl TxVersion {
             BranchId::Nu6_1 => TxVersion::V5,
             BranchId::Nu6_2 => TxVersion::V5,
             BranchId::Nu6_3 => TxVersion::V6,
-            #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => TxVersion::V6,
             #[cfg(zcash_unstable = "nutachyon")]
             BranchId::NuTachyon => TxVersion::V7,
@@ -244,7 +243,6 @@ impl TxVersion {
                 Sprout | Overwinter => false,
                 Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
                 Nu6_3 => true,
-                #[cfg(zcash_unstable = "nu7")]
                 Nu7 => false, // ZIP 2003
                 #[cfg(zcash_unstable = "nutachyon")]
                 NuTachyon => false,
@@ -253,7 +251,6 @@ impl TxVersion {
                 Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => false,
                 Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
                 Nu6_3 => true,
-                #[cfg(zcash_unstable = "nu7")]
                 Nu7 => true,
                 #[cfg(zcash_unstable = "nutachyon")]
                 NuTachyon => true,
@@ -262,8 +259,7 @@ impl TxVersion {
                 Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6
                 | Nu6_1 | Nu6_2 => false,
                 Nu6_3 => true, // Ironwood / NU6.3
-                #[cfg(zcash_unstable = "nu7")]
-                Nu7 => true, // ZIP 230 or ZIP 248, whichever is chosen for activation
+                Nu7 => true,   // ZIP 230 or ZIP 248, whichever is chosen for activation
                 #[cfg(zcash_unstable = "nutachyon")]
                 NuTachyon => true,
             },
@@ -1302,14 +1298,13 @@ pub mod testing {
             BranchId::Nu6_1 => Just(TxVersion::V5).boxed(),
             BranchId::Nu6_2 => Just(TxVersion::V5).boxed(),
             BranchId::Nu6_3 => Just(TxVersion::V6).boxed(),
-            #[cfg(zcash_unstable = "nu7")]
             BranchId::Nu7 => Just(TxVersion::V6).boxed(),
             #[cfg(zcash_unstable = "nutachyon")]
             BranchId::NuTachyon => Just(TxVersion::V7).boxed(),
         }
     }
 
-    #[cfg(all(zcash_unstable = "nu7", not(feature = "zip-233")))]
+    #[cfg(not(all(zcash_unstable = "nu7", feature = "zip-233")))]
     prop_compose! {
         pub fn arb_txdata(consensus_branch_id: BranchId)(
             version in arb_tx_version(consensus_branch_id)
@@ -1356,33 +1351,6 @@ pub mod testing {
                 lock_time,
                 expiry_height: expiry_height.into(),
                 zip233_amount: Zatoshis::from_u64(zip233_amount).unwrap(),
-                transparent_bundle,
-                sprout_bundle: None,
-                sapling_bundle,
-                orchard_bundle,
-                ironwood_bundle,
-            }
-        }
-    }
-
-    #[cfg(not(zcash_unstable = "nu7"))]
-    prop_compose! {
-        pub fn arb_txdata(consensus_branch_id: BranchId)(
-            version in arb_tx_version(consensus_branch_id)
-        )(
-            lock_time in any::<u32>(),
-            expiry_height in any::<u32>(),
-            transparent_bundle in transparent::arb_bundle(),
-            sapling_bundle in sapling::arb_bundle_for_version(version),
-            orchard_bundle in orchard::arb_bundle_for_version(version),
-            ironwood_bundle in orchard::arb_ironwood_bundle_for_version(version),
-            version in Just(version),
-        ) -> TransactionData<Authorized> {
-            TransactionData {
-                version,
-                consensus_branch_id,
-                lock_time,
-                expiry_height: expiry_height.into(),
                 transparent_bundle,
                 sprout_bundle: None,
                 sapling_bundle,

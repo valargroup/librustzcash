@@ -10,6 +10,18 @@ workspace.
 
 ## [Unreleased]
 
+### Added
+- `zcash_protocol::consensus::{NetworkUpgrade::Nu7, BranchId::Nu7}` and
+  `zcash_protocol::local_consensus::LocalNetwork::nu7` are now available
+  without the `--cfg zcash_unstable="nu7"` configuration flag. Mainnet and
+  Testnet have no NU7 activation height, so `BranchId::for_height` returns
+  `BranchId::Nu7` only for a `LocalNetwork` or other `Parameters`
+  implementation that sets one.
+
+### Changed
+- `BranchId::Nu7` now maps to and from the consensus branch ID `0x77190AD8`
+  (was the placeholder `0xFFFFFFFF`).
+
 ## [0.10.6] - 2026-09-04
 
 ### Added
