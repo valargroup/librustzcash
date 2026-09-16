@@ -40,6 +40,30 @@ use crate::transaction::sighash_v6::v6_signature_hash;
 pub mod data;
 
 #[test]
+#[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
+fn zip233_header_extension_is_branch_specific() {
+    let mut header = Vec::new();
+    TxVersion::V6.write(&mut header).unwrap();
+    header.extend_from_slice(&u32::from(BranchId::Nu6_3).to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    // Empty transparent inputs/outputs, Sapling spends/outputs, Orchard, and Ironwood.
+    let mut encoded = header.clone();
+    encoded.extend_from_slice(&[0; 6]);
+    let tx = Transaction::read(&encoded[..], BranchId::Nu6_3).unwrap();
+    let mut roundtrip = Vec::new();
+    tx.write(&mut roundtrip).unwrap();
+    assert_eq!(roundtrip, encoded);
+    let expected = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(b"ZTxIdHeadersHash")
+        .hash(&header);
+    assert_eq!(tx.digest(TxIdDigester).header_digest, expected);
+    assert!(!TxVersion::V6.has_zip233(BranchId::Nu6_3));
+    assert!(TxVersion::V6.has_zip233(BranchId::Nu7));
+}
+
+#[test]
 fn tx_read_write() {
     let data = &self::data::tx_read_write::TX_READ_WRITE;
     let tx = Transaction::read(&data[..], BranchId::Canopy).unwrap();
@@ -845,7 +869,7 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
         txo.ironwood_bundle.as_ref().map(|v| *v.value_balance())
     );
     #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-    if tx.version.has_zip233() {
+    if tx.version.has_zip233(tx.consensus_branch_id) {
         prop_assert_eq!(tx.zip233_amount, txo.zip233_amount);
     }
     Ok(())
@@ -907,7 +931,6 @@ proptest! {
     }
 }
 
-#[cfg(all(test, not(all(zcash_unstable = "nu7", feature = "zip-233"))))]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
     #[test]

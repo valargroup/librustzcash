@@ -203,13 +203,21 @@ impl TxVersion {
     }
 
     #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-    pub fn has_zip233(&self) -> bool {
-        match self {
-            TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => false,
-            TxVersion::V6 => true,
+    /// Returns whether this version and consensus branch include the ZIP 233 amount.
+    pub fn has_zip233(&self, consensus_branch_id: BranchId) -> bool {
+        let active = match consensus_branch_id {
+            BranchId::Nu7 => true,
             #[cfg(zcash_unstable = "nutachyon")]
-            TxVersion::V7 => true,
-        }
+            BranchId::NuTachyon => true,
+            _ => false,
+        };
+        active
+            && match self {
+                TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => false,
+                TxVersion::V6 => true,
+                #[cfg(zcash_unstable = "nutachyon")]
+                TxVersion::V7 => true,
+            }
     }
 
     /// Suggests the transaction version that should be used in the given Zcash epoch.
@@ -1031,7 +1039,11 @@ impl Transaction {
             lock_time,
             expiry_height,
             #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-            zip233_amount: Self::read_zip233_amount(&mut reader)?,
+            zip233_amount: if TxVersion::V6.has_zip233(consensus_branch_id) {
+                Self::read_zip233_amount(&mut reader)?
+            } else {
+                Zatoshis::ZERO
+            },
         })
     }
 
@@ -1158,7 +1170,9 @@ impl Transaction {
         writer.write_u32_le(u32::from(self.expiry_height))?;
 
         #[cfg(all(zcash_unstable = "nu7", feature = "zip-233"))]
-        writer.write_u64_le(self.zip233_amount.into())?;
+        if self.version.has_zip233(self.consensus_branch_id) {
+            writer.write_u64_le(self.zip233_amount.into())?;
+        }
         Ok(())
     }
 
@@ -1350,7 +1364,11 @@ pub mod testing {
                 consensus_branch_id,
                 lock_time,
                 expiry_height: expiry_height.into(),
-                zip233_amount: Zatoshis::from_u64(zip233_amount).unwrap(),
+                zip233_amount: if version.has_zip233(consensus_branch_id) {
+                    Zatoshis::from_u64(zip233_amount).unwrap()
+                } else {
+                    Zatoshis::ZERO
+                },
                 transparent_bundle,
                 sprout_bundle: None,
                 sapling_bundle,
