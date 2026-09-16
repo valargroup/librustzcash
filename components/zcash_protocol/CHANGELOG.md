@@ -19,6 +19,8 @@ workspace.
   implementation that sets one.
 
 ### Changed
+- `BranchId::height_bounds` and `height_range` now match `for_height` for local
+  schedules with skipped or out-of-order upgrades.
 - `BranchId::Nu7` now maps to and from the consensus branch ID `0x77190AD8`
   (was the placeholder `0xFFFFFFFF`).
 

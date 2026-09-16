@@ -857,58 +857,20 @@ impl BranchId {
         &self,
         params: &P,
     ) -> Option<(BlockHeight, Option<BlockHeight>)> {
-        match self {
-            BranchId::Sprout => params
-                .activation_height(NetworkUpgrade::Overwinter)
-                .map(|upper| (BlockHeight(0), Some(upper))),
-            BranchId::Overwinter => params
-                .activation_height(NetworkUpgrade::Overwinter)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Sapling))),
-            BranchId::Sapling => params
-                .activation_height(NetworkUpgrade::Sapling)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Blossom))),
-            BranchId::Blossom => params
-                .activation_height(NetworkUpgrade::Blossom)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Heartwood))),
-            BranchId::Heartwood => params
-                .activation_height(NetworkUpgrade::Heartwood)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Canopy))),
-            BranchId::Canopy => params
-                .activation_height(NetworkUpgrade::Canopy)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Nu5))),
-            BranchId::Nu5 => params
-                .activation_height(NetworkUpgrade::Nu5)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Nu6))),
-            BranchId::Nu6 => params
-                .activation_height(NetworkUpgrade::Nu6)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Nu6_1))),
-            BranchId::Nu6_1 => params
-                .activation_height(NetworkUpgrade::Nu6_1)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Nu6_2))),
-            BranchId::Nu6_2 => params
-                .activation_height(NetworkUpgrade::Nu6_2)
-                .map(|lower| (lower, params.activation_height(NetworkUpgrade::Nu6_3))),
-            BranchId::Nu6_3 => params
-                .activation_height(NetworkUpgrade::Nu6_3)
-                .map(|lower| {
-                    #[cfg(zcash_unstable = "nutachyon")]
-                    let nu_tachyon = params.activation_height(NetworkUpgrade::NuTachyon);
-                    #[cfg(not(zcash_unstable = "nutachyon"))]
-                    let nu_tachyon = None;
-                    let upper = params.activation_height(NetworkUpgrade::Nu7).or(nu_tachyon);
-                    (lower, upper)
-                }),
-            BranchId::Nu7 => params.activation_height(NetworkUpgrade::Nu7).map(|lower| {
-                #[cfg(zcash_unstable = "nutachyon")]
-                let upper = params.activation_height(NetworkUpgrade::NuTachyon);
-                #[cfg(not(zcash_unstable = "nutachyon"))]
-                let upper = None;
-                (lower, upper)
-            }),
-            #[cfg(zcash_unstable = "nutachyon")]
-            BranchId::NuTachyon => params
-                .activation_height(NetworkUpgrade::NuTachyon)
-                .map(|lower| (lower, None)),
+        let mut later = UPGRADES_IN_ORDER.iter().copied();
+        let lower = if *self == BranchId::Sprout {
+            BlockHeight(0)
+        } else {
+            let upgrade = later.find(|upgrade| upgrade.branch_id() == *self)?;
+            params.activation_height(upgrade)?
+        };
+        let upper = later
+            .filter_map(|upgrade| params.activation_height(upgrade))
+            .min();
+        if upper.is_some_and(|upper| upper <= lower) {
+            None
+        } else {
+            Some((lower, upper))
         }
     }
 
@@ -1064,6 +1026,45 @@ mod tests {
     use super::{
         BlockHeight, BranchId, MAIN_NETWORK, NetworkUpgrade, Parameters, UPGRADES_IN_ORDER,
     };
+
+    #[test]
+    #[cfg(feature = "local-consensus")]
+    fn local_epoch_bounds_match_branch_selection() {
+        use crate::local_consensus::LocalNetwork;
+        for nu6_3 in [None, Some(BlockHeight(10)), Some(BlockHeight(30))] {
+            let network = LocalNetwork {
+                overwinter: None,
+                sapling: None,
+                blossom: None,
+                heartwood: None,
+                canopy: None,
+                nu5: None,
+                nu6: None,
+                nu6_1: None,
+                nu6_2: Some(BlockHeight(5)),
+                nu6_3,
+                nu7: Some(BlockHeight(20)),
+                #[cfg(zcash_unstable = "nutachyon")]
+                nu_tachyon: Some(BlockHeight(15)),
+            };
+            for branch in core::iter::once(BranchId::Sprout)
+                .chain(UPGRADES_IN_ORDER.iter().map(|upgrade| upgrade.branch_id()))
+            {
+                for height in (0..40).map(BlockHeight) {
+                    let contains = branch
+                        .height_bounds(&network)
+                        .is_some_and(|(lower, upper)| {
+                            height >= lower && upper.is_none_or(|upper| height < upper)
+                        });
+                    assert_eq!(
+                        contains,
+                        BranchId::for_height(&network, height) == branch,
+                        "branch {branch:?}, height {height:?}, network {network:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn nu_ordering() {
